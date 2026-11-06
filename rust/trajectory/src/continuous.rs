@@ -451,9 +451,7 @@ impl AnalyticMoveSpan {
                 },
                 None => {
                     let (s, velocity, acceleration, jerk) = self.tangential_state(t);
-                    let heading = segment.heading_at(s);
-                    let dheading = segment.dheading_ds(s);
-                    let d2heading = segment.d2heading_ds2(s);
+                    let [heading, dheading, d2heading] = segment.heading_frame_at(s);
                     Pvaj {
                         position: segment.point_at(s)[axis],
                         velocity: velocity * heading[axis],

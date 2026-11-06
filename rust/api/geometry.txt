@@ -204,6 +204,7 @@ impl geometry::path::lowering::PositionProfile for geometry::path::arc::Arc
 pub fn geometry::path::arc::Arc::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::arc::Arc::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::arc::Arc::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::arc::Arc::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::profile::CurvatureProfile for geometry::path::arc::Arc
 pub fn geometry::path::arc::Arc::dkappa_ds(&self, f64) -> f64
@@ -225,6 +226,7 @@ impl geometry::path::lowering::PositionProfile for geometry::path::clothoid::Clo
 pub fn geometry::path::clothoid::Clothoid::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::clothoid::Clothoid::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::clothoid::Clothoid::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::clothoid::Clothoid::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::profile::CurvatureProfile for geometry::path::clothoid::Clothoid
 pub fn geometry::path::clothoid::Clothoid::dkappa_ds(&self, f64) -> f64
@@ -243,6 +245,7 @@ impl geometry::path::lowering::PositionProfile for geometry::path::line::Line
 pub fn geometry::path::line::Line::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::line::Line::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::line::Line::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::line::Line::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::profile::CurvatureProfile for geometry::path::line::Line
 pub fn geometry::path::line::Line::dkappa_ds(&self, f64) -> f64
@@ -255,26 +258,31 @@ pub trait geometry::path::lowering::PositionProfile
 pub fn geometry::path::lowering::PositionProfile::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::lowering::PositionProfile::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::lowering::PositionProfile::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::lowering::PositionProfile::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::lowering::PositionProfile::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::lowering::PositionProfile for geometry::path::Segment
 pub fn geometry::path::Segment::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::Segment::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::Segment::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::Segment::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::Segment::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::lowering::PositionProfile for geometry::path::arc::Arc
 pub fn geometry::path::arc::Arc::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::arc::Arc::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::arc::Arc::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::arc::Arc::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::lowering::PositionProfile for geometry::path::clothoid::Clothoid
 pub fn geometry::path::clothoid::Clothoid::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::clothoid::Clothoid::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::clothoid::Clothoid::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::clothoid::Clothoid::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::lowering::PositionProfile for geometry::path::line::Line
 pub fn geometry::path::line::Line::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::line::Line::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::line::Line::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::line::Line::point_at(&self, f64) -> [f64; 3]
 pub mod geometry::path::profile
 pub trait geometry::path::profile::CurvatureProfile
@@ -321,6 +329,7 @@ impl geometry::path::lowering::PositionProfile for geometry::path::Segment
 pub fn geometry::path::Segment::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::Segment::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::Segment::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::Segment::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::Segment::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::profile::CurvatureProfile for geometry::path::Segment
 pub fn geometry::path::Segment::dkappa_ds(&self, f64) -> f64
@@ -341,6 +350,7 @@ impl geometry::path::lowering::PositionProfile for geometry::path::arc::Arc
 pub fn geometry::path::arc::Arc::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::arc::Arc::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::arc::Arc::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::arc::Arc::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::arc::Arc::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::profile::CurvatureProfile for geometry::path::arc::Arc
 pub fn geometry::path::arc::Arc::dkappa_ds(&self, f64) -> f64
@@ -365,6 +375,7 @@ impl geometry::path::lowering::PositionProfile for geometry::path::clothoid::Clo
 pub fn geometry::path::clothoid::Clothoid::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::clothoid::Clothoid::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::clothoid::Clothoid::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::clothoid::Clothoid::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::clothoid::Clothoid::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::profile::CurvatureProfile for geometry::path::clothoid::Clothoid
 pub fn geometry::path::clothoid::Clothoid::dkappa_ds(&self, f64) -> f64
@@ -382,6 +393,7 @@ impl geometry::path::lowering::PositionProfile for geometry::path::line::Line
 pub fn geometry::path::line::Line::d2heading_ds2(&self, f64) -> [f64; 3]
 pub fn geometry::path::line::Line::dheading_ds(&self, f64) -> [f64; 3]
 pub fn geometry::path::line::Line::heading_at(&self, f64) -> [f64; 3]
+pub fn geometry::path::line::Line::heading_frame_at(&self, f64) -> [[f64; 3]; 3]
 pub fn geometry::path::line::Line::point_at(&self, f64) -> [f64; 3]
 impl geometry::path::profile::CurvatureProfile for geometry::path::line::Line
 pub fn geometry::path::line::Line::dkappa_ds(&self, f64) -> f64
