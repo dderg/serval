@@ -1,19 +1,19 @@
 {
   "slice_lines": 1000,
-  "commit": "77cf41c165475a07ae4edf8b139b1f8e052f1719",
-  "reason": "Ratchet to main 77cf41c16 (after #815, #816 and #817) for the 2026-11-06 Pi re-check, which re-pins the calibration commit here and adds #804's pair, #815's parent and #817's parent as calibration points; Ir shrank 11-35 % since b04c051a8.",
+  "commit": "a4cc62f503d3895ba8383a80e2533195c9e3594c",
+  "reason": "the reachable speed plans trident_kernel's gate slice 7.8 % faster; the faster plan costs +4.6 % Ir; 2-core shortfall pinned to #836, Pi 3-core 2.34x",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 13210634966,
-      "stream_secs": 6.004
+      "ir": 12729386202,
+      "stream_secs": 5.807
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 12038912179,
-      "stream_secs": 5.75
+      "ir": 11364354667,
+      "stream_secs": 5.751
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 19651406347,
-      "stream_secs": 4.624
+      "ir": 20560367963,
+      "stream_secs": 4.305
     }
   },
   "pi_calibration": {
