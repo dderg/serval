@@ -17,9 +17,9 @@ use crate::shaper::taylor::{self, Ball, TaylorModel};
 use geometry::kept_floor;
 
 use super::{
-    AdvanceValley, FALL_TO_REST, KERNEL_HALF_VARIANCE, RISE_FROM_REST, RatioSmoothing,
-    SMOOTHED_HALF_SQUARE, SMOOTHED_RAMP, SMOOTHERSTEP, SPAN_LOOKUP_SLACK_MM, Seam, SeamTable,
-    WidthField,
+    AdvanceValley, ClusterWindow, FALL_TO_REST, KERNEL_HALF_VARIANCE, RISE_FROM_REST,
+    RatioSmoothing, SMOOTHED_HALF_SQUARE, SMOOTHED_RAMP, SMOOTHERSTEP, SPAN_LOOKUP_SLACK_MM, Seam,
+    SeamCluster, SeamView, WidthField,
 };
 
 /// `C(n, k)` for the moments' expansions about a window's centre.
@@ -631,19 +631,25 @@ impl RatioSmoothing {
         s: &TaylorModel,
         reach: PathReach,
     ) -> Option<ModelJet> {
-        let seams = self.seam_table(table);
-        let steps = self.step_models(seams, s, reach);
-        Some(self.slope_model(seams, s, reach)?.add(&steps))
+        let table = self.seam_table(table);
+        let (lo, hi) = reach.span();
+        let widest = if self.width.nodes.is_empty() {
+            0.0
+        } else {
+            self.width.bounds(lo, hi).0
+        };
+        let moving = table.moving_view(&self.width, (lo - widest, hi + widest));
+        table
+            .clusters_reaching(&self.width, (lo, hi))
+            .try_fold(self.slope_model(&moving, s, reach)?, |total, cluster| {
+                Some(total.add(&cluster_model(&cluster, s, reach)?))
+            })
     }
 
-    /// The slope's share of the correction ([`SeamTable::slope_correction`])
-    /// on the model `s` of the path.
-    fn slope_model(
-        &self,
-        seams: &SeamTable,
-        s: &TaylorModel,
-        reach: PathReach,
-    ) -> Option<ModelJet> {
+    /// The moving window's share of the correction ([`super::slope_correction`])
+    /// of the table `seams` holds about the reach on the model `s` of the
+    /// path.
+    fn slope_model(&self, seams: &SeamView, s: &TaylorModel, reach: PathReach) -> Option<ModelJet> {
         if let Some(formula) = self.correction_formula(seams, reach) {
             return self.correction_by(seams, formula, s);
         }
@@ -659,36 +665,11 @@ impl RatioSmoothing {
         Some(base)
     }
 
-    /// What the ratio steps whose own windows reach into `reach` add to the
-    /// correction on the model `s` of the path
-    /// ([`SeamTable::step_corrections`]): inside a step's window a
-    /// polynomial in its distance from the step on either side of it,
-    /// nothing outside. A reach across the step or a window edge reads each
-    /// formula it spans, the first widened by how far the others depart
-    /// from it.
-    fn step_models(&self, seams: &SeamTable, s: &TaylorModel, reach: PathReach) -> ModelJet {
-        let (lo, hi) = reach.span();
-        seams
-            .steps_reaching(&self.width, (lo, hi))
-            .fold(ModelJet::zero(), |total, (seam, h)| {
-                let sides = [
-                    (lo <= seam.s - h || hi >= seam.s + h).then(ModelJet::zero),
-                    (lo < seam.s).then(|| step_side_model(&seam, h, s, false)),
-                    (hi >= seam.s).then(|| step_side_model(&seam, h, s, true)),
-                ];
-                let mut read = sides.into_iter().flatten();
-                let first = read
-                    .next()
-                    .expect("a step reaching the reach reads a formula there");
-                total.add(&read.fold(first, |hull, other| hull.widened_by(&other)))
-            })
-    }
-
     /// Every formula a reach too narrow to place its bends in reads, one per
     /// float.
     fn narrow_formulas(
         &self,
-        seams: &SeamTable,
+        seams: &SeamView,
         reach: PathReach,
     ) -> Option<Vec<CorrectionFormula>> {
         let mut formulas: Vec<CorrectionFormula> = Vec::new();
@@ -705,7 +686,7 @@ impl RatioSmoothing {
     /// `formula`.
     fn correction_by(
         &self,
-        seams: &SeamTable,
+        seams: &SeamView,
         formula: CorrectionFormula,
         s: &TaylorModel,
     ) -> Option<ModelJet> {
@@ -757,8 +738,8 @@ impl RatioSmoothing {
 
     /// The formula of the correction every point of `reach` reads; `None`
     /// where its ends read different ones.
-    fn correction_formula(&self, seams: &SeamTable, reach: PathReach) -> Option<CorrectionFormula> {
-        if seams.is_inert() {
+    fn correction_formula(&self, seams: &SeamView, reach: PathReach) -> Option<CorrectionFormula> {
+        if seams.is_flat() {
             return Some(CorrectionFormula::Zero);
         }
         let read = self.correction_read_points(reach);
@@ -797,10 +778,10 @@ impl RatioSmoothing {
     /// interval.
     fn formulas_across_rest(
         &self,
-        seams: &SeamTable,
+        seams: &SeamView,
         reach: PathReach,
     ) -> Option<Vec<CorrectionFormula>> {
-        if seams.is_inert() {
+        if seams.is_flat() {
             return None;
         }
         let read = self.correction_read_points(reach);
@@ -832,7 +813,7 @@ impl RatioSmoothing {
     /// where its ends' windows differ.
     fn smoothed_formula(
         &self,
-        table: &SeamTable,
+        table: &SeamView,
         reach: (f64, f64),
         (h_lo, h_hi): (f64, f64),
         interval: impl FnOnce() -> Option<WidthInterval>,
@@ -840,9 +821,7 @@ impl RatioSmoothing {
         let slope_left_of = |first: usize| {
             first
                 .checked_sub(1)
-                .map_or(table.base_slope.unwrap_or(0.0), |last| {
-                    table.seams[last].slope_after
-                })
+                .map_or(table.slope_before, |last| table.seams[last].slope_after)
         };
         let first = |at: f64, h: f64| table.seams.partition_point(|seam| seam.s <= at - h);
         let past = |at: f64, h: f64| table.seams.partition_point(|seam| seam.s < at + h);
@@ -872,7 +851,7 @@ impl RatioSmoothing {
     /// distance from `centre`; `None` for no correction.
     fn correction_polynomials(
         &self,
-        table: &SeamTable,
+        table: &SeamView,
         formula: CorrectionFormula,
         centre: f64,
     ) -> Option<CorrectionPolynomials> {
@@ -1053,4 +1032,200 @@ fn step_side_model(seam: &Seam, h: f64, s: &TaylorModel, past: bool) -> ModelJet
         d2: derivative(&[2.0 * a2, 6.0 * a3, 12.0 * a4], 2),
         d3: derivative(&[6.0 * a3, 24.0 * a4], 3),
     }
+}
+
+/// One cluster's stationary share of the correction on the model `s` of
+/// the path, `reach` its range: the formula of every window the reach reads — at its read
+/// points, at each float a seam enters or leaves the window or passes the
+/// point, and between those — the first widened by how far the others
+/// depart from it.
+fn cluster_model(cluster: &SeamCluster, s: &TaylorModel, reach: PathReach) -> Option<ModelJet> {
+    let (lo, hi) = reach.span();
+    let mut cuts: Vec<f64> = cluster
+        .seams
+        .iter()
+        .flat_map(|seam| {
+            let [enters, leaves] = cluster.window_edges(seam.s);
+            [enters, seam.s, leaves]
+        })
+        .filter(|&cut| cut > lo && cut < hi)
+        .collect();
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let (read_lo, read_hi) = reach.read_points();
+    let bounds: Vec<f64> = std::iter::once(read_lo)
+        .chain(cuts.iter().copied())
+        .chain(std::iter::once(read_hi))
+        .collect();
+    let mut windows: Vec<ClusterWindow> = Vec::with_capacity(2 * bounds.len());
+    let points = bounds
+        .iter()
+        .copied()
+        .chain(bounds.windows(2).map(|pair| 0.5 * (pair[0] + pair[1])));
+    for at in points {
+        let window = cluster.window_at(at);
+        if !windows.contains(&window) {
+            windows.push(window);
+        }
+    }
+    let (first, others) = windows.split_first()?;
+    let mut model = window_model(cluster, *first, s)?;
+    for &other in others {
+        model = model.widened_by(&window_model(cluster, other, s)?);
+    }
+    Some(model)
+}
+
+/// A cluster's stationary correction by the window `window` on the model
+/// `s` of the path: its slopes' ([`slope_window_model`]) and that of each
+/// ratio step inside ([`step_side_model`]).
+fn window_model(cluster: &SeamCluster, window: ClusterWindow, s: &TaylorModel) -> Option<ModelJet> {
+    let steps = cluster.seams[window.first..window.past]
+        .iter()
+        .enumerate()
+        .filter(|(_, seam)| seam.step != 0.0)
+        .fold(ModelJet::zero(), |total, (index, seam)| {
+            total.add(&step_side_model(
+                seam,
+                cluster.width,
+                s,
+                window.first + index < window.behind,
+            ))
+        });
+    Some(slope_window_model(cluster, window, s)?.add(&steps))
+}
+
+/// The slope's share of a cluster's correction by `window`
+/// ([`super::cluster_slope_correction`]) on the model `s` of the path.
+fn slope_window_model(
+    cluster: &SeamCluster,
+    window: ClusterWindow,
+    s: &TaylorModel,
+) -> Option<ModelJet> {
+    let (centre, radius) = s.spread();
+    let Some(polynomials) = slope_polynomials(cluster, window, centre) else {
+        return Some(ModelJet::zero());
+    };
+    let series = polynomials
+        .series(Lean {
+            mid: 0.0,
+            at: 0.0,
+            over: radius,
+        })?
+        .map(Lean::sealed);
+    let at_centre = series.map(|[at, _]| at);
+    let over_reach = series.map(|[_, over]| over);
+    let delta = s.add_ball(Ball::exact(-centre));
+    let mut powers = [TaylorModel::constant(Ball::exact(1.0)); SERIES_DEGREE + 1];
+    let mut reach_powers = [1.0; SERIES_DEGREE + 2];
+    for k in 1..powers.len() {
+        powers[k] = powers[k - 1].mul(&delta);
+    }
+    for k in 1..reach_powers.len() {
+        reach_powers[k] = taylor::upper(reach_powers[k - 1] * radius);
+    }
+    let derivative = |order: usize| {
+        let falling = |power: usize| ((power + 1)..=(power + order)).product::<usize>() as f64;
+        let mut rounding = 0.0;
+        let mut model = TaylorModel::constant(Ball::exact(0.0));
+        for (power, model_power) in powers.iter().enumerate() {
+            let coefficient = Ball::exact(falling(power)) * at_centre[order + power];
+            model = model.add(&model_power.scale(Ball::exact(coefficient.mid)));
+            rounding += coefficient.rad * reach_powers[power];
+        }
+        let past = over_reach[order + SERIES_DEGREE + 1];
+        let remainder = falling(SERIES_DEGREE + 1)
+            * (past.mid.abs() + past.rad)
+            * reach_powers[SERIES_DEGREE + 1];
+        model.widen(rounding + remainder);
+        model
+    };
+    Some(ModelJet {
+        value: derivative(0),
+        d1: derivative(1),
+        d2: derivative(2),
+        d3: derivative(3),
+    })
+}
+
+/// A cluster's stationary slope correction's ingredients by `window` as
+/// polynomials in the distance from `centre`, its slopes less the one it
+/// leaves on; `None` where the window holds no seam and that slope at its
+/// back edge is zero.
+fn slope_polynomials(
+    cluster: &SeamCluster,
+    window: ClusterWindow,
+    centre: f64,
+) -> Option<CorrectionPolynomials> {
+    let out = cluster.slope_out();
+    let seams = &cluster.seams[window.first..window.past];
+    let slope_left = window
+        .first
+        .checked_sub(1)
+        .map_or(0.0, |last| cluster.seams[last].slope_after - out);
+    if seams.is_empty() && slope_left == 0.0 {
+        return None;
+    }
+    let is_behind = |index: usize| window.first + index < window.behind;
+    let offset_of = |seam: &Seam| Ball::rounded(centre - seam.s, 1);
+    let zero = Ball::exact(0.0);
+    let mut slope = [zero; SMOOTHED_HALF_SQUARE.len()];
+    let mut kink = [zero; 3];
+    for (index, pair) in seams.windows(2).enumerate() {
+        let (seam, next) = (&pair[0], &pair[1]);
+        let residual = seam.slope_after - out;
+        if residual == 0.0 {
+            continue;
+        }
+        let (ahead, behind) = (offset_of(seam), offset_of(next));
+        let span_slope = Ball::exact(residual);
+        let rise = span_slope * Ball::rounded(next.s - seam.s, 1);
+        let (mut divided, mut power) = (zero, Ball::exact(1.0));
+        for moment in &mut slope[1..] {
+            divided = divided * ahead + power;
+            power = power * behind;
+            *moment = *moment + rise * divided;
+        }
+        let half = Ball::exact(0.5);
+        if is_behind(index + 1) {
+            kink[0] = kink[0] + rise * half * (ahead + behind);
+            kink[1] = kink[1] + rise;
+        } else if is_behind(index) {
+            kink[0] = kink[0] + span_slope * half * ahead * ahead;
+            kink[1] = kink[1] + span_slope * ahead;
+            kink[2] = kink[2] + span_slope * half;
+        }
+    }
+    let weight = |index: usize| {
+        let mut coefficients = [zero; 6];
+        let mut moment = |sums: &[Ball], k: usize, weight: f64| {
+            for (power, slot) in coefficients.iter_mut().enumerate().take(k + 1) {
+                let scale = weight * BINOMIALS[k][power];
+                *slot = *slot + Ball::exact(scale) * sums[k - power];
+            }
+        };
+        moment(&slope, index, SMOOTHED_HALF_SQUARE[index]);
+        if index == 0 && seams.is_empty() {
+            coefficients[0] =
+                coefficients[0] + Ball::exact(KERNEL_HALF_VARIANCE) * Ball::exact(slope_left);
+        }
+        coefficients
+    };
+    let edges = seams
+        .first()
+        .zip(seams.last())
+        .map(|(first_seam, last_seam)| EdgeSpans {
+            slope_left,
+            slope_right: last_seam.slope_after - out,
+            first: (offset_of(first_seam), is_behind(0)),
+            last: (offset_of(last_seam), is_behind(seams.len() - 1)),
+        });
+    let mut width = [zero; 6];
+    width[0] = Ball::exact(cluster.width);
+    Some(CorrectionPolynomials {
+        width,
+        weights: std::array::from_fn(weight),
+        kink: kink.map(|term| -term),
+        edges,
+    })
 }
