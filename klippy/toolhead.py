@@ -107,6 +107,8 @@ class Move:
             R_jd = sin_theta_d2 / one_minus_sin_theta_d2
             move_jd_v2 = R_jd * self.junction_deviation * self.accel
             pmove_jd_v2 = R_jd * prev_move.junction_deviation * prev_move.accel
+            if self.toolhead.junction_limiter is not None:
+                move_jd_v2 = pmove_jd_v2 = max_start_v2
             # Approximated circle must contact moves no further than mid-move
             #   centripetal_v2 = .5 * self.move_d * self.accel * tan_theta_d2
             quarter_tan_theta_d2 = 0.25 * sin_theta_d2 / cos_theta_d2
@@ -119,6 +121,9 @@ class Move:
                 move_centripetal_v2,
                 pmove_centripetal_v2,
             )
+        junction_limiter = self.toolhead.junction_limiter
+        if junction_limiter is not None:
+            max_start_v2 = junction_limiter(prev_move, self, max_start_v2)
         # Apply limits
         self.max_start_v2 = max_start_v2
         self.max_smoothed_v2 = min(
@@ -244,6 +249,8 @@ BUFFER_TIME_START = 0.250
 
 # Main code to track events (and their timing) on the printer toolhead
 class ToolHead:
+    junction_limiter = None
+
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
@@ -499,6 +506,11 @@ class ToolHead:
         last_move = self.lookahead.get_last()
         if last_move is not None:
             last_move.limit_next_junction_speed(speed)
+
+    def set_junction_limiter(self, limiter):
+        if self.junction_limiter is not None:
+            raise self.printer.config_error("junction limiter already set")
+        self.junction_limiter = limiter
 
     def move(self, newpos, speed):
         move = Move(self, self.commanded_pos, newpos, speed)
