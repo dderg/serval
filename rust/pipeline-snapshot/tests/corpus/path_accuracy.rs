@@ -11,14 +11,24 @@
 //! corner's budget, and corners closer together than that reach turn as
 //! one: the shaper rounds them as one. Misses read across the
 //! bed (XY), and the shaped carriers may stray from the exact shaped path
-//! by `max_path_deviation` on top of any budget.
+//! by `max_path_deviation` on top of any budget. The default budget holds
+//! corners alone: the vertices the fitter keeps as corners, a stop or a
+//! corner blend between the moves either side; a vertex inside a fitted
+//! arc run or a consumed cluster of facets traces a curve, which it leaves
+//! to the shaper.
 
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::path::Path;
 
-use geometry::{CornerBudget, ShapedCorners};
+use geometry::path::Segment;
+use geometry::shaped_corner::blend_apex;
+use geometry::{CornerBudget, CornerFitConfig, Move, ShapedCorners, seam_requires_stop};
+use motion_pipeline::fit_stage::FitStage;
+use motion_pipeline::live_config;
+use motion_pipeline::types::StreamInput;
 use pipeline_snapshot::waypoints::Waypoint;
-use pipeline_snapshot::{ExactTrajectory, SampleSide, Snapshot};
+use pipeline_snapshot::{ExactTrajectory, SampleSide, Snapshot, plan_steps};
 
 use super::{motion_settings, planner, waypoints};
 
@@ -151,9 +161,16 @@ pub struct PathAccuracy {
     /// Indexed `[motion][turn band]`.
     pub bands: [[Band; TURN_BANDS_DEG.len()]; 3],
     pub lost: Vec<Point>,
-    /// Extruding vertices missed by more than their budget: where, the
-    /// miss, the budget and the vertex's own turn in degrees.
+    /// Extruding vertices the budget holds missed by more than it: where,
+    /// the miss, the budget and the vertex's own turn in degrees.
     pub over_budget: Vec<(Point, f64, f64, f64)>,
+    /// The largest share of its budget an extruding corner's miss takes,
+    /// and a curve's: a vertex inside a fitted arc run or cluster.
+    pub worst_corner_share: f64,
+    pub worst_curve_share: f64,
+    /// The largest miss of an extruding corner and of a curve vertex.
+    pub worst_corner_miss_mm: f64,
+    pub worst_curve_miss_mm: f64,
 }
 
 impl PathAccuracy {
@@ -172,7 +189,8 @@ impl PathAccuracy {
         let (share, at) = self.worst_share;
         let mut out = format!(
             "corner budget {:?}, worst extruding miss {:.4} mm, worst share of budget {:.2} at \
-             ({:.3}, {:.3}, {:.3}), {} over budget, {} lost",
+             ({:.3}, {:.3}, {:.3}), {} over budget, {} lost; corners miss {:.4} mm (share \
+             {:.2}), curves miss {:.4} mm (share {:.2})",
             self.budget,
             self.worst_budgeted_miss(),
             share,
@@ -180,7 +198,11 @@ impl PathAccuracy {
             at[1],
             at[2],
             self.over_budget.len(),
-            self.lost.len()
+            self.lost.len(),
+            self.worst_corner_miss_mm,
+            self.worst_corner_share,
+            self.worst_curve_miss_mm,
+            self.worst_curve_share,
         );
         for (motion, name) in [
             (Motion::Extruding, "extrude"),
@@ -217,6 +239,9 @@ struct Polyline {
     arc: Vec<f64>,
     extruding: Vec<bool>,
     rests: Vec<bool>,
+    /// The moves into and out of each vertex, by their index in the stream
+    /// of G-code moves the waypoints make.
+    seams: Vec<(usize, usize)>,
 }
 
 impl Polyline {
@@ -226,6 +251,7 @@ impl Polyline {
             arc: Vec::new(),
             extruding: Vec::new(),
             rests: Vec::new(),
+            seams: Vec::new(),
         };
         for (index, waypoint) in waypoints.iter().enumerate() {
             let point = spatial(waypoint.position);
@@ -246,10 +272,14 @@ impl Polyline {
                     line.extruding.push(e_step > EXTRUDING_E_MM);
                     line.vertices.push(point);
                     line.rests.push(false);
+                    let arriving = index - 1;
+                    line.seams.last_mut().expect("a vertex before").1 = arriving;
+                    line.seams.push((arriving, usize::MAX));
                 }
                 None => {
                     line.vertices.push(point);
                     line.rests.push(true);
+                    line.seams.push((usize::MAX, usize::MAX));
                 }
             }
         }
@@ -394,6 +424,7 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
         return None;
     }
     let budget = VertexBudget::of(config);
+    let corners = fitted_corners(&waypoints, config);
     let trajectory = snapshot.toolhead.as_ref().unwrap_or(&snapshot.trajectory);
     let mut nearest = vec![f64::INFINITY; line.vertices.len()];
     let mut excursion = vec![(0.0_f64, [0.0; SPATIAL_AXES]); line.segments()];
@@ -431,6 +462,10 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
         bands: [[Band::EMPTY; TURN_BANDS_DEG.len()]; 3],
         lost: Vec::new(),
         over_budget: Vec::new(),
+        worst_corner_share: 0.0,
+        worst_curve_share: 0.0,
+        worst_corner_miss_mm: 0.0,
+        worst_curve_miss_mm: 0.0,
     };
     let reach = budget.reach_mm();
     let own: Vec<f64> = (0..line.vertices.len())
@@ -475,7 +510,22 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
             if share > report.worst_share.0 {
                 report.worst_share = (share, at);
             }
-            if nearest[vertex] > granted * (1.0 + BUDGET_SLACK) + budget.fit_tolerance_mm {
+            let corner = corners.contains(&line.seams[vertex]);
+            let (worst_share, worst_miss) = if corner {
+                (
+                    &mut report.worst_corner_share,
+                    &mut report.worst_corner_miss_mm,
+                )
+            } else {
+                (
+                    &mut report.worst_curve_share,
+                    &mut report.worst_curve_miss_mm,
+                )
+            };
+            *worst_share = worst_share.max(share);
+            *worst_miss = worst_miss.max(nearest[vertex]);
+            let held = corner || ShapedCorners::holds_curves(budget.budget);
+            if held && nearest[vertex] > granted * (1.0 + BUDGET_SLACK) + budget.fit_tolerance_mm {
                 report
                     .over_budget
                     .push((at, nearest[vertex], granted, turn_deg));
@@ -483,6 +533,64 @@ pub fn audit(snapshot: &Snapshot, gcode: &str, config: &Path) -> Option<PathAccu
         }
     }
     Some(report)
+}
+
+/// The seams the fitter keeps as corners, by the G-code moves either side:
+/// a stop, a corner blend whose cut leaves room in its budget, or a bare
+/// junction of two lines. A seam inside a fitted arc run or a consumed
+/// cluster of facets, or easing into an arc, is none.
+fn fitted_corners(waypoints: &[Waypoint], config: &Path) -> HashSet<(usize, usize)> {
+    let planner = planner("fitted corners", config);
+    let caps = live_config::extruder_caps(&planner).expect("extruder caps");
+    let base = live_config::GcodeMoveBase::of(&planner, &caps).expect("move base");
+    let stream = live_config::stream_config(&planner, None).expect("stream config");
+    let steps = plan_steps(waypoints, base).expect("plan steps");
+    let mut fitted: Vec<Move> = Vec::new();
+    let mut fit = FitStage::new(stream.corner).into_driver();
+    let mut keep = |item: StreamInput| {
+        if let StreamInput::Move(m) = item {
+            if m.segment.spatial.is_some() {
+                fitted.push(m);
+            }
+        }
+        true
+    };
+    for step in steps {
+        assert!(step.feed(|input| fit.feed(input, &mut keep)));
+    }
+    assert!(fit.finish(&mut keep));
+    fitted
+        .windows(2)
+        .filter(|pair| is_corner(&pair[0], &pair[1], stream.corner))
+        .map(|pair| {
+            (
+                pair[0].source.end_line as usize,
+                pair[1].source.start_line as usize,
+            )
+        })
+        .collect()
+}
+
+fn is_corner(before: &Move, after: &Move, config: CornerFitConfig) -> bool {
+    if seam_requires_stop(before, after, config) {
+        return true;
+    }
+    if let (Some(Segment::Line(_)), Some(Segment::Line(_))) =
+        (&before.segment.spatial, &after.segment.spatial)
+    {
+        return true;
+    }
+    let Some(corners) = config.shaped_corners else {
+        return blend_apex(before, after).is_some();
+    };
+    blend_apex(before, after).is_some_and(|(theta, cut_mm)| {
+        let accel = before.limits.accel_mm_s2.max(after.limits.accel_mm_s2);
+        let budget = before.limits.corner.stricter(
+            after.limits.corner,
+            before.limits.accel_mm_s2.min(after.limits.accel_mm_s2),
+        );
+        cut_mm < corners.budget_mm(budget, theta, accel)
+    })
 }
 
 fn turn_band(turn_deg: f64) -> usize {

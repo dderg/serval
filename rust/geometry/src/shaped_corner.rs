@@ -51,7 +51,7 @@ const TURN_EPS_RAD: f64 = 1e-6;
 /// at: a pair leaving an arc into a sharp corner starts at the arc's
 /// curvature, a small share of its peak, while a pair easing between two
 /// arcs keeps most of its peak throughout and is a curve, no corner.
-const LINE_CURVATURE_SHARE: f64 = 0.5;
+const LINE_CURVATURE_SHARE: f64 = 0.25;
 /// How far before and after a slowed corner its slower acceleration reaches,
 /// in `σ²·A`: the distance a stop at `A` covers in `√32 ≈ 5.7` of the wider
 /// kernel's standard deviations, past the reach of its weight.
@@ -775,14 +775,23 @@ impl ShapedCorners {
     }
 
     /// The tolerance an arc or a merged run of facets is fitted to under
-    /// `budget` at `accel`.
+    /// `budget` at `accel`: the default leaves curves to the shaper and fits
+    /// them to its whole allowance; the other budgets keep room for the
+    /// shaper's pull on the curve.
     #[must_use]
     pub fn arc_fit_tolerance_mm(&self, budget: CornerBudget, accel: f64) -> f64 {
-        ARC_FIT_SHARE
-            * match budget {
-                CornerBudget::Shaped(mm) | CornerBudget::OverFloor(mm) => mm,
-                CornerBudget::ScvEquivalent(scv) => self.scv_allowance_mm(scv, accel),
-            }
+        match budget {
+            CornerBudget::OverFloor(mm) => mm,
+            CornerBudget::Shaped(mm) => ARC_FIT_SHARE * mm,
+            CornerBudget::ScvEquivalent(scv) => ARC_FIT_SHARE * self.scv_allowance_mm(scv, accel),
+        }
+    }
+
+    /// Whether `budget` holds curves to it as well as corners: the default
+    /// holds corners alone.
+    #[must_use]
+    pub fn holds_curves(budget: CornerBudget) -> bool {
+        !matches!(budget, CornerBudget::OverFloor(_))
     }
 }
 

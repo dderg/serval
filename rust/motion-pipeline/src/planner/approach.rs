@@ -10,8 +10,9 @@
 //! budget's room beyond the cut ([`ShapedCorners::arc_speed_cap`]).
 //! Every other curve, an arc or a clothoid no corner blend claims, is
 //! capped at the speed that keeps the shaper's pull on it within its
-//! budget's room. A move leaves here final: the window plans it as it will
-//! commit.
+//! budget's room, where its budget holds curves
+//! ([`ShapedCorners::holds_curves`]). A move leaves here final: the window
+//! plans it as it will commit.
 
 use std::collections::VecDeque;
 
@@ -343,6 +344,9 @@ fn cap_curve(m: &mut Move, corners: &ShapedCorners) {
     let Some(segment) = &m.segment.spatial else {
         return;
     };
+    if !ShapedCorners::holds_curves(m.limits.corner) {
+        return;
+    }
     let (_, kappa_peak) = segment.kappa_peak();
     if kappa_peak.abs() > 0.0 {
         let radius = 1.0 / kappa_peak.abs();
