@@ -2749,14 +2749,64 @@ impl MomentTranslation {
 
 fn taylor_shift(coefficients: &[f64], shift: f64, shifted: &mut [f64]) {
     assert_eq!(coefficients.len(), shifted.len());
-    assert!(coefficients.len() <= MOMENT_POWER_CAPACITY);
-    let mut work = [0.0; MOMENT_POWER_CAPACITY];
-    work[..coefficients.len()].copy_from_slice(coefficients);
-    for (lowest, target) in shifted.iter_mut().enumerate() {
-        for power in (lowest + 1..coefficients.len()).rev() {
-            work[power - 1] = nurbs::fmadd(shift, work[power], work[power - 1]);
+    shifted.copy_from_slice(coefficients);
+    horner_shift_in_place(shifted, |lower, higher| nurbs::fmadd(shift, higher, lower));
+}
+
+/// The repeated Horner passes of a Taylor shift in place: pass `lowest`
+/// settles `shifted[lowest]` and only touches the slots above it after,
+/// each step carrying the slot it just wrote into the next. Up to 16
+/// coefficients run over a fixed length, whose passes the compiler keeps
+/// in registers, overlapping each pass with the next.
+#[inline]
+pub(crate) fn horner_shift_in_place(shifted: &mut [f64], step: impl Fn(f64, f64) -> f64) {
+    assert!(
+        shifted.len() <= MOMENT_POWER_CAPACITY,
+        "a {}-coefficient polynomial exceeds the shift's capacity",
+        shifted.len()
+    );
+    match shifted.len() {
+        0 | 1 => {}
+        2 => horner_shift_fixed::<2>(shifted, step),
+        3 => horner_shift_fixed::<3>(shifted, step),
+        4 => horner_shift_fixed::<4>(shifted, step),
+        5 => horner_shift_fixed::<5>(shifted, step),
+        6 => horner_shift_fixed::<6>(shifted, step),
+        7 => horner_shift_fixed::<7>(shifted, step),
+        8 => horner_shift_fixed::<8>(shifted, step),
+        9 => horner_shift_fixed::<9>(shifted, step),
+        10 => horner_shift_fixed::<10>(shifted, step),
+        11 => horner_shift_fixed::<11>(shifted, step),
+        12 => horner_shift_fixed::<12>(shifted, step),
+        13 => horner_shift_fixed::<13>(shifted, step),
+        14 => horner_shift_fixed::<14>(shifted, step),
+        15 => horner_shift_fixed::<15>(shifted, step),
+        16 => horner_shift_fixed::<16>(shifted, step),
+        _ => horner_passes(shifted, step),
+    }
+}
+
+#[inline]
+fn horner_shift_fixed<const N: usize>(shifted: &mut [f64], step: impl Fn(f64, f64) -> f64) {
+    let mut work: [f64; N] = (&*shifted)
+        .try_into()
+        .expect("the shift dispatches on the slice's own length");
+    horner_passes(&mut work, step);
+    shifted.copy_from_slice(&work);
+}
+
+#[inline]
+fn horner_passes(shifted: &mut [f64], step: impl Fn(f64, f64) -> f64) {
+    let len = shifted.len();
+    let Some(&top) = shifted.last() else {
+        return;
+    };
+    for lowest in 0..len {
+        let mut higher = top;
+        for slot in shifted[lowest..len - 1].iter_mut().rev() {
+            higher = step(*slot, higher);
+            *slot = higher;
         }
-        *target = work[lowest];
     }
 }
 

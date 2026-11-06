@@ -27,7 +27,7 @@
 //! `δₖ` moves `e` by at most `Σ|δₖ|` on `|y| ≤ 1`, and a Bernstein error moves
 //! the hull bound by at most its own size, so the terms add.
 
-use super::TRANSLATION_BINOMIALS;
+use super::{TRANSLATION_BINOMIALS, horner_shift_in_place};
 use super::exact::{EXACT_CAPACITY, ExactPiece, ExactRounding};
 use crate::lowering::FitTol;
 
@@ -88,28 +88,6 @@ impl HullBudget {
 fn unfused_taylor_shift(coefficients: &[f64], shift: f64, shifted: &mut [f64]) {
     shifted.copy_from_slice(coefficients);
     horner_shift_in_place(shifted, |lower, higher| lower + shift * higher);
-}
-
-/// The repeated Horner passes of [`unfused_taylor_shift`] in place: pass
-/// `lowest` settles `shifted[lowest]` and only touches the slots above it
-/// after. Each pass carries the slot it just wrote into the next step.
-#[inline]
-fn horner_shift_in_place(shifted: &mut [f64], step: impl Fn(f64, f64) -> f64) {
-    let len = shifted.len();
-    assert!(
-        len <= EXACT_CAPACITY,
-        "a {len}-coefficient polynomial exceeds the hull"
-    );
-    let Some(&top) = shifted.last() else {
-        return;
-    };
-    for lowest in 0..len {
-        let mut higher = top;
-        for slot in shifted[lowest..len - 1].iter_mut().rev() {
-            higher = step(*slot, higher);
-            *slot = higher;
-        }
-    }
 }
 
 /// A coefficient vector beside the bound on its rounding error as a
