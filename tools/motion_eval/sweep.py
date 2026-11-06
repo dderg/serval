@@ -47,6 +47,12 @@ BUDGETS_MM = (
     0.3,
     0.4,
 )
+PARETO_CASES = (
+    "voron_top_layers",
+    "circles",
+    "zigzag_infill",
+    "corners_turn90",
+)
 BASE_SCV = 5.0
 BASE_MCR = 0.5
 UNLIMITED = 1e4
@@ -457,6 +463,51 @@ def _pct(reference, value):
     return "%+.1f%%" % (100.0 * (value - reference) / reference)
 
 
+FRONT_STEP = 0.005
+
+
+def case_pareto_table(records, case, config, family):
+    rows = sorted(
+        (
+            r
+            for r in records
+            if r["case"] == case
+            and r["config"] == config
+            and r["family"] == family
+            and r["kind"] in ("scv", "budget")
+        ),
+        key=lambda r: r["corners"]["p99_mm"],
+    )
+    mask = _pareto_mask(
+        [r["print_time_s"] for r in rows],
+        [r["corners"]["p99_mm"] for r in rows],
+    )
+    lines = [
+        "| setting | s | corner p50 mm | p99 mm | max mm | max jump mm/s |"
+        " peak accel |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    kept_time = math.inf
+    for r, front in zip(rows, mask):
+        if not front or r["print_time_s"] > kept_time * (1 - FRONT_STEP):
+            continue
+        kept_time = r["print_time_s"]
+        c = r["corners"]
+        lines.append(
+            "| %s | %.2f | %.3f | %.3f | %.3f | %.1f | %.0f |"
+            % (
+                _setting(r),
+                r["print_time_s"],
+                c["p50_mm"],
+                c["p99_mm"],
+                c["max_mm"],
+                r["max_jump_mm_s"],
+                r["peak_accel"],
+            )
+        )
+    return "\n".join(lines)
+
+
 def tables(records, cases, configs):
     out = ["## Time decomposition (default shaper, scv 5, mcr 0.5)", ""]
     out.append(decomposition_table(records, cases, configs))
@@ -484,6 +535,18 @@ def tables(records, cases, configs):
         "",
         per_case,
     ]
+    for config in configs:
+        for case in PARETO_CASES:
+            if case not in cases:
+                continue
+            family = DEFAULT_FAMILY[config]
+            out += [
+                "",
+                "## Pareto front (time vs corner p99), %s, %s, %s, SCV and"
+                " budget runs" % (case, config, family),
+                "",
+                case_pareto_table(records, case, config, family),
+            ]
     return "\n".join(out) + "\n"
 
 
