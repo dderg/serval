@@ -230,6 +230,10 @@ impl Tracked {
     }
 }
 
+/// The derivative order of acceleration, whose slope rounding the exact
+/// polynomials bound for the jerk read off them ([`ExactPiece::jerk`]).
+const ACCELERATION: usize = 2;
+
 /// A first-order Taylor shift by `ε` truncates `Σⱼ pⱼ·C(j,2)·ε²·ξ^{j−2}` for
 /// some `|ξ| ≤ r + |ε|`; up to this `|ε|/r` that is below the coefficients'
 /// own rounding, and past it the full shift is cheaper than the slack.
@@ -239,13 +243,16 @@ const FIRST_ORDER_SHIFT_LIMIT: f64 = 1.0 / (1u64 << 30) as f64;
 /// centre's offset `w` with `|w| ≤ radius`, summed from contributions each
 /// written in its own window's motion `z = w + ε`. `magnitude` bounds the
 /// terms' sum on `|w| ≤ radius` and `truncation` the polynomial dropped by
-/// first-order shifts there.
+/// first-order shifts there; `slope_magnitude` and `slope_truncation` bound
+/// their slopes in `w` likewise, where [`Self::add_slope_bounds`] adds them.
 #[derive(Clone, Copy, Debug)]
 struct CentredSum {
     values: [f64; EXACT_CAPACITY],
     len: usize,
     magnitude: f64,
     truncation: f64,
+    slope_magnitude: f64,
+    slope_truncation: f64,
 }
 
 impl CentredSum {
@@ -254,6 +261,8 @@ impl CentredSum {
         len: 0,
         magnitude: 0.0,
         truncation: 0.0,
+        slope_magnitude: 0.0,
+        slope_truncation: 0.0,
     };
 
     /// Adds `sign · term(w + shift)`. Shifting `|w|^j` by `shift` gives
@@ -294,6 +303,30 @@ impl CentredSum {
             for (value, shifted) in self.values.iter_mut().zip(&shifted[..len]) {
                 *value += sign * shifted;
             }
+        }
+    }
+}
+
+impl CentredSum {
+    /// Adds the slope bounds of `term(w + shift)` beside
+    /// [`Self::add_shifted`]'s. Each coefficient `j` errs by at most `γ·mⱼ`,
+    /// so the error's slope on `|w| ≤ r` stays within
+    /// `γ·Σⱼ j·mⱼ·(r + |shift|)^{j−1}`: the constant term, which carries the
+    /// largest magnitudes, moves no slope. A first-order shift drops a
+    /// polynomial whose slope `Σⱼ pⱼ·j·((w+ε)^{j−1} − w^{j−1} − (j−1)·ε·w^{j−2})`
+    /// is within `Σⱼ 2·mⱼ·j·C(j−1,2)·ε²·(r + |ε|)^{j−3}`.
+    fn add_slope_bounds(&mut self, term: &Tracked, shift: f64, radius: f64) {
+        let len = term.len;
+        let reach = radius + shift.abs();
+        self.slope_magnitude += (1..len).rev().fold(0.0, |acc, power| {
+            acc * reach + power as f64 * term.magnitudes[power]
+        });
+        if shift != 0.0 && shift.abs() <= radius * FIRST_ORDER_SHIFT_LIMIT {
+            let remainder = (3..len).rev().fold(0.0, |acc, power| {
+                acc * reach
+                    + power as f64 * TRANSLATION_BINOMIALS[power - 1][2] * term.magnitudes[power]
+            });
+            self.slope_truncation += 2.0 * shift * shift * remainder;
         }
     }
 }
@@ -418,12 +451,14 @@ impl ExactRounding {
 /// One derivative order of the signal on a sub-interval, in the local
 /// variable `x = (t − center) / radius`, with a bound on how far the
 /// computed coefficients' polynomial can be from the exact one on
-/// `|x| ≤ 1`.
+/// `|x| ≤ 1`, and one on how far its time derivative can be from the exact
+/// one's there, infinite where nothing bounds it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LocalPolynomial {
     pub coefficients: [f64; EXACT_CAPACITY],
     pub len: usize,
     pub rounding: f64,
+    pub slope_rounding: f64,
 }
 
 impl LocalPolynomial {
@@ -466,25 +501,24 @@ impl ExactPiece {
     }
 
     /// The signal's jerk on the piece, its acceleration polynomial's time
-    /// derivative. The computed and exact acceleration polynomials differ
-    /// by one of degree `d` within `rounding` on `|x| ≤ 1`, whose
-    /// derivative Markov's inequality holds within `d²·rounding`.
+    /// derivative, within the acceleration's slope rounding and the
+    /// roundings of the radius powers its coefficients were scaled by and
+    /// of the differentiation.
     pub(crate) fn jerk(&self) -> LocalPolynomial {
         let acceleration = &self.pva[2];
         let len = acceleration.len.saturating_sub(1);
         let mut coefficients = [0.0; EXACT_CAPACITY];
-        let mut magnitude = 0.0;
+        let mut scaling = 0.0;
         for (power, slot) in coefficients[..len].iter_mut().enumerate() {
             let falling = (power + 1) as f64;
             *slot = acceleration.coefficients[power + 1] * falling / self.radius;
-            magnitude += slot.abs();
+            scaling += (power + 4) as f64 * f64::EPSILON * slot.abs();
         }
-        let degree = len as f64;
         LocalPolynomial {
             coefficients,
             len,
-            rounding: degree * degree * acceleration.rounding / self.radius
-                + 2.0 * f64::EPSILON * magnitude,
+            rounding: acceleration.slope_rounding + 2.0 * scaling,
+            slope_rounding: f64::INFINITY,
         }
     }
 
@@ -527,13 +561,17 @@ impl ExactSpan {
     /// between them hold no float and no polynomial; the nearest polynomial
     /// facing `toward` is read, as the hull bounds it.
     pub(crate) fn pva(&self, t: f64, toward: f64) -> (f64, f64, f64) {
+        self.facing(t, toward).eval_pva(t)
+    }
+
+    fn facing(&self, t: f64, toward: f64) -> &ExactPiece {
         let next = next_toward(t, toward);
         let within_span = self
             .pieces
             .first()
             .zip(self.pieces.last())
             .is_some_and(|(first, last)| first.lo <= next && next <= last.hi);
-        let piece = match ordered(t, toward) {
+        match ordered(t, toward) {
             Ordering::Less => self
                 .pieces
                 .get(self.pieces.partition_point(|piece| piece.hi <= t)),
@@ -545,8 +583,39 @@ impl ExactSpan {
             Ordering::Equal => panic!("an exact read at {t} faces no side"),
         }
         .filter(|_| within_span)
-        .unwrap_or_else(|| panic!("an exact read at {t} lies outside its span"));
-        piece.eval_pva(t)
+        .unwrap_or_else(|| panic!("an exact read at {t} lies outside its span"))
+    }
+
+    /// The signal's jerk at `t`, read as [`Self::pva`] reads the rest.
+    pub(crate) fn jerk(&self, t: f64, toward: f64) -> f64 {
+        let piece = self.facing(t, toward);
+        piece.jerk().eval((t - piece.center) / piece.radius)
+    }
+
+    /// The break inside `(lo, hi)` nearest `t`: the start of the later of
+    /// the two polynomials meeting there.
+    pub(crate) fn break_nearest(&self, t: f64, (lo, hi): (f64, f64)) -> Option<f64> {
+        let first = self.pieces.partition_point(|piece| piece.lo <= lo).max(1);
+        let past = self.pieces.partition_point(|piece| piece.lo < hi);
+        (first..past)
+            .map(|later| self.pieces[later].lo)
+            .min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()))
+    }
+
+    /// How far the polynomials reaching `t` disagree on the position there,
+    /// zero where only one does: each is the signal within its own
+    /// rounding, and an edge on a break may read either.
+    pub(crate) fn position_mismatch_at(&self, t: f64) -> f64 {
+        let reaching = &self.pieces[self.pieces.partition_point(|piece| piece.hi < t)..];
+        let (low, high) = reaching
+            .iter()
+            .take_while(|piece| piece.lo <= t)
+            .map(|piece| piece.pva[0].eval((t - piece.center) / piece.radius))
+            .fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(low, high), position| (low.min(position), high.max(position)),
+            );
+        if low <= high { high - low } else { 0.0 }
     }
 
     /// The polynomials whose sub-intervals reach into `(lo, hi)`.
@@ -566,6 +635,9 @@ pub(crate) struct ExactConvolution<'a> {
     pub kernel: &'a ExactKernel,
     pub impulses: &'a [GainImpulse],
     pub position_offset: f64,
+    /// Whether the acceleration polynomials bound their slope's rounding,
+    /// for a fit holding a jerk tolerance ([`ExactPiece::jerk`]).
+    pub bounds_jerk: bool,
 }
 
 /// The chunks one signal's spans have read their exact polynomials off
@@ -863,10 +935,16 @@ impl ExactConvolution<'_> {
                     .beta_convolution_into(&upper_series[order], convolved);
                 at_upper.add(convolved, 1.0);
                 total[order].add_shifted(at_upper, upper.tail, 1.0, radius);
+                if order == ACCELERATION && self.bounds_jerk {
+                    total[order].add_slope_bounds(at_upper, upper.tail, radius);
+                }
                 piece
                     .at_end
                     .beta_convolution_into(&lower_series[order], convolved);
                 total[order].add_shifted(convolved, lower.tail, -1.0, radius);
+                if order == ACCELERATION && self.bounds_jerk {
+                    total[order].add_slope_bounds(convolved, lower.tail, radius);
+                }
             }
         }
         let gamma = ExactRounding::gamma(ExactRounding::depth(
@@ -895,6 +973,11 @@ impl ExactConvolution<'_> {
                 coefficients,
                 len: sum.len,
                 rounding: 2.0 * gamma * sum.magnitude + sum.truncation,
+                slope_rounding: if order == ACCELERATION && self.bounds_jerk {
+                    2.0 * gamma * sum.slope_magnitude + sum.slope_truncation
+                } else {
+                    f64::INFINITY
+                },
             }
         }))
     }

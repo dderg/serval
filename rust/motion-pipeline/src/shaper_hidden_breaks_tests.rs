@@ -5,6 +5,7 @@ use trajectory::build_smooth_zv_kernel;
 
 use super::{CruiseEnds, JumpSeries, input_jumps_at, kernel_jumps_at};
 use crate::lowering::FitTol;
+use crate::shaper::exact::ExactSpan;
 use crate::shaper::{
     AxisFit, AxisSignalTable, FitBoundary, Lookahead, ShapedSignalSource, SignalBounds,
     TrackSignal, fit_leader_target,
@@ -124,55 +125,6 @@ fn an_image_is_seeded_only_past_the_minimum_span_or_at_a_rest() {
     assert_eq!(
         select(leaving_rest, close),
         vec![leaving_rest - close, leaving_rest, leaving_rest + close]
-    );
-}
-
-/// An image whose jerk step passes the jerk tolerance a fit holds stays a
-/// seed however close to the last: halving a span about it would narrow
-/// its pieces to the floor. Without a jerk tolerance it is left to the fit.
-#[test]
-fn an_image_whose_jerk_step_passes_the_jerk_tolerance_stays_a_seed() {
-    let kernel = build_smooth_zv_kernel(44.0);
-    let track = rest_then_accelerate();
-    let source = ShapedSignalSource::new(
-        &kernel,
-        table_over(&track, 0.0, 2.0 * BREAK_S),
-        track.knots().to_vec(),
-        0.0,
-    );
-    let breaks = &source.shaped_breaks;
-    let input = source.hidden_break_input().expect("the table is the input");
-    let (stepping, jerk_step) = breaks
-        .times()
-        .iter()
-        .filter_map(|&t| {
-            let image = breaks.image_at(t)?;
-            let jumps = breaks.image_jumps(input, image)?;
-            (!breaks.bounds_rest(input, image) && jumps.len > 3 && jumps.orders[3] != 0.0)
-                .then_some((t, jumps.orders[3].abs()))
-        })
-        .next()
-        .expect("an accelerating break's interior images step the shaped jerk");
-    let close = 0.5 * breaks.minimum_span;
-    let select = |jerk_mm_s3: f64| {
-        breaks.select_seeds(
-            vec![stepping - close, stepping, stepping + close],
-            Some(input),
-            FIT_TOL.with_jerk(jerk_mm_s3),
-            CruiseEnds::LeftToTheFit,
-        )
-    };
-    assert_eq!(
-        select(0.5 * jerk_step),
-        vec![stepping - close, stepping, stepping + close]
-    );
-    assert_eq!(
-        select(2.0 * jerk_step),
-        vec![stepping - close, stepping + close]
-    );
-    assert_eq!(
-        select(f64::INFINITY),
-        vec![stepping - close, stepping + close]
     );
 }
 
@@ -407,6 +359,74 @@ fn a_leader_fit_hides_near_smooth_images_and_holds_the_tolerance() {
             );
         }
     }
+}
+
+/// The worst jerk miss of a leader fit of the shaped corner out of rest,
+/// at dense interior points of its pieces, against the exact polynomials'
+/// jerk.
+fn worst_jerk_miss_of_a_leader_fit(fit_tol: FitTol) -> f64 {
+    let kernel = build_smooth_zv_kernel(44.0);
+    let track = rest_then_accelerate();
+    let source = ShapedSignalSource::new(
+        &kernel,
+        table_over(&track, 0.0, 2.0 * BREAK_S),
+        track.knots().to_vec(),
+        0.0,
+    )
+    .bounding_jerk(fit_tol);
+    let signal = source.signal();
+    let pieces = fit_leader_target(
+        AxisFit {
+            axis: 0,
+            t_start: 0.05,
+            t_end: 0.15,
+            seed_breakpoints: source.shaped_breaks.times(),
+            fit_tol,
+            fit_context: "jerk-held leader test",
+            seam_continuity: crate::lowering::SeamContinuity::Acceleration,
+        },
+        &signal,
+        &source.shaped_breaks,
+        source.hidden_break_input(),
+    )
+    .expect("the shaped corner fits");
+    const POINTS: u32 = 64;
+    pieces
+        .iter()
+        .map(|piece| {
+            let jerk = piece.differentiate().differentiate().differentiate();
+            let exact = ExactSpan::new(
+                signal
+                    .exact_polynomial_on(piece.u_start, piece.u_end)
+                    .expect("the shaped corner has exact polynomials"),
+            );
+            let h = piece.u_end - piece.u_start;
+            (0..POINTS)
+                .map(|k| {
+                    let t =
+                        piece.u_start + h * (0.01 + 0.98 * f64::from(k) / f64::from(POINTS - 1));
+                    (jerk.evaluate(t) - exact.jerk(t, piece.u_end)).abs()
+                })
+                .fold(0.0, f64::max)
+        })
+        .fold(0.0, f64::max)
+}
+
+/// A leader fit held to a jerk tolerance follows the shaped signal's jerk
+/// within it, where one held to acceleration alone strays far past it.
+#[test]
+fn a_jerk_held_leader_fit_follows_the_shaped_jerk_within_its_tolerance() {
+    const JERK_TOL: f64 = 2_000.0;
+    let held = worst_jerk_miss_of_a_leader_fit(FIT_TOL.with_jerk(JERK_TOL));
+    assert!(
+        held <= JERK_TOL,
+        "the jerk-held fit misses the jerk by {held}, past {JERK_TOL}"
+    );
+    let free = worst_jerk_miss_of_a_leader_fit(FIT_TOL);
+    assert!(
+        free > 4.0 * JERK_TOL,
+        "the acceleration-held fit misses the jerk by only {free}"
+    );
 }
 
 /// The shaped signal read through its evaluator alone, with no exact

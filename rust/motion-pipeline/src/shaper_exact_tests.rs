@@ -529,6 +529,94 @@ fn exact_polynomials_agree_with_the_evaluator() {
     }
 }
 
+/// The jerk read off an exact polynomial agrees with the slope of a
+/// double-double convolution's acceleration, Richardson-extrapolated from
+/// central differences inside the sub-interval, within its bounded
+/// rounding; a source that bounds no jerk leaves that rounding unbounded.
+/// The differences step by a power of two, which moves a time exactly, on
+/// sub-intervals wide enough for a step past the times' own rounding.
+#[test]
+fn an_exact_piece_s_jerk_matches_a_double_double_slope_within_its_rounding_bound() {
+    let jerk_held = crate::lowering::FitTol::absolute(1e-3, 50.0).with_jerk(1e3);
+    for (name, kernel) in kernels() {
+        for bounds in [false, true] {
+            let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+            let table = random_table(&mut rng, SIGNAL_START_S, SIGNAL_END_S, None);
+            let breaks = table.starts.clone();
+            let source = ShapedSignalSource::new(&kernel, table, breaks, SIGNAL_START_S + 0.02);
+            let source = if bounds {
+                source.bounding_jerk(jerk_held)
+            } else {
+                source
+            };
+            let signal = source.signal();
+            let (lo, hi) = (SIGNAL_START_S + 0.02, SIGNAL_START_S + 0.03);
+            for piece in signal.exact_polynomial_on(lo, hi).expect("clamped") {
+                let jerk = piece.jerk();
+                if !bounds {
+                    assert_eq!(jerk.rounding, f64::INFINITY, "{name}: an unbounded jerk");
+                    continue;
+                }
+                let step = 2.0_f64.powi((1e-3 * piece.radius).log2().floor() as i32);
+                if step < 1e3 * f64::EPSILON * piece.center.abs() {
+                    continue;
+                }
+                for x in [-0.5, 0.0, 0.5] {
+                    let t = piece.center + x * piece.radius;
+                    let slope = |h: f64| {
+                        (reference(&source, t + h, 2) - reference(&source, t - h, 2)) / (2.0 * h)
+                    };
+                    let extrapolated = (4.0 * slope(0.5 * step) - slope(step)) / 3.0;
+                    let miss = (jerk.eval(x) - extrapolated).abs();
+                    assert!(
+                        miss <= jerk.rounding + 1e-9 * (1.0 + extrapolated.abs()),
+                        "{name} at {t} (piece [{}, {}]): exact jerk {} reference {extrapolated} \
+                         misses by {miss:e}, past its rounding bound {:e}",
+                        piece.lo,
+                        piece.hi,
+                        jerk.eval(x),
+                        jerk.rounding
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A span's polynomials meet at each break within their roundings, and
+/// the break nearest a time inside a stretch is one of their starts.
+#[test]
+fn adjacent_exact_polynomials_meet_at_their_breaks_within_their_roundings() {
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let (name, kernel) = &kernels()[0];
+    let table = random_table(&mut rng, SIGNAL_START_S, SIGNAL_END_S, None);
+    let breaks = table.starts.clone();
+    let source = ShapedSignalSource::new(kernel, table, breaks, SIGNAL_START_S + 0.02);
+    let pieces = source
+        .signal()
+        .exact_polynomial_on(SIGNAL_START_S + 0.02, SIGNAL_START_S + 0.03)
+        .expect("clamped");
+    let span = ExactSpan::new(pieces.clone());
+    for pair in pieces.windows(2) {
+        let at = pair[1].lo;
+        let mismatch = span.position_mismatch_at(at);
+        assert!(
+            mismatch <= pair[0].pva[0].rounding + pair[1].pva[0].rounding,
+            "{name}: the polynomials meeting at {at} disagree by {mismatch:e}"
+        );
+        let nearest = span
+            .break_nearest(at, (pair[0].lo, pair[1].hi))
+            .expect("a break lies inside the two pieces");
+        assert_eq!(nearest, at, "{name}: the break nearest {at}");
+    }
+    let inside = 0.5 * (pieces[0].lo + pieces[0].hi);
+    assert_eq!(
+        span.position_mismatch_at(inside),
+        0.0,
+        "{name}: one polynomial"
+    );
+}
+
 /// Every break of the signal inside the interval is a piece boundary: no
 /// image of an input boundary under a kernel cut lies strictly inside a
 /// piece, an ulp in from its ends.

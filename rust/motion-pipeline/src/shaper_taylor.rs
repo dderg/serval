@@ -19,6 +19,7 @@ fn local_polynomial(model: &TaylorModel) -> LocalPolynomial {
         coefficients,
         len: model.coefficients().len(),
         rounding: model.rad(),
+        slope_rounding: f64::INFINITY,
     }
 }
 

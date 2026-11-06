@@ -1755,6 +1755,7 @@ fn fit_group_alone(
     if let Some(column) = constant_axis_column(read.segments, group, axis) {
         return Ok(column);
     }
+    let group_tol = signal.group_tol(fit_tol, group, kernel, read.segments);
     fit_axis_targets(
         axis,
         group,
@@ -1766,8 +1767,9 @@ fn fit_group_alone(
             )),
             signal_breakpoints(read.segments, axis),
             group[0].t_start,
-        ),
-        signal.group_tol(fit_tol, group, kernel, read.segments),
+        )
+        .bounding_jerk(group_tol),
+        group_tol,
         signal,
         1,
         pool,
@@ -1972,6 +1974,7 @@ pub(crate) struct ShapedSignalSource<'a> {
     shaped_offset: f64,
     gain_impulse_response: Option<GainImpulseResponse>,
     exact_kernel: ExactKernel,
+    bounds_jerk: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2105,6 +2108,16 @@ impl<'a> ShapedSignalSource<'a> {
             input_breaks,
             shaped_offset: input_offset,
             exact_kernel: ExactKernel::new(kernel),
+            bounds_jerk: false,
+        }
+    }
+
+    /// The source whose exact polynomials also bound their jerk's rounding
+    /// ([`ExactPiece::jerk`]) where a fit of it holds a jerk tolerance.
+    pub(crate) fn bounding_jerk(self, fit_tol: FitTol) -> Self {
+        Self {
+            bounds_jerk: fit_tol.jerk_mm_s3.is_finite(),
+            ..self
         }
     }
 
@@ -2144,6 +2157,7 @@ impl<'a> ShapedSignalSource<'a> {
                 kernel: &self.exact_kernel,
                 impulses: self.table.gain_impulses(),
                 position_offset: self.shaped_offset,
+                bounds_jerk: self.bounds_jerk,
             },
         )
     }
@@ -3577,6 +3591,12 @@ fn stored_acceleration_noise(position_scale: f64, span_s: f64) -> f64 {
     degree * (degree - 1.0) * second_difference_rounding / (span_s * span_s)
 }
 
+/// What one ulp of sampling noise reaches a rung's jerk as, times `h³`, as
+/// [`LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN`] its acceleration: the fast bench
+/// config's leader rungs a microsecond or two wide miss the signal's jerk by
+/// about 1300 ulps of their samples over `h³`.
+const LADDER_HIGH_DEGREE_JERK_NOISE_GAIN: f64 = 2048.0;
+
 fn stored_acceleration_floor(position_scale: f64, fit_tol: FitTol) -> f64 {
     let storage_share_of_accel_budget = 0.5 * fit_tol.accel_mm_s2;
     (stored_acceleration_noise(position_scale, 1.0) / storage_share_of_accel_budget).sqrt()
@@ -3584,6 +3604,9 @@ fn stored_acceleration_floor(position_scale: f64, fit_tol: FitTol) -> f64 {
 
 #[derive(Debug, Clone, Copy)]
 struct LadderFloors {
+    /// `h³` times the jerk a piece of span `h` carries of rounding alone
+    /// ([`LadderFloors::jerk_noise`]).
+    jerk_noise_cubed: f64,
     high_degree: f64,
     /// A cubic never touches endpoint acceleration: sampling noise reaches
     /// its acceleration only through `c3 = ¼(h(v0+v1)/2 − Δp)`, and `Δp` is
@@ -3615,6 +3638,17 @@ fn ladder_resolution_floor<S: TrackSignal>(
     ladder_resolution_floor_from_scales(position_scale, velocity_scale, time_scale, fit_tol)
 }
 
+impl LadderFloors {
+    /// The jerk a piece of span `h` carries of rounding alone: the larger of
+    /// a stored piece's, a third difference of control points each rounded
+    /// by half an ulp of the position, and what the ladder's solve makes of
+    /// its samples' ([`LADDER_HIGH_DEGREE_JERK_NOISE_GAIN`]). No jerk
+    /// tolerance below it is resolvable, so a span is held to none tighter.
+    fn jerk_noise(self, h: f64) -> f64 {
+        self.jerk_noise_cubed / (h * h * h)
+    }
+}
+
 fn ladder_resolution_floor_from_scales(
     position_scale: f64,
     velocity_scale: f64,
@@ -3625,7 +3659,13 @@ fn ladder_resolution_floor_from_scales(
     let representable = MIN_DEVICE_INTERVAL_S
         .max(8.0 * f64::EPSILON * time_scale)
         .max(stored_acceleration_floor(position_scale, fit_tol));
+    let control_point_rounding = 0.5 * f64::EPSILON * position_scale;
+    let degree = LADDER_MAX_DEGREE as f64;
+    let stored_third_difference =
+        degree * (degree - 1.0) * (degree - 2.0) * 8.0 * control_point_rounding;
     LadderFloors {
+        jerk_noise_cubed: stored_third_difference
+            .max(LADDER_HIGH_DEGREE_JERK_NOISE_GAIN * sample_noise),
         high_degree: representable
             .max((LADDER_HIGH_DEGREE_ACCEL_NOISE_GAIN * sample_noise / fit_tol.accel_mm_s2).sqrt()),
         cubic: representable,
@@ -4180,6 +4220,43 @@ struct SpanFitPolicy {
     requires_hull: bool,
 }
 
+/// The finest jerk a rung over `[t0, t1]` resolves: the rounding a piece
+/// carries ([`LadderFloors::jerk_noise`]), and what anchoring a quintic to
+/// a position off by `δ` at an end moves its jerk by, up to `60·δ/h³`,
+/// where an edge on a break reads one of two polynomials disagreeing by
+/// `δ` there ([`ExactSpan::position_mismatch_at`]).
+fn jerk_resolution(floors: LadderFloors, exact: Option<&ExactSpan>, (t0, t1): (f64, f64)) -> f64 {
+    let h = t1 - t0;
+    let mismatch = exact.map_or(0.0, |exact| {
+        exact.position_mismatch_at(t0) + exact.position_mismatch_at(t1)
+    });
+    floors
+        .jerk_noise(h)
+        .max(QUINTIC_END_POSITION_JERK_GAIN * mismatch / (h * h * h))
+}
+
+/// The largest jerk, times `h³`, the quintic Hermite basis function of an
+/// end position reaches: `1 − 10s³ + 15s⁴ − 6s⁵` has third derivative
+/// `−60 + 360s − 360s²` over `h³`.
+const QUINTIC_END_POSITION_JERK_GAIN: f64 = 60.0;
+
+/// Where a jerk-held fit halves a span: at the signal's break nearest the
+/// middle, within the middle half. A piece follows the jerk of one
+/// polynomial at a time, and an edge a sliver short of a break anchors to
+/// the far side's state extrapolated across it ([`edge_velocity_and_acceleration`]),
+/// which no jerk tolerance survives; at a break the edge reads its own side.
+fn jerk_held_split(
+    policy: &SpanFitPolicy,
+    exact: Option<&ExactSpan>,
+    (t0, t1): (f64, f64),
+) -> Option<f64> {
+    if !policy.fit_tol.jerk_mm_s3.is_finite() {
+        return None;
+    }
+    let quarter = 0.25 * (t1 - t0);
+    exact?.break_nearest(0.5 * (t0 + t1), (t0 + quarter, t1 - quarter))
+}
+
 /// One span of a refinement tree.
 #[derive(Clone, Copy)]
 struct RefineSpan {
@@ -4410,6 +4487,53 @@ fn velocity_past_moved_break<S: TrackSignal>(
     Ok(nurbs::fmadd(acceleration, seam - past, velocity))
 }
 
+/// The signal's jerk at a span's interior probes, where a follower reads
+/// the leader's jerk ([`FitTol::jerk_mm_s3`]): a rung whose jerk misses it
+/// there by more than the tolerance is refused before the hull, so the
+/// ladder climbs to a rung that follows the jerk instead of the span
+/// halving toward the floor.
+struct JerkHold {
+    jerk: [f64; LADDER_PROBES_U.len()],
+    h: f64,
+    tol: f64,
+}
+
+impl JerkHold {
+    fn over(exact: &ExactSpan, (t0, t1): (f64, f64), tol: f64) -> Self {
+        Self {
+            jerk: LADDER_PROBES_U.map(|u| {
+                let t = span_probe_t(t0, t1, u);
+                let toward = if u < 0.0 { t1 } else { t0 };
+                exact.jerk(t, toward)
+            }),
+            h: t1 - t0,
+            tol,
+        }
+    }
+
+    /// The worst jerk miss over the probes, over the tolerance.
+    fn worst_miss(&self, rung: &[f64]) -> f64 {
+        let scale = (2.0 / self.h).powi(3);
+        LADDER_PROBES_U
+            .iter()
+            .zip(&self.jerk)
+            .map(|(&u, &signal)| {
+                let rung_jerk =
+                    rung.iter()
+                        .enumerate()
+                        .skip(3)
+                        .rev()
+                        .fold(0.0, |acc, (power, &c)| {
+                            let falling = (power * (power - 1) * (power - 2)) as f64;
+                            nurbs::fmadd(acc, u, falling * c)
+                        })
+                        * scale;
+                (rung_jerk - signal).abs() / self.tol
+            })
+            .fold(0.0, f64::max)
+    }
+}
+
 fn span_probe_t(t0: f64, t1: f64, u: f64) -> f64 {
     match u {
         -1.0 => next_toward(t0, t1),
@@ -4457,7 +4581,17 @@ fn shaped_ladder<S: TrackSignal>(
     let axis = policy.axis;
     let fit_tol = policy.fit_tol;
     let h = t1 - t0;
-    let piece_tol = fit_tol.for_piece(h);
+    let piece_tol = if fit_tol.jerk_mm_s3.is_finite() {
+        fit_tol
+            .for_piece(h)
+            .with_jerk(
+                fit_tol
+                    .jerk_mm_s3
+                    .max(jerk_resolution(policy.floors, exact, (t0, t1))),
+            )
+    } else {
+        fit_tol.for_piece(h)
+    };
     let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
     let from_start = FacingRead {
         sig,
@@ -4544,10 +4678,15 @@ fn shaped_ladder<S: TrackSignal>(
         samples: std::array::from_fn(|_| std::cell::OnceCell::new()),
         edge_scans: std::cell::OnceCell::new(),
     });
+    let jerk_hold = exact
+        .filter(|_| piece_tol.jerk_mm_s3.is_finite())
+        .map(|exact| JerkHold::over(exact, (t0, t1), piece_tol.jerk_mm_s3));
     let held_miss = |rung: &[f64]| {
-        onset_hold
+        let onset = onset_hold
             .as_ref()
-            .map_or(0.0, |hold| hold.worst_miss(rung))
+            .map_or(0.0, |hold| hold.worst_miss(rung));
+        let jerk = jerk_hold.as_ref().map_or(0.0, |hold| hold.worst_miss(rung));
+        onset.max(jerk)
     };
     let ladder_span = LadderSpan { h, endpoint_delta };
     let exempt_stretches = exempt_accelerations(sig, exact, (t0, t1), policy);
@@ -4653,7 +4792,7 @@ fn shaped_ladder<S: TrackSignal>(
                     }
                 },
             };
-            let Some(u) = unproven else {
+            let Some(hull::Unproven { u, misses_jerk }) = unproven else {
                 return Ok((SpanVerdict::Proven(coefficients), [start, end]));
             };
             let t = t_of(u);
@@ -4696,6 +4835,9 @@ fn shaped_ladder<S: TrackSignal>(
                             acceleration: a1,
                         },
                     },
+                    exact
+                        .filter(|_| misses_jerk)
+                        .and_then(|exact| exact.break_nearest(t_of(u), (t0, t1))),
                 ),
                 [start, end],
             ))
@@ -4703,7 +4845,10 @@ fn shaped_ladder<S: TrackSignal>(
         Err(Some(LadderMiss {
             closest_rung,
             failure,
-        })) => Ok((SpanVerdict::Missed(closest_rung, failure), [start, end])),
+        })) => Ok((
+            SpanVerdict::Missed(closest_rung, failure, None),
+            [start, end],
+        )),
         Err(None) => Ok((SpanVerdict::Refused, [start, end])),
     }
 }
@@ -4733,8 +4878,9 @@ enum SpanVerdict {
     /// A rung, proven within the budget.
     Proven(Vec<f64>),
     /// The closest rung of a ladder that refused them all, or a rung the
-    /// hull did not prove, and where it misses.
-    Missed(Vec<f64>, LadderFailure),
+    /// hull did not prove, where it misses, and the signal's break a jerk
+    /// miss lies against ([`hull::Unproven`]).
+    Missed(Vec<f64>, LadderFailure, Option<f64>),
     /// Every rung refused on a splittable span, which is split without
     /// ranking them.
     Refused,
@@ -5026,11 +5172,17 @@ fn refine_span_against<S: TrackSignal>(
             out.push(exact_piece(&mono_u, t0, t1, t1 - t0));
             return Ok(());
         }
-        SpanVerdict::Missed(mono_u, failure) => Some((mono_u, failure)),
+        SpanVerdict::Missed(mono_u, failure, jerk_break) => Some((mono_u, failure, jerk_break)),
         SpanVerdict::Refused => None,
     };
+    let split = missed
+        .as_ref()
+        .and_then(|(_, _, jerk_break)| *jerk_break)
+        .filter(|&at| at - t0 >= floors.cubic && t1 - at >= floors.cubic)
+        .or_else(|| jerk_held_split(policy, exact, (t0, t1)))
+        .unwrap_or(tm);
     if !splittable {
-        let (mono_u, failure) =
+        let (mono_u, failure, _) =
             missed.expect("a span at its floor ranks the rungs its ladder refuses");
         if failure.error.position <= fit_tol.pos_mm
             && failure.error.velocity <= velocity_budget
@@ -5123,7 +5275,7 @@ fn refine_span_against<S: TrackSignal>(
         exact,
         RefineSpan {
             t0,
-            t1: tm,
+            t1: split,
             slivers: EdgeSlivers {
                 end: 0.0,
                 end_break: None,
@@ -5140,7 +5292,7 @@ fn refine_span_against<S: TrackSignal>(
         sig,
         exact,
         RefineSpan {
-            t0: tm,
+            t0: split,
             t1,
             slivers: EdgeSlivers {
                 start: 0.0,

@@ -22,6 +22,7 @@ fn local(coefficients: &[f64]) -> LocalPolynomial {
         coefficients: padded,
         len: coefficients.len(),
         rounding: 0.0,
+        slope_rounding: 0.0,
     }
 }
 
@@ -69,6 +70,7 @@ fn verdict(mono_u: &[f64], budget: HullBudget) -> Option<f64> {
         (T0, T1),
         budget,
     )
+    .map(|miss| miss.u)
 }
 
 /// `T₈` peaks at one on `[−1, 1]`, but its Bernstein hull on the whole
@@ -209,8 +211,8 @@ fn a_jerk_budget_holds_the_rung_s_jerk_to_the_signal_s() {
         )
     };
     assert_eq!(verdict(signal_jerk + 0.9, with_jerk(1.0)), None);
-    assert!(verdict(signal_jerk + 1.1, with_jerk(1.0)).is_some());
-    assert!(verdict(signal_jerk - 1.1, with_jerk(1.0)).is_some());
+    assert!(verdict(signal_jerk + 1.1, with_jerk(1.0)).is_some_and(|miss| miss.misses_jerk));
+    assert!(verdict(signal_jerk - 1.1, with_jerk(1.0)).is_some_and(|miss| miss.misses_jerk));
     assert_eq!(verdict(signal_jerk + 1.0e6, with_jerk(f64::INFINITY)), None);
 }
 

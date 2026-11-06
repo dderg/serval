@@ -27,10 +27,8 @@
 //! (`shaper_hull`), which follow every break inside a span, so no image
 //! needs a seed for a piece to hold the tolerance, and every piece is held
 //! to the whole of it. The partition is left to the fit, which halves a span
-//! no rung fits. Five kinds of image stay seeds:
+//! no rung fits. Four kinds of image stay seeds:
 //!
-//! - one whose jerk step `J₃` passes a jerk tolerance the fit holds, where
-//!   a follower reads the leader's jerk;
 //! - one that may carry a velocity step wide enough for a resolution floor
 //!   to call it a velocity break, a knot the plan must anchor: a `J₁` past
 //!   the acceleration tolerance carried across the narrowest floor, or
@@ -158,14 +156,6 @@ impl JumpSeries {
     fn below_any_velocity_break(&self, fit_tol: FitTol) -> bool {
         self.len < 2 || self.orders[1].abs() <= fit_tol.accel_mm_s2 * MIN_DEVICE_INTERVAL_S
     }
-
-    /// Whether the jerk step `J₃` is within the fit's jerk tolerance
-    /// ([`FitTol::jerk_mm_s3`]). A piece across a larger one misses the
-    /// side it does not follow by more than the tolerance, and halving the
-    /// span about the step only narrows the pieces down to the floor.
-    fn within_jerk_tolerance(&self, fit_tol: FitTol) -> bool {
-        self.len < 4 || self.orders[3].abs() <= fit_tol.jerk_mm_s3
-    }
 }
 
 /// Every output break of the shaped signal — each input break moved by each
@@ -261,10 +251,9 @@ impl ShapedBreaks {
                 self.bounds_rest(input, image)
                     || (cruise_ends == CruiseEnds::Anchored
                         && self.bounds_cruise(input, image, fit_tol))
-                    || self.image_jumps(input, image).is_none_or(|jumps| {
-                        !jumps.below_any_velocity_break(fit_tol)
-                            || !jumps.within_jerk_tolerance(fit_tol)
-                    })
+                    || self
+                        .image_jumps(input, image)
+                        .is_none_or(|jumps| !jumps.below_any_velocity_break(fit_tol))
             });
             if anchors || t - last_kept >= self.minimum_span {
                 kept.push(t);

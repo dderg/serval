@@ -1223,6 +1223,7 @@ impl KernelFit<'_> {
                 kernel: &exact_kernel,
                 impulses: &[],
                 position_offset: 0.0,
+                bounds_jerk: false,
             },
         );
         let output_monotonicity = if nonnegative_demand && !gained_input {
