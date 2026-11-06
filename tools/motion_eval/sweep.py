@@ -14,6 +14,7 @@ import argparse
 import concurrent.futures
 import dataclasses
 import json
+import math
 import pathlib
 import sys
 
@@ -32,7 +33,26 @@ DEFAULT_FAMILY = {"bench": "mzv", "fast": "smooth_mzv"}
 FAMILIES = ("mzv", "smooth_mzv")
 SCV_VALUES = (1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 35.0)
 MCR_VALUES = (0.0, 0.25, 0.5)
-BUDGETS_MM = (0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4)
+BUDGETS_MM = (
+    0.03,
+    0.05,
+    0.07,
+    0.08,
+    0.09,
+    0.1,
+    0.12,
+    0.15,
+    0.2,
+    0.25,
+    0.3,
+    0.4,
+)
+PARETO_CASES = (
+    "voron_top_layers",
+    "circles",
+    "zigzag_infill",
+    "corners_turn90",
+)
 BASE_SCV = 5.0
 BASE_MCR = 0.5
 UNLIMITED = 1e4
@@ -340,40 +360,151 @@ def pareto_table(rows, knob):
     return "\n".join(lines)
 
 
-def _front(rows):
-    rows = sorted(rows, key=lambda r: r["corner_p99"])
-    mask = _pareto_mask(
-        [r["rel_time"] for r in rows], [r["corner_p99"] for r in rows]
+def _setting(r):
+    knob = (
+        "scv %g" % r["scv"] if r["kind"] == "scv" else "budget %g" % r["budget"]
     )
-    front = [r for r, m in zip(rows, mask) if m]
-    return (
-        np.array([r["corner_p99"] for r in front]),
-        np.array([r["rel_time"] for r in front]),
-    )
+    return "%s, mcr %g" % (knob, r["mcr"])
 
 
-def comparison_table(records, cases, configs):
-    lines = [
-        "| config | shaper | corner p99 mm | SCV front time | budget front time |"
-        " saving |",
-        "|---|---|---|---|---|---|",
+def _runs_by_setting(records, kind, config, family):
+    grouped = {}
+    for r in records:
+        if (
+            r["kind"] == kind
+            and r["config"] == config
+            and r["family"] == family
+        ):
+            grouped.setdefault(_setting(r), {})[r["case"]] = r
+    return grouped
+
+
+def equal_deviation_tables(records, cases, configs):
+    idx = _index(records)
+    per_case = [
+        "| config | shaper | case | default s | default p99 mm |"
+        " best SCV setting | s | best budget setting | s |"
+        " budget vs default | budget vs best SCV |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    single = [
+        "| config | shaper | default corpus s | SCV setting | s | vs default |"
+        " budget setting | s | vs default | budget vs SCV |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for config in configs:
         for family in FAMILIES:
-            scv_dev, scv_time = _front(
-                aggregate(records, cases, config, family, "scv", "scv")
-            )
-            b_dev, b_time = _front(
-                aggregate(records, cases, config, family, "budget", "budget")
-            )
-            for dev, tb in zip(b_dev, b_time):
-                if dev < scv_dev[0] or dev > scv_dev[-1]:
-                    continue
-                ts = float(np.interp(dev, scv_dev, scv_time))
-                lines.append(
-                    "| %s | %s | %.3f | %.3f | %.3f | %+.1f%% |"
-                    % (config, family, dev, ts, tb, 100.0 * (ts - tb) / ts)
+            default = {
+                case: _baseline(idx, case, config, family) for case in cases
+            }
+            limit = {c: default[c]["corners"]["p99_mm"] for c in cases}
+            best = {}
+            for kind in ("scv", "budget"):
+                groups = _runs_by_setting(records, kind, config, family)
+                for case in cases:
+                    ok = [
+                        g[case]
+                        for g in groups.values()
+                        if g[case]["corners"]["p99_mm"] <= limit[case]
+                    ]
+                    best[kind, case] = min(
+                        ok, key=lambda r: r["print_time_s"], default=None
+                    )
+                feasible = {
+                    name: sum(g[c]["print_time_s"] for c in cases)
+                    for name, g in groups.items()
+                    if all(g[c]["corners"]["p99_mm"] <= limit[c] for c in cases)
+                }
+                best[kind] = min(
+                    feasible.items(),
+                    key=lambda kv: kv[1],
+                    default=("none", math.nan),
                 )
+            for case in cases:
+                td = default[case]["print_time_s"]
+                s, b = best["scv", case], best["budget", case]
+                per_case.append(
+                    "| %s | %s | %s | %.2f | %.3f | %s | %.2f | %s | %s | %s | %s |"
+                    % (
+                        config,
+                        family,
+                        case,
+                        td,
+                        limit[case],
+                        _setting(s),
+                        s["print_time_s"],
+                        _setting(b) if b else "none",
+                        "%.2f" % b["print_time_s"] if b else "",
+                        _pct(td, b["print_time_s"]) if b else "",
+                        _pct(s["print_time_s"], b["print_time_s"]) if b else "",
+                    )
+                )
+            total = sum(default[c]["print_time_s"] for c in cases)
+            (s_name, s_time), (b_name, b_time) = best["scv"], best["budget"]
+            single.append(
+                "| %s | %s | %.1f | %s | %.1f | %s | %s | %.1f | %s | %s |"
+                % (
+                    config,
+                    family,
+                    total,
+                    s_name,
+                    s_time,
+                    _pct(total, s_time),
+                    b_name,
+                    b_time,
+                    _pct(total, b_time),
+                    _pct(s_time, b_time),
+                )
+            )
+    return "\n".join(single), "\n".join(per_case)
+
+
+def _pct(reference, value):
+    return "%+.1f%%" % (100.0 * (value - reference) / reference)
+
+
+FRONT_STEP = 0.005
+
+
+def case_pareto_table(records, case, config, family):
+    rows = sorted(
+        (
+            r
+            for r in records
+            if r["case"] == case
+            and r["config"] == config
+            and r["family"] == family
+            and r["kind"] in ("scv", "budget")
+        ),
+        key=lambda r: r["corners"]["p99_mm"],
+    )
+    mask = _pareto_mask(
+        [r["print_time_s"] for r in rows],
+        [r["corners"]["p99_mm"] for r in rows],
+    )
+    lines = [
+        "| setting | s | corner p50 mm | p99 mm | max mm | max jump mm/s |"
+        " peak accel |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    kept_time = math.inf
+    for r, front in zip(rows, mask):
+        if not front or r["print_time_s"] > kept_time * (1 - FRONT_STEP):
+            continue
+        kept_time = r["print_time_s"]
+        c = r["corners"]
+        lines.append(
+            "| %s | %.2f | %.3f | %.3f | %.3f | %.1f | %.0f |"
+            % (
+                _setting(r),
+                r["print_time_s"],
+                c["p50_mm"],
+                c["p99_mm"],
+                c["max_mm"],
+                r["max_jump_mm_s"],
+                r["peak_accel"],
+            )
+        )
     return "\n".join(lines)
 
 
@@ -392,8 +523,30 @@ def tables(records, cases, configs):
                         knob,
                     ),
                 ]
-    out += ["", "## Budget front vs SCV front at equal corner p99", ""]
-    out.append(comparison_table(records, cases, configs))
+    single, per_case = equal_deviation_tables(records, cases, configs)
+    out += [
+        "",
+        "## Fastest single setting with corner p99 <= default (scv 5, mcr 0.5)"
+        " in every case",
+        "",
+        single,
+        "",
+        "## Fastest setting per case with corner p99 <= default",
+        "",
+        per_case,
+    ]
+    for config in configs:
+        for case in PARETO_CASES:
+            if case not in cases:
+                continue
+            family = DEFAULT_FAMILY[config]
+            out += [
+                "",
+                "## Pareto front (time vs corner p99), %s, %s, %s, SCV and"
+                " budget runs" % (case, config, family),
+                "",
+                case_pareto_table(records, case, config, family),
+            ]
     return "\n".join(out) + "\n"
 
 

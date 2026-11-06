@@ -14,6 +14,12 @@ linear in v, so the shaped position is A(t) + v*B(t) with A, B built from
 four kernel moments per axis that do not depend on the corner. The corner
 deviation is the harness metric: the larger of the shaped path's distance
 to the two legs and the vertex's distance to the shaped path.
+
+Curve cap: an isolated-vertex model misses curves drawn as many short
+segments, where the kernel spans several vertices and pulls the path inward
+by ~sigma^2/2 * v^2 * curvature. Each junction is therefore also limited to
+v^2 <= 2*budget / (sigma^2 * turn / mean segment length), with sigma^2 the
+larger kernel variance of X and Y.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ class CornerModel:
         self.N, self.Q, self.N2, self.Q2 = (
             np.stack([m[i] for m in moments], axis=-1) for i in range(4)
         )
+        self.variance = max(k.second_moment() for k in kernels)
 
     def _moments(self, kernel):
         if kernel.kind == "smoother":
@@ -114,12 +121,19 @@ class ShaperCornerLimit:
     def max_v2(self, prev_move, move, cap_v2):
         u1 = np.array(prev_move.axes_r[:2])
         u2 = np.array(move.axes_r[:2])
-        if min(np.linalg.norm(u1), np.linalg.norm(u2)) < MIN_XY_DIRECTION:
+        n1, n2 = np.linalg.norm(u1), np.linalg.norm(u2)
+        if min(n1, n2) < MIN_XY_DIRECTION:
             return cap_v2
+        model = self.model()
+        turn = math.acos(min(1.0, max(-1.0, float(u1 @ u2) / (n1 * n2))))
+        mean_xy_length = 0.5 * (prev_move.move_d * n1 + move.move_d * n2)
+        curvature = turn / mean_xy_length
+        if model.variance > 0.0 and curvature > 0.0:
+            cap_v2 = min(
+                cap_v2, 2.0 * self.budget / (model.variance * curvature)
+            )
         accel = min(prev_move.accel, move.accel)
-        v = self.model().max_speed(
-            u1, u2, accel, math.sqrt(cap_v2), self.budget
-        )
+        v = model.max_speed(u1, u2, accel, math.sqrt(cap_v2), self.budget)
         return v * v
 
 
