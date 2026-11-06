@@ -561,6 +561,7 @@ fn no_sample_of_a_rail_pair_leaves_the_law_by_more_than_its_proven_defect() {
             v0,
             law,
             dense: std::sync::OnceLock::from(knots.clone()),
+            knot_slopes: std::sync::OnceLock::new(),
         };
         for pair in knots.windows(2).filter(|pair| pair[1].t > pair[0].t) {
             let proven = pair_defect(&law, &law.rail_pair(&pair[0], &pair[1])).acceleration;

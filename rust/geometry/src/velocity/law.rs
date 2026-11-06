@@ -301,7 +301,7 @@ pub enum RailPairShape {
 }
 
 /// One law over one time interval, in chain-local time and run-frame arc.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LawSegment {
     pub t0: f64,
     pub dt: f64,
@@ -309,6 +309,22 @@ pub struct LawSegment {
     pub v0: f64,
     pub law: ScalarLaw,
     dense: OnceLock<Arc<Vec<RailKnot>>>,
+    /// Each dense knot's acceleration and its rate under the law, read
+    /// once for every pair [`Self::state_at`] interpolates.
+    knot_slopes: OnceLock<Arc<[(f64, f64)]>>,
+}
+
+impl std::fmt::Debug for LawSegment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LawSegment")
+            .field("t0", &self.t0)
+            .field("dt", &self.dt)
+            .field("s0", &self.s0)
+            .field("v0", &self.v0)
+            .field("law", &self.law)
+            .field("dense", &self.dense)
+            .finish()
+    }
 }
 
 impl PartialEq for LawSegment {
@@ -540,6 +556,7 @@ impl LawSegment {
             v0,
             law,
             dense: OnceLock::new(),
+            knot_slopes: OnceLock::new(),
         }
     }
 
@@ -571,7 +588,7 @@ impl LawSegment {
                 let u = ((tau - lo.t) / h).clamp(0.0, 1.0);
                 let (v, a, mass, full_mass) = match hi.departure {
                     CapDeparture::None => {
-                        let [m0, c0, m1, c1] = self.law.pair_slopes(lo, hi, h);
+                        let [m0, c0, m1, c1] = self.cached_pair_slopes(idx, h);
                         (
                             quintic(lo.v, m0, c0, hi.v, m1, c1, u),
                             quintic_deriv(0.0, m0, c0, hi.rise, m1, c1, u) / h,
@@ -736,6 +753,7 @@ impl LawSegment {
                     v0,
                     law,
                     dense: OnceLock::new(),
+                    knot_slopes: OnceLock::new(),
                 };
                 let _ = seg.dense.set(knots);
                 Some(seg)
@@ -930,6 +948,7 @@ impl LawSegment {
             v0: self.v0,
             law: self.law,
             dense: OnceLock::new(),
+            knot_slopes: OnceLock::new(),
         };
         let _ = seg.dense.set(Arc::new(cut));
         seg
@@ -1030,6 +1049,19 @@ impl LawSegment {
         self.dense
             .get()
             .expect("a DiskRail segment always carries its dense solution")
+    }
+
+    /// [`ScalarLaw::pair_slopes`] of the dense pair from knot `lo` to the
+    /// next, from the knots' slopes read once per segment.
+    fn cached_pair_slopes(&self, lo: usize, h: f64) -> [f64; 4] {
+        let slopes = self.knot_slopes.get_or_init(|| {
+            self.rail_knots()
+                .iter()
+                .map(|knot| self.law.knot_slopes(knot))
+                .collect()
+        });
+        let ((a_lo, rate_lo), (a_hi, rate_hi)) = (slopes[lo], slopes[lo + 1]);
+        [a_lo * h, rate_lo * h * h, a_hi * h, rate_hi * h * h]
     }
 
     /// The knot pairs of a disk rail that reach into segment-local time
@@ -1163,6 +1195,7 @@ fn flipped_rail(rev: &[RailKnot], t0: f64, s0: f64, law: ScalarLaw, ds: f64) -> 
         v0,
         law,
         dense: OnceLock::new(),
+        knot_slopes: OnceLock::new(),
     };
     let _ = seg.dense.set(Arc::new(knots));
     (seg, v0)
