@@ -110,10 +110,12 @@ pub geometry::frontend::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::frontend::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::frontend::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::frontend::ExtruderCaps::path_jerk_per_accel_hz: [f64; 8]
+pub geometry::frontend::ExtruderCaps::path_jerk_per_accel_step_hz: [f64; 8]
 pub geometry::frontend::ExtruderCaps::rest_settle: geometry::RestSettleId
 pub geometry::frontend::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps
 pub fn geometry::frontend::ExtruderCaps::path_jerk_gain(&self, [bool; 3]) -> f64
+pub fn geometry::frontend::ExtruderCaps::planned_path_jerk_gain(&self, [bool; 3]) -> f64
 pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::frontend::LeaderSpill
@@ -679,8 +681,12 @@ pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::
 pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+pub fn geometry::velocity::law::LawSegment::variation(&self) -> geometry::velocity::law::LawVariation
 impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+pub struct geometry::velocity::law::LawVariation
+pub geometry::velocity::law::LawVariation::accel: f64
+pub geometry::velocity::law::LawVariation::speed: f64
 pub struct geometry::velocity::law::PairDefect
 pub geometry::velocity::law::PairDefect::acceleration: f64
 pub geometry::velocity::law::PairDefect::arc: f64
@@ -785,8 +791,12 @@ pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::
 pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+pub fn geometry::velocity::law::LawSegment::variation(&self) -> geometry::velocity::law::LawVariation
 impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+pub struct geometry::velocity::LawVariation
+pub geometry::velocity::LawVariation::accel: f64
+pub geometry::velocity::LawVariation::speed: f64
 pub struct geometry::velocity::MoveVelocity
 pub geometry::velocity::MoveVelocity::accel: f64
 pub geometry::velocity::MoveVelocity::entry_v: f64
@@ -1002,10 +1012,12 @@ pub geometry::ExtruderCaps::max_accel_mm_s2: f64
 pub geometry::ExtruderCaps::max_velocity_mm_s: f64
 pub geometry::ExtruderCaps::own_jerk_per_accel_hz: f64
 pub geometry::ExtruderCaps::path_jerk_per_accel_hz: [f64; 8]
+pub geometry::ExtruderCaps::path_jerk_per_accel_step_hz: [f64; 8]
 pub geometry::ExtruderCaps::rest_settle: geometry::RestSettleId
 pub geometry::ExtruderCaps::unshaped_leaders: [bool; 3]
 impl geometry::frontend::ExtruderCaps
 pub fn geometry::frontend::ExtruderCaps::path_jerk_gain(&self, [bool; 3]) -> f64
+pub fn geometry::frontend::ExtruderCaps::planned_path_jerk_gain(&self, [bool; 3]) -> f64
 pub fn geometry::frontend::ExtruderCaps::ratio_ramp_rule(&self) -> geometry::ratio_ramp::RatioRampRule
 pub fn geometry::frontend::ExtruderCaps::stricter(core::option::Option<Self>, core::option::Option<Self>) -> core::option::Option<Self>
 pub struct geometry::ExtrusionBudget
@@ -1081,8 +1093,12 @@ pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::
 pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
 pub fn geometry::velocity::law::LawSegment::time_at_distance(&self, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::until_arc(f64, f64, f64, geometry::velocity::law::ScalarLaw, f64) -> core::option::Option<geometry::velocity::law::LawSegment>
+pub fn geometry::velocity::law::LawSegment::variation(&self) -> geometry::velocity::law::LawVariation
 impl core::cmp::PartialEq for geometry::velocity::law::LawSegment
 pub fn geometry::velocity::law::LawSegment::eq(&self, &Self) -> bool
+pub struct geometry::LawVariation
+pub geometry::LawVariation::accel: f64
+pub geometry::LawVariation::speed: f64
 pub struct geometry::LeaderSpill
 pub geometry::LeaderSpill::cell_s: f64
 pub geometry::LeaderSpill::core_density_per_s: f64
