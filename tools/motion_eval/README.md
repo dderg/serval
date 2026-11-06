@@ -10,6 +10,7 @@ uv run python -m tools.motion_eval CONFIG GCODE --start X,Y,Z [-o result.json] \
 uv run pytest tools/motion_eval
 python3 ~/Developer/serval/scripts/slots.py run -- \
     uv run python -m tools.motion_eval.sweep --jobs 12   # corpus sweep, FINDINGS.md
+    uv run python -m tools.motion_eval.owner_point --jobs 12   # 50k / 200-130 Hz point
 uv run python -m tools.motion_eval.corpus.build_corpus  # regenerate corpus/
 ```
 
@@ -17,6 +18,10 @@ The gcode must not home: the harness puts `SET_KINEMATIC_POSITION` at `--start`
 in front of it and `M400` after it. One MCU, linear kinematics (cartesian,
 corexy, ...) and a shaper that does not change after motion starts are required;
 anything else fails with an error.
+
+`oscillator.py` drives a damped oscillator per axis with the executed motion
+and reports the free-vibration amplitude after corners, a ringing proxy for
+tuned and untuned modes (`owner_point.py` uses it).
 
 Batch mode can exit with output still queued in the serial queue, dropping the
 tail of the stream under load. `capture.py` waits for the queue to drain before
@@ -62,10 +67,10 @@ runs never see a dictionary being rewritten.
     distance to the executed path; count, max, p99, p50 and the worst corner.
   - `final_position_model` / `_steps`.
 - `phase_time`: time in accel, cruise and decel phases and between moves.
-- `corner_budget_mm`: set when the run used the `shaper_corner.py` prototype
-  (`evaluate(..., corner_budget_mm=B)`), which replaces the
-  square_corner_velocity term of `Move.calc_junction` with the highest junction
-  speed whose shaped corner stays within B.
+- `corner_deviation`: the `[corner_deviation]` status (junction counters and
+  `max_deviation`) when the config has that section, else null.
+- `timing`, `moves_planned`: wall time spent in lookahead (`add_move`/`flush`)
+  and in the junction limiter, and the number of planned moves.
 - `steppers.*.model_vs_steps`: worst model-vs-step error and its allowed bound.
 - `samples` (with `--sample-dt`): commanded and executed position, velocity,
   acceleration and step positions over time.

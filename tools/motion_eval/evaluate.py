@@ -78,19 +78,25 @@ def evaluate(
     return analyze(raw, dt, sample_dt)
 
 
-def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
-    cap = raw.capture
+def kernel_support(kernels):
+    """Union of the axis kernels' shift ranges."""
+    return (
+        min(k.support[0] for k in kernels.values()),
+        max(k.support[1] for k in kernels.values()),
+    )
+
+
+def executed_motion(cap, dt):
+    """Commanded segments, per-axis kernels, sample grid start and count,
+    and the executed (shaped) motion of every axis on that grid."""
     seg = analysis.Segments.from_moves(cap["moves"])
     kernels = {
         axis: analysis.Kernel.from_shaper(cap["shaper"].get(axis))
         for axis in analysis.AXES
     }
-    shift_lo = min(k.support[0] for k in kernels.values())
-    shift_hi = max(k.support[1] for k in kernels.values())
+    shift_lo, shift_hi = kernel_support(kernels)
     t_start = seg.t0[0] - shift_hi - dt
     n = int(math.ceil((seg.end[-1] - shift_lo + dt - t_start) / dt)) + 1
-    t = t_start + dt * np.arange(n)
-
     jump_t, jump_v = seg.velocity_jumps()
     motion = {
         axis: analysis.executed_axis(
@@ -98,6 +104,13 @@ def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
         )
         for i, axis in enumerate(analysis.AXES)
     }
+    return seg, kernels, t_start, n, jump_v, motion
+
+
+def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
+    cap = raw.capture
+    seg, kernels, t_start, n, jump_v, motion = executed_motion(cap, dt)
+    t = t_start + dt * np.arange(n)
     exec_pos = np.stack([motion[a].pos for a in analysis.AXES], axis=-1)
     exec_vel = np.stack([motion[a].vel for a in analysis.AXES], axis=-1)
     exec_acc = np.stack([motion[a].acc for a in analysis.AXES], axis=-1)
@@ -134,7 +147,7 @@ def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
     steps_xyz = analysis.xyz_from_steppers(steppers, zoh)
     steps_final = analysis.xyz_from_steppers(steppers, final_stepper_pos)[0]
 
-    window = max(abs(shift_lo), abs(shift_hi)) + dt
+    window = max(abs(s) for s in kernel_support(kernels)) + dt
     exec_xy = exec_pos[:, :2]
     to_cmd = analysis.distance_to_commanded(seg, t, exec_xy, window)
     steps_to_cmd = analysis.distance_to_commanded(
