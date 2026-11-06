@@ -246,6 +246,35 @@ impl PiecewisePolynomialKernel {
         largest_from(&mut vec![0.0; kernels.len()], 0, 1.0, &variation)
     }
 
+    /// The jerk per unit of input acceleration step a set of kernels, one
+    /// per axis, lets the shaped signal reach along the worst direction: a
+    /// step `Δa` in the unit disk at time `t_s` leaves the shaped jerk
+    /// `(Δaᵢ·wᵢ(t − t_s))ᵢ`, whose component along a unit `d` is at most
+    /// `|(dᵢ·wᵢ(u))ᵢ|` with the step aligned to that vector, and the largest
+    /// of that over the unit `d` is `maxᵢ |wᵢ(u)|`. For one kernel it is
+    /// `max |w|`, half its total variation when it is unimodal: the
+    /// analogue of [`Self::directional_variation`] for steps the kernels
+    /// meet apart.
+    ///
+    /// Each piece is read at its ends and at [`VARIATION_STEPS`] evenly
+    /// spaced instants between them.
+    #[must_use]
+    pub fn directional_peak(kernels: &[&Self]) -> f64 {
+        assert!(!kernels.is_empty(), "a directional peak needs a kernel");
+        kernels
+            .iter()
+            .flat_map(|kernel| kernel.pieces.iter())
+            .flat_map(|piece| {
+                let width = piece.u_end - piece.u_start;
+                (0..=VARIATION_STEPS).map(move |step| {
+                    piece
+                        .evaluate(piece.u_start + width * step as f64 / VARIATION_STEPS as f64)
+                        .abs()
+                })
+            })
+            .fold(0.0, f64::max)
+    }
+
     /// `w` just right (`right`) or left of `u`, 0 outside the support.
     fn value_beside(&self, u: f64, right: bool) -> f64 {
         self.pieces

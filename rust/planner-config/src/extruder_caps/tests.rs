@@ -112,6 +112,29 @@ fn the_bimodal_mzv_kernel_gains_more_than_twice_its_peak_and_the_plane_more_than
 }
 
 #[test]
+fn the_step_gain_is_the_tallest_kernel_peak_of_the_set() {
+    let caps = caps_of(
+        limited(&["pa"]),
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.03)])],
+    )
+    .unwrap()[0];
+    let peak = |f: f64| {
+        PiecewisePolynomialKernel::directional_peak(&[&trajectory::build_smooth_mzv_kernel(f)])
+    };
+    let (x, y) = (peak(75.0), peak(62.0));
+    assert_eq!(
+        caps.path_jerk_per_accel_step_hz,
+        [0.0, x, y, x.max(y), 0.0, x, y, x.max(y)]
+    );
+    assert!(x < 0.5 * caps.path_jerk_gain([true, false, false]));
+    assert_eq!(
+        caps.planned_path_jerk_gain([true, true, false]),
+        x.max(y),
+        "a chain without a follower kernel plans at the step gain"
+    );
+}
+
+#[test]
 fn the_reach_takes_the_widest_leader_kernel() {
     let caps = caps_of(
         limited(&["pa"]),
@@ -133,6 +156,12 @@ fn a_kernel_on_the_follower_bounds_its_own_jerk() {
     )
     .unwrap();
     assert!((caps[0].own_jerk_per_accel_hz - 2.0 * 2.0 / 0.01).abs() < 1e-9);
+    let plane = [true, true, false];
+    assert_eq!(
+        caps[0].planned_path_jerk_gain(plane),
+        caps[0].path_jerk_gain(plane),
+        "a kernel follower plans at the total variation"
+    );
 }
 
 #[test]

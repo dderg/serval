@@ -6,18 +6,22 @@ use crate::AxisRegistry;
 
 const SPATIAL_AXES: usize = 3;
 
-/// The shaped path's jerk gain over the set of spatial axes `set` through
-/// the kernels of the shaped leaders on them, 0 where none is.
-fn path_jerk_per_accel(shaped: &[(usize, &PiecewisePolynomialKernel)], set: usize) -> f64 {
+/// The shaped path's jerk gains over the set of spatial axes `set` through
+/// the kernels of the shaped leaders on them, per unit of planned
+/// acceleration and per unit of an acceleration step, 0 where none is.
+fn path_jerk_gains(shaped: &[(usize, &PiecewisePolynomialKernel)], set: usize) -> (f64, f64) {
     let kernels: Vec<&PiecewisePolynomialKernel> = shaped
         .iter()
         .filter(|(axis, _)| set & (1 << axis) != 0)
         .map(|(_, kernel)| *kernel)
         .collect();
     if kernels.is_empty() {
-        return 0.0;
+        return (0.0, 0.0);
     }
-    PiecewisePolynomialKernel::directional_variation(&kernels)
+    (
+        PiecewisePolynomialKernel::directional_variation(&kernels),
+        PiecewisePolynomialKernel::directional_peak(&kernels),
+    )
 }
 
 /// The [`ExtruderCaps`] of every follower axis with leaders and a limit
@@ -70,15 +74,16 @@ pub fn extruder_caps(
             shaped.iter().map(|(_, kernel)| *kernel).collect();
         let leader_spill = LeaderSpill::of_kernels(&leader_kernels);
         let (leaders_back, leaders_forward) = chains.leaders_support(*axis);
+        let gains: [(f64, f64); SPATIAL_AXIS_SETS] =
+            std::array::from_fn(|set| path_jerk_gains(&shaped, set));
         caps.push(ExtruderCaps {
             axis_index: *axis,
             max_velocity_mm_s: decl.max_velocity.unwrap_or(f64::INFINITY),
             max_accel_mm_s2: decl.max_accel.unwrap_or(f64::INFINITY),
             advance_slope_s,
             advance_curvature_s2_per_mm,
-            path_jerk_per_accel_hz: std::array::from_fn::<_, SPATIAL_AXIS_SETS, _>(|set| {
-                path_jerk_per_accel(&shaped, set)
-            }),
+            path_jerk_per_accel_hz: gains.map(|(variation, _)| variation),
+            path_jerk_per_accel_step_hz: gains.map(|(_, peak)| peak),
             unshaped_leaders,
             own_jerk_per_accel_hz: chain.kernel_jerk_per_accel_hz(),
             instantaneous_corner_velocity_mm_s: chain.instantaneous_corner_velocity(),

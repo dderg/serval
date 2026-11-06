@@ -19,6 +19,7 @@ fn caps() -> ExtruderCaps {
         advance_slope_s: 0.02,
         advance_curvature_s2_per_mm: 0.0,
         path_jerk_per_accel_hz: [0.0, 1000.0, 1000.0, 1000.0, 0.0, 1000.0, 1000.0, 1000.0],
+        path_jerk_per_accel_step_hz: [0.0, 500.0, 500.0, 500.0, 0.0, 500.0, 500.0, 500.0],
         unshaped_leaders: [false, false, true],
         own_jerk_per_accel_hz: f64::INFINITY,
         instantaneous_corner_velocity_mm_s: 1.0,

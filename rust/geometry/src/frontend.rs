@@ -73,6 +73,13 @@ pub struct ExtruderCaps {
     /// every lobe of a multimodal kernel taking a fresh swing of it. 0 for a
     /// set without a shaped followed axis.
     pub path_jerk_per_accel_hz: [f64; SPATIAL_AXIS_SETS],
+    /// By the same sets, the shaped path's jerk per unit of planned
+    /// acceleration *step* the kernels meet alone: a step `Δa` leaves at
+    /// most `|Δa|·maxᵢ max |wᵢ|` along any direction
+    /// ([`nurbs::algebra::PiecewisePolynomialKernel::directional_peak`]),
+    /// half the variation of a unimodal kernel. 0 for a set without a
+    /// shaped followed axis.
+    pub path_jerk_per_accel_step_hz: [f64; SPATIAL_AXIS_SETS],
     /// The followed spatial axes no kernel shapes: their planned
     /// acceleration steps reach the advance unsmoothed.
     pub unshaped_leaders: [bool; 3],
@@ -109,13 +116,9 @@ impl ExtruderCaps {
             a.axis_index, b.axis_index,
             "one fitted segment cannot extrude on two follower axes"
         );
-        let mut path_jerk_per_accel_hz = a.path_jerk_per_accel_hz;
-        for (gain, other) in path_jerk_per_accel_hz
-            .iter_mut()
-            .zip(b.path_jerk_per_accel_hz)
-        {
-            *gain = gain.max(other);
-        }
+        let larger = |a: [f64; SPATIAL_AXIS_SETS], b: [f64; SPATIAL_AXIS_SETS]| {
+            std::array::from_fn(|set| a[set].max(b[set]))
+        };
         let unshaped_leaders =
             std::array::from_fn(|axis| a.unshaped_leaders[axis] || b.unshaped_leaders[axis]);
         Some(Self {
@@ -126,7 +129,11 @@ impl ExtruderCaps {
             advance_curvature_s2_per_mm: a
                 .advance_curvature_s2_per_mm
                 .max(b.advance_curvature_s2_per_mm),
-            path_jerk_per_accel_hz,
+            path_jerk_per_accel_hz: larger(a.path_jerk_per_accel_hz, b.path_jerk_per_accel_hz),
+            path_jerk_per_accel_step_hz: larger(
+                a.path_jerk_per_accel_step_hz,
+                b.path_jerk_per_accel_step_hz,
+            ),
             unshaped_leaders,
             own_jerk_per_accel_hz: a.own_jerk_per_accel_hz.max(b.own_jerk_per_accel_hz),
             instantaneous_corner_velocity_mm_s: a
@@ -142,6 +149,22 @@ impl ExtruderCaps {
     #[must_use]
     pub fn path_jerk_gain(&self, axes: [bool; 3]) -> f64 {
         self.path_jerk_per_accel_hz[axis_set(axes)]
+    }
+
+    /// The jerk gain the planner budgets the shaped path around a segment
+    /// that moves on `axes` at. Without a follower kernel, the gain of a
+    /// step the kernels meet alone ([`Self::path_jerk_per_accel_step_hz`]):
+    /// steps closer together than the kernels' reach, and an acceleration
+    /// reversing at once, ask more, which the turning guard holds within
+    /// the extruder's limits. With one, the total variation
+    /// ([`Self::path_jerk_gain`]), which nothing behind the planner checks.
+    #[must_use]
+    pub fn planned_path_jerk_gain(&self, axes: [bool; 3]) -> f64 {
+        if self.own_jerk_per_accel_hz.is_infinite() {
+            self.path_jerk_per_accel_step_hz[axis_set(axes)]
+        } else {
+            self.path_jerk_gain(axes)
+        }
     }
 
     /// The rule the follower's ratio ramp derives each step's ramp time by.
@@ -174,6 +197,7 @@ impl ExtruderCaps {
         if !self
             .path_jerk_per_accel_hz
             .iter()
+            .chain(&self.path_jerk_per_accel_step_hz)
             .all(|gain| gain.is_finite() && *gain >= 0.0)
         {
             return Err("path jerk gains must be finite and non-negative");
