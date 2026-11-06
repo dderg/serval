@@ -735,6 +735,10 @@ pub geometry::velocity::law::RailPair::t_hi: f64
 pub geometry::velocity::law::RailPair::t_lo: f64
 pub geometry::velocity::law::RailPair::v_hi: f64
 pub geometry::velocity::law::RailPair::v_lo: f64
+impl geometry::velocity::law::RailPair
+pub fn geometry::velocity::law::RailPair::acceleration_at(&self, f64) -> f64
+pub fn geometry::velocity::law::RailPair::acceleration_bound(&self) -> f64
+pub fn geometry::velocity::law::RailPair::acceleration_variation(&self, f64, f64) -> f64
 pub const geometry::velocity::law::RAIL_ACCELERATION_DEFECT: f64
 pub const geometry::velocity::law::RAIL_ARC_DEFECT: f64
 pub const geometry::velocity::law::RAIL_SPEED_SLACK: f64
@@ -848,6 +852,10 @@ pub geometry::velocity::RailPair::t_hi: f64
 pub geometry::velocity::RailPair::t_lo: f64
 pub geometry::velocity::RailPair::v_hi: f64
 pub geometry::velocity::RailPair::v_lo: f64
+impl geometry::velocity::law::RailPair
+pub fn geometry::velocity::law::RailPair::acceleration_at(&self, f64) -> f64
+pub fn geometry::velocity::law::RailPair::acceleration_bound(&self) -> f64
+pub fn geometry::velocity::law::RailPair::acceleration_variation(&self, f64, f64) -> f64
 pub struct geometry::velocity::Serial
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
@@ -1219,6 +1227,10 @@ pub geometry::RailPair::t_hi: f64
 pub geometry::RailPair::t_lo: f64
 pub geometry::RailPair::v_hi: f64
 pub geometry::RailPair::v_lo: f64
+impl geometry::velocity::law::RailPair
+pub fn geometry::velocity::law::RailPair::acceleration_at(&self, f64) -> f64
+pub fn geometry::velocity::law::RailPair::acceleration_bound(&self) -> f64
+pub fn geometry::velocity::law::RailPair::acceleration_variation(&self, f64, f64) -> f64
 pub struct geometry::RatioRampRule
 pub geometry::RatioRampRule::advance_slope_s: f64
 pub geometry::RatioRampRule::kernel_jerk_per_accel_hz: f64
