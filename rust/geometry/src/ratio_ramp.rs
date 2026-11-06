@@ -34,9 +34,9 @@
 //! ([`RatioRampRule::demand`]), with `|(h²)″|`, `h·|(h²)‴|` and, over a
 //! gap `L` between width nodes, `L·|(h²)‴|` at most what the width field's
 //! node shape allows ([`WIDTH_SQUARE_SLOPE_BOUND`],
-//! [`WIDTH_SQUARE_CURVATURE_BOUND`], [`WIDTH_SQUARE_CURVATURE_PER_GAP_BOUND`]),
-//! `h = v·τ/2` and `L` at least the path the leaders cover in
-//! [`RATIO_RAMP_NODE_SPACING_S`].
+//! [`WIDTH_SQUARE_CURVATURE_BOUND`], [`width_square_curvature_per_gap`]),
+//! `h = v·τ/2`, at most half the span, and `L` at least the path the
+//! leaders cover in [`RATIO_RAMP_NODE_SPACING_S`].
 //!
 //! The ramp time is the shortest in
 //! [`RATIO_RAMP_MIN_TIME_S`, `RATIO_RAMP_MAX_TIME_S`] whose addition fits
@@ -107,15 +107,31 @@ pub const WIDTH_SQUARE_SLOPE_BOUND: f64 = 4.445;
 /// the shortest ramp.
 pub const RATIO_RAMP_NODE_SPACING_S: f64 = RATIO_RAMP_MIN_TIME_S / 2.0;
 /// The most the width field bends `h²`'s slope against the path `L` between
-/// the nodes either side, `max L·|(h²)‴| = max 2L·|3h′h″ + h·h‴|`: at a
-/// moving node the smootherstep's `h′ = h″ = 0` and `h‴` peaks at
-/// `60·ENVELOPE_SLOPE/L`, so `2h·60·ENVELOPE_SLOPE` with `h` at most
-/// [`WIDEST_NODE_PER_GAP`]` ·L`; a rise off a rest over `D`, `h = H·ψ`
-/// with `H ≤ ENVELOPE_SLOPE·D`, bends it by at most `6.75/D`.
-pub const WIDTH_SQUARE_CURVATURE_PER_GAP_BOUND: f64 =
+/// the nodes either side, `max L·|(h²)‴| = max 2L·|3h′h″ + h·h‴|`, over
+/// widths `h` at most `widths_per_gap·L`. Between moving nodes,
+/// `h = h_a + Δ·S(x)` with `|Δ| ≤ ENVELOPE_SLOPE·L` makes it
+/// `2·|3(Δ/L)²·S′S″ + (h/L)·(Δ/L)·S‴|`, which peaks at a node, where
+/// `S′ = S″ = 0` and `S‴ = 60`, as `2·60·ENVELOPE_SLOPE·h/L` wherever that
+/// passes `2.51`; `h` is at most [`WIDEST_NODE_PER_GAP`]` ·L`. A rise off a
+/// rest over `L`, `h = H·ψ(x)` with `ψ = 1 − (1 − x)³` and
+/// `H ≤ ENVELOPE_SLOPE·L`, bends it by at most
+/// `6·ENVELOPE_SLOPE²·max|ψ′ψ″| = 6.75`, at the rest.
+#[must_use]
+pub fn width_square_curvature_per_gap(widths_per_gap: f64) -> f64 {
+    let node = 2.0
+        * RATIO_RAMP_ENVELOPE_SLOPE
+        * SMOOTHERSTEP_PEAK_JERK
+        * widths_per_gap.min(WIDEST_NODE_PER_GAP);
+    node.max(REST_RISE_SQUARE_CURVATURE_PER_GAP)
+}
+/// `max |ψ′·ψ″| = 3u²·6u` at the rest, `u = 1`.
+const REST_RISE_PEAK_SLOPE_BEND: f64 = 18.0;
+const REST_RISE_SQUARE_CURVATURE_PER_GAP: f64 =
+    6.0 * RATIO_RAMP_ENVELOPE_SLOPE * RATIO_RAMP_ENVELOPE_SLOPE * REST_RISE_PEAK_SLOPE_BEND;
+const WIDTH_SQUARE_CURVATURE_PER_GAP_BOUND: f64 =
     2.0 * WIDEST_NODE_PER_GAP * RATIO_RAMP_ENVELOPE_SLOPE * SMOOTHERSTEP_PEAK_JERK;
 /// The most the width field bends `h²`'s slope against the width there,
-/// `max h·|(h²)‴|`: [`WIDTH_SQUARE_CURVATURE_PER_GAP_BOUND`] at the widest
+/// `max h·|(h²)‴|`: [`width_square_curvature_per_gap`] at the widest
 /// node a gap allows; a rise off a rest bends `h²` far less against its
 /// own width.
 pub const WIDTH_SQUARE_CURVATURE_BOUND: f64 =
@@ -244,6 +260,21 @@ impl RatioSlide {
         };
         self.slope.abs() * share
     }
+
+    /// The most `v·|(h²)‴|` along the run where the moving window lies
+    /// within it at `speed_mm_s` on a ramp of `tau` seconds: at most
+    /// `v·h·|(h²)‴|/h` at the ramp's width `h = v·τ/2`, and at most
+    /// `v·L·|(h²)‴|/L` over a gap between width nodes, at least the path
+    /// `L = v·`[`RATIO_RAMP_NODE_SPACING_S`] the leaders cover between two,
+    /// with `h` at most half the run ([`width_square_curvature_per_gap`]):
+    /// so a ramp a rest narrows bends `h²` no sharper than its nodes'
+    /// spacing allows, and a short run's window no sharper than its width
+    /// allows.
+    fn width_square_curvature_per_speed(&self, speed_mm_s: f64, tau: f64) -> f64 {
+        let widths_per_gap = 0.5 * self.length_mm / (speed_mm_s * RATIO_RAMP_NODE_SPACING_S);
+        (2.0 * WIDTH_SQUARE_CURVATURE_BOUND / tau)
+            .min(width_square_curvature_per_gap(widths_per_gap) / RATIO_RAMP_NODE_SPACING_S)
+    }
 }
 
 /// A ratio step as the planner lets the leaders cross it: `step` at their
@@ -322,22 +353,24 @@ impl RatioRampRule {
     }
 
     /// The ramp's own acceleration, and the moving window's slope bend
-    /// `k·v³·|(h²)‴|`: at most `h·|(h²)‴|/h` at the ramp's width
-    /// `h = v·τ/2`, and at most `L·|(h²)‴|/L` over a gap between width
-    /// nodes, at least the path `L = v·`[`RATIO_RAMP_NODE_SPACING_S`] the
-    /// leaders cover between two, so a ramp a rest narrows bends `h²` no
-    /// sharper than its nodes' spacing allows.
+    /// `0.1·m·v·((h²)″·(v + 3k·a) + k·v·(h²)‴·v)` along the slide that
+    /// bends it the most ([`RatioSlide::width_square_curvature_per_speed`]).
     fn ramp_accel(&self, tau: f64, step: &RatioStep) -> f64 {
         let k = self.advance_slope_s;
         let (v, a) = (step.speed_mm_s, step.accel_mm_s2.abs());
         let rate = v + 2.0 * k * a;
         let ramp = step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau));
-        let square_curvature_per_speed = (2.0 * WIDTH_SQUARE_CURVATURE_BOUND / tau)
-            .min(WIDTH_SQUARE_CURVATURE_PER_GAP_BOUND / RATIO_RAMP_NODE_SPACING_S);
-        let bend = KERNEL_HALF_VARIANCE
-            * step.moving_slope(v, tau)
-            * v
-            * (WIDTH_SQUARE_SLOPE_BOUND * (v + 3.0 * k * a) + k * v * square_curvature_per_speed);
+        let bend = step
+            .slides
+            .iter()
+            .map(|slide| {
+                KERNEL_HALF_VARIANCE
+                    * slide.moving_slope(v * tau)
+                    * v
+                    * (WIDTH_SQUARE_SLOPE_BOUND * (v + 3.0 * k * a)
+                        + k * v * slide.width_square_curvature_per_speed(v, tau))
+            })
+            .fold(0.0, f64::max);
         ramp + bend
     }
 
