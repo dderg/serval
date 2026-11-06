@@ -33,7 +33,20 @@ DEFAULT_FAMILY = {"bench": "mzv", "fast": "smooth_mzv"}
 FAMILIES = ("mzv", "smooth_mzv")
 SCV_VALUES = (1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 35.0)
 MCR_VALUES = (0.0, 0.25, 0.5)
-BUDGETS_MM = (0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4)
+BUDGETS_MM = (
+    0.03,
+    0.05,
+    0.07,
+    0.08,
+    0.09,
+    0.1,
+    0.12,
+    0.15,
+    0.2,
+    0.25,
+    0.3,
+    0.4,
+)
 BASE_SCV = 5.0
 BASE_MCR = 0.5
 UNLIMITED = 1e4
