@@ -559,11 +559,13 @@ fn ramp_reach_within(t: f64, (start, end): (f64, f64)) -> (f64, f64) {
 /// cone caps is a sliver of its window, micrometres past the rest where the
 /// leaders creep out of it, which the smootherstep to the next node would
 /// flatten onto, while the rise off the rest opens the window with the
-/// distance. A node's own target is half the path the leaders cover in `τ`
-/// around it — `v·τ/2` at cruise, `a·τ²/8` at a turnaround, the
-/// accelerating path on both sides at a slow corner — and zero at a rest:
-/// where the leaders cross a leg seam at rest, at a floor, and at every
-/// sample inside a dwell, each of which is kept.
+/// distance. Where the rest's cone meets the cone of the first node kept
+/// past it, short of that node, a node marks the peak, so the rise holds
+/// the cone at least ([`Self::push_cone_peak`]). A node's own target is
+/// half the path the leaders cover in `τ` around it — `v·τ/2` at cruise,
+/// `a·τ²/8` at a turnaround, the accelerating path on both sides at a slow
+/// corner — and zero at a rest: where the leaders cross a leg seam at rest,
+/// at a floor, and at every sample inside a dwell, each of which is kept.
 /// The envelope is the largest `ENVELOPE_SLOPE`-Lipschitz field under every
 /// target, and `h` blends neighbouring envelope values by a smootherstep
 /// (flat to second order at each node, so `h` is C2), or rises off a rest
@@ -848,10 +850,10 @@ impl WidthField {
         let rest_ahead = self.rest_ahead();
         let target = (base * ramp_time / RATIO_RAMP_MIN_TIME_S)
             .max(self.seam_width_at(sample.t, sample.s, rest_ahead));
-        let due = match self
+        let last_kept = self
             .last_kept
-            .expect("the width field lays a rest before its first sample")
-        {
+            .expect("the width field lays a rest before its first sample");
+        let due = match last_kept {
             LastKept::Rest(rest) => target <= ENVELOPE_SLOPE * (sample.s - rest),
             LastKept::Moving(last) => {
                 sample.t >= last.t + 0.5 * last.ramp_time - 0.5 * NODE_SPACING_S
@@ -859,6 +861,9 @@ impl WidthField {
             }
         };
         if due {
+            if let LastKept::Rest(rest) = last_kept {
+                self.push_cone_peak(rest, sample.s, target);
+            }
             self.push(sample.s, target);
             assert!(
                 self.nodes.last().is_some_and(|node| node.envelope > 0.0),
@@ -871,6 +876,26 @@ impl WidthField {
                 ramp_time,
                 target,
             }));
+        }
+    }
+
+    /// The peak where the cone of the rest at `rest` meets the cone of the
+    /// first node kept past it, at `s` with `target`, as a node of its own.
+    /// Every sample between was due no node only because the rest's cone
+    /// capped its target, so the envelope there is that cone up to the
+    /// peak. Rising off the rest toward the node alone, the width would rise
+    /// at `3·target/(s − rest)` per millimetre, under the cone wherever the
+    /// node lies far past it for its target — 0.21 where a slow corner
+    /// 14.8 mm past a prime first fitted under it — while the ramp of a step
+    /// beside the rest ([`RestSide::narrows_a_step`],
+    /// [`geometry::rest_room_reach_mm`]) is budgeted on the cone. Rising to
+    /// the peak, it holds the cone at least, and falls to the node at
+    /// `15/8` of the slope. A node within its spacing of the peak keeps
+    /// the cone without one.
+    fn push_cone_peak(&mut self, rest: f64, s: f64, target: f64) {
+        let peak_mm = 0.5 * (target / ENVELOPE_SLOPE + (s - rest));
+        if s - (rest + peak_mm) >= NODE_SPACING_PER_WIDTH * target {
+            self.push(rest + peak_mm, ENVELOPE_SLOPE * peak_mm);
         }
     }
 
