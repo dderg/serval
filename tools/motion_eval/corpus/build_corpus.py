@@ -54,8 +54,10 @@ def g1(x, y, feed, extrude=True, prev=None):
 
 def corners(turn_deg):
     start = (60.0, 100.0)
-    out, pos, heading = [], start, 0.0
+    out = []
     for speed in CORNER_SPEEDS_MM_S:
+        out.append(g1(*start, speed, extrude=False))
+        pos, heading = start, 0.0
         for leg in range(CORNER_LEGS):
             nxt = (
                 pos[0] + CORNER_LEG_MM * math.cos(heading),
