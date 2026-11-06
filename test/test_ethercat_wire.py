@@ -140,3 +140,19 @@ def test_trailing_bytes_are_rejected():
     body = wire.encode_endstop_trip(wire.EndstopTrip(1, 2)) + b"\x00"
     with pytest.raises(wire.WireError):
         wire.decode_endstop_trip(body)
+
+
+def test_homing_and_sdo_layouts():
+    arm = wire.encode_arm_sensorless_endstop(2, 3, 450, True)
+    assert arm == bytes([2, 3]) + (450).to_bytes(2, "little") + b"\x01"
+    sdo = wire.encode_sdo_write(1, 0x6077, 0, 2, -5)
+    assert sdo == (
+        b"\x01"
+        + (0x6077).to_bytes(2, "little")
+        + b"\x00\x02"
+        + (-5).to_bytes(8, "little", signed=True)
+    )
+    reply = (0).to_bytes(4, "little") + b"\x02" + b"\xaa\xbb\x00\x00"
+    assert wire.decode_sdo_write_response(reply) == (0, b"\xaa\xbb")
+    stop = (0).to_bytes(4, "little") + (123).to_bytes(8, "little")
+    assert wire.decode_stop_response(stop) == (0, 123)

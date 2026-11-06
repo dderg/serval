@@ -41,8 +41,16 @@ class Kind(enum.IntEnum):
     PUSH_SAMPLE_RUNS_RESPONSE = 0x0063
     QUERY_SAMPLE_GRID = 0x0064
     SAMPLE_GRID_RESPONSE = 0x0065
+    ARM_SENSORLESS_ENDSTOP = 0x006E
+    ARM_SENSORLESS_ENDSTOP_RESPONSE = 0x006F
     SET_TORQUE = 0x0070
     SET_TORQUE_RESPONSE = 0x0071
+    STOP = 0x0072
+    STOP_RESPONSE = 0x0073
+    RESUME_STREAM = 0x0078
+    RESUME_STREAM_RESPONSE = 0x0079
+    SDO_WRITE = 0x007E
+    SDO_WRITE_RESPONSE = 0x007F
     STATUS_HEARTBEAT = 0x0083
     ENDSTOP_TRIP = 0x0085
 
@@ -308,6 +316,44 @@ def decode_claim_handshake_reply(body: bytes) -> list[SlaveStatus]:
     statuses = [SlaveStatus(*r.take(SLAVE_STATUS)) for _ in range(count)]
     r.finish()
     return statuses
+
+
+ARM_SENSORLESS_ENDSTOP = struct.Struct("<BBHB")
+
+
+def encode_arm_sensorless_endstop(
+    slot, endstop_id, torque_trip_tenth_pct, enable
+):
+    return ARM_SENSORLESS_ENDSTOP.pack(
+        slot, endstop_id, torque_trip_tenth_pct, 1 if enable else 0
+    )
+
+
+SDO_WRITE = struct.Struct("<BHBBq")
+SDO_WRITE_RESPONSE = struct.Struct("<iB4s")
+
+
+def encode_sdo_write(slot, index, subindex, size, value):
+    return SDO_WRITE.pack(slot, index, subindex, size, value)
+
+
+def decode_sdo_write_response(body: bytes) -> tuple[int, bytes]:
+    """(result, read-back bytes)"""
+    r = _Reader(body)
+    result, size, data = r.take(SDO_WRITE_RESPONSE)
+    r.finish()
+    return result, data[:size]
+
+
+STOP_RESPONSE = struct.Struct("<iQ")
+
+
+def decode_stop_response(body: bytes) -> tuple[int, int]:
+    """(result, discard_clock)"""
+    r = _Reader(body)
+    values = r.take(STOP_RESPONSE)
+    r.finish()
+    return values
 
 
 SET_TORQUE = struct.Struct("<BQ")
