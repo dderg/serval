@@ -269,3 +269,124 @@ python3 ~/Developer/serval/scripts/slots.py run -- \
     uv run python -m tools.motion_eval.sweep --jobs 12   # 1476 runs, ~6 min
 # tables: tools/motion_eval/.build/sweep/tables.md (all sweeps, all fronts)
 ```
+
+# Owner operating point (50k, scv 50, 200/130 Hz)
+
+`configs/owner.cfg`: corexy, max_accel 50 000, max_velocity 800, smooth_mzv
+at X 200 Hz / Y 130 Hz, mcr 0.5. `python -m tools.motion_eval.owner_point`
+runs the corpus at scv 5–80, with `[corner_deviation]` floor mode, and at
+scv 50 with shaping off for reference. Results are in `.build/owner_point/`.
+
+## Conclusion
+
+1. **smooth_mzv absorbs SCV's velocity steps as far as ringing of the tuned
+   mode goes. It does not absorb them in acceleration.** The smoother turns
+   each step Δv into a burst Δv·w(t) over its 4.8 ms (X) / 7.4 ms (Y)
+   window. A 90° corner at scv 50 commands a 50 mm/s per-axis step. The
+   executed peak acceleration then reaches 1.62× max_accel on X (81 000
+   mm/s²) and 1.22× on Y; the p99 over corners is 1.54×. At scv 20 the peak
+   is 1.15×, at scv 5 1.02×. Peak jerk is 280 km/s³ at scv 50 against
+   78 km/s³ at scv 5.
+2. **Ringing does not grow with scv near the tuned frequency.** Residual
+   vibration after corners, for a damped oscillator at the shaper frequency
+   (worst axis):
+   - At ζ 0.05: 8–10 µm at every scv from 5 to 80; at ζ 0.1: 0.5 µm.
+   - With shaping off at scv 50: 227 µm (ζ 0.05) and 197 µm (ζ 0.1).
+   - Mistuned by ±10–20%: 10–80 µm, with no trend in scv. The 0.8× case is
+     largest at low scv, which points at the accel ramps rather than the
+     corner steps.
+   - Untuned higher modes do grow with the steps: at 2.5× f, 13 µm (scv 5)
+     → 21 µm (scv 50) → 24 µm (scv 80); at 4× f, 1.7 → 3.5 → 4.4 µm. With
+     shaping off at scv 50 these are 55 µm and 33 µm.
+3. **What scv 50 buys.**
+   - Corpus time −1.1% against scv 20, −2.9% against scv 10, −5.1% against
+     scv 5; scv 80 saves another 0.3%. Almost all of it comes from dense
+     paths: voron top layers take 2.73 s at scv 50 against 3.18 s at scv 20.
+   - Costs: about 60% acceleration overshoot, 3.6× the peak jerk, twice the
+     residual of a 2.5× f mode, and corners rounding up to 0.146 mm, which is
+     1.17× the shaper floor. scv 20 keeps corners below the floor.
+4. **Does it need solving?** Not for ringing of the tuned mode. The open
+   risk is the acceleration burst: if 50 000 mm/s² is close to the motors'
+   torque limit, scv 50 asks for 81 000 at corners, with skipped steps or
+   layer shifts as the failure mode. Only hardware can say how much
+   headroom there is.
+5. **`[corner_deviation]` floor mode is 2.1% slower than scv 50 here.** It
+   is faster than scv 5 and 10 but 1.0% slower than scv 20. It holds the
+   executed peak within its stated allowance (1.03×). Its residuals at
+   ζ 0.05 are within 5% of scv 5's up to 1.0× f, lower at 1.1–1.2× f, and
+   16% higher at 2.5× f (15 against 13 µm; scv 50: 21 µm). The time it gives
+   up against scv 50 is the price of not bursting above max_accel at corners.
+6. **max_velocity 500 / 800 / 1200 changes nothing.** Only voron top
+   layers' travel moves exceed 500 mm/s in this corpus, which moves totals
+   by about 7 ms, and the relative numbers are identical. The corpus prints
+   at ≤300 mm/s, so faster print moves are untested here.
+
+The smooth_mzv kernel is zero at its support edges. That is a design
+constraint in `klippy/extras/shaper_defs.py` (lines 178–180: "w(-T_sm/2) =
+w(T_sm/2) = 0"; the polynomial is `get_mzv_smoother`, lines 199–211).
+Numerically, with klippy's coefficients, w(±T_sm/2) ≈ −3e−12 /s against a
+peak of 524 /s at 200 Hz and 340 /s at 130 Hz. So the executed acceleration
+is continuous and no velocity step survives shaping (the executed velocity
+jumps are 0). w′ is not zero at the edges (+3.6e6 / −2.5e6 /s² at 200 Hz),
+so jerk jumps there but stays bounded: Δv·max|w′| = 50 mm/s × 3.64e6 /s² =
+182 km/s³, which matches the 176 km/s³ measured on the 90° corners at scv 50.
+
+## Summary (corpus, worst axis or case)
+
+| setting | corpus s | vs scv 50 | peak accel / max_accel (x / y) | corner peak accel p99 / max_accel | peak jerk km/s³ (x / y) | corner dev p99 / max mm | max / floor |
+|---|---|---|---|---|---|---|---|
+| scv 5 | 105.6 | +5.1% | 1.024 / 1.005 | 1.024 | 78 / 50 | 0.103 / 0.111 | 0.89 |
+| scv 10 | 103.3 | +2.9% | 1.063 / 1.018 | 1.063 | 94 / 56 | 0.107 / 0.115 | 0.92 |
+| scv 20 | 101.5 | +1.1% | 1.149 / 1.058 | 1.149 | 165 / 72 | 0.117 / 0.123 | 0.99 |
+| scv 35 | 100.7 | +0.3% | 1.447 / 1.136 | 1.420 | 247 / 98 | 0.132 / 0.135 | 1.08 |
+| scv 50 | 100.4 | +0.0% | 1.616 / 1.222 | 1.535 | 280 / 127 | 0.139 / 0.146 | 1.17 |
+| scv 80 | 100.1 | −0.3% | 1.719 / 1.379 | 1.719 | 423 / 185 | 0.164 / 0.164 | 1.31 |
+| corner_deviation | 102.6 | +2.1% | 1.033 / 1.013 | 1.033 | 179 / 69 | 0.106 / 0.114 | 0.91 |
+| scv 50, no shaping | 100.4 | +0.0% | 1.000 / 1.000 (plus Δv impulses) | 1.000 | (impulses) | 0.001 / 0.001 | — |
+
+Shaper floor σ²·max_accel/2: X 0.053 mm, Y 0.125 mm. "max / floor" divides
+by the larger, Y.
+
+## Residual vibration after corners (max over constant-velocity windows, worst axis, µm)
+
+Oscillator at ratio × the axis' shaper frequency (X 200, Y 130 Hz).
+
+| setting | ζ | 0.8× | 0.9× | 1.0× | 1.1× | 1.2× | 2.5× | 4× |
+|---|---|---|---|---|---|---|---|---|
+| scv 5 | 0.05 | 78.1 | 24.2 | 8.4 | 13.1 | 20.8 | 13.2 | 1.7 |
+| scv 20 | 0.05 | 64.6 | 23.2 | 7.9 | 13.1 | 15.7 | 12.6 | 1.8 |
+| scv 50 | 0.05 | 55.2 | 30.9 | 10.5 | 15.9 | 17.5 | 20.9 | 3.5 |
+| scv 80 | 0.05 | 60.7 | 33.3 | 10.3 | 23.1 | 20.6 | 23.9 | 4.4 |
+| corner_deviation | 0.05 | 81.6 | 23.6 | 8.4 | 10.7 | 18.5 | 15.3 | 1.7 |
+| scv 50, no shaping | 0.05 | 277.2 | 304.8 | 226.6 | 198.8 | 152.3 | 55.3 | 33.5 |
+| scv 5 | 0.1 | 39.6 | 15.4 | 0.55 | 7.5 | 9.3 | 7.0 | 1.1 |
+| scv 20 | 0.1 | 38.4 | 15.1 | 0.49 | 8.5 | 10.6 | 8.1 | 1.1 |
+| scv 50 | 0.1 | 39.5 | 15.8 | 0.51 | 8.9 | 12.8 | 13.3 | 2.2 |
+| scv 80 | 0.1 | 40.7 | 16.1 | 0.57 | 8.9 | 13.0 | 16.3 | 3.0 |
+| corner_deviation | 0.1 | 40.3 | 13.8 | 0.45 | 6.6 | 8.4 | 8.2 | 1.1 |
+| scv 50, no shaping | 0.1 | 240.8 | 230.9 | 197.0 | 155.1 | 135.6 | 47.4 | 27.6 |
+
+## Per case: print time s (peak accel / max_accel)
+
+| case | scv 5 | scv 20 | scv 50 | scv 80 | corner_deviation |
+|---|---|---|---|---|---|
+| arcs | 0.88 (0.44) | 0.88 (0.44) | 0.88 (0.44) | 0.88 (0.44) | 0.88 (0.44) |
+| circles | 3.78 (0.84) | 2.83 (0.94) | 2.80 (1.07) | 2.80 (1.07) | 2.96 (0.85) |
+| corners_turn45 | 6.36 (1.02) | 6.34 (1.07) | 6.31 (1.25) | 6.30 (1.44) | 6.35 (1.01) |
+| corners_turn90 | 6.02 (1.02) | 6.00 (1.13) | 5.99 (1.42) | 5.97 (1.72) | 6.01 (1.03) |
+| corners_turn135 | 5.50 (1.02) | 5.49 (1.15) | 5.48 (1.42) | 5.47 (1.69) | 5.50 (1.03) |
+| corners_turn170 | 5.03 (1.02) | 5.02 (1.09) | 5.02 (1.20) | 5.01 (1.33) | 5.03 (1.03) |
+| voron_first_layer_perimeters | 69.63 (0.76) | 69.16 (0.76) | 68.79 (1.14) | 68.65 (1.51) | 69.40 (0.76) |
+| voron_top_layers | 5.68 (1.01) | 3.18 (1.07) | 2.73 (1.62) | 2.73 (1.62) | 3.75 (1.02) |
+| zigzag_infill | 2.73 (1.01) | 2.63 (1.13) | 2.44 (1.42) | 2.29 (1.72) | 2.70 (1.03) |
+
+## Caveats for this point
+
+- The oscillator is a single mode per axis, driven by the executed carriage
+  motion; belt stretch, frame modes coupling X and Y, and corexy motor
+  coupling are not modelled. Residuals are measured only in constant-velocity
+  windows after a corner, not during curves.
+- The acceleration overshoot is the executed, shaped carriage acceleration.
+  Whether the motors deliver it, or skip, depends on torque headroom that
+  the harness cannot see.
+- The corpus is sliced for slower machines: print moves at ≤300 mm/s.
