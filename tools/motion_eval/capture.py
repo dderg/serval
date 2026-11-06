@@ -98,6 +98,41 @@ def _shaper_state(printer_obj):
     return state
 
 
+HISTORY_BATCH = 4096
+HISTORY_END_CLOCK = (1 << 63) - 1
+
+
+class StepHistory:
+    def __init__(self, steppers):
+        self.steppers = steppers
+        self.entries = {s.get_name(): [] for s in steppers}
+        self.newest_first_clock = {s.get_name(): -1 for s in steppers}
+        self.pulled_at_disconnect = False
+
+    def pull(self, *_flush_times):
+        for stepper in self.steppers:
+            name = stepper.get_name()
+            newest = self.newest_first_clock[name]
+            batch = HISTORY_BATCH
+            while True:
+                data, count = stepper.dump_steps(
+                    batch, max(newest, 0), HISTORY_END_CLOCK
+                )
+                if count < batch:
+                    break
+                batch *= 2
+            fresh = [
+                [data[i].first_clock, data[i].step_count, data[i].interval,
+                 data[i].add]
+                for i in range(count)
+                if data[i].first_clock > newest
+            ]  # fmt: skip
+            fresh.reverse()
+            self.entries[name].extend(fresh)
+            if fresh:
+                self.newest_first_clock[name] = fresh[-1][0]
+
+
 class Capture:
     def __init__(self, corner_budget_mm=None):
         self.toolhead = None
@@ -109,12 +144,17 @@ class Capture:
         self.shaper = None
         self.settings = None
         self.undrained_serial = False
+        self.history = None
 
     def attach(self, toolhead_obj):
         self.toolhead = toolhead_obj
         self.printer = toolhead_obj.printer
         for stepper in toolhead_obj.get_kinematics().get_steppers():
             self.linear_maps[stepper.get_name()] = _stepper_linear_map(stepper)
+        self.history = StepHistory(toolhead_obj.get_kinematics().get_steppers())
+        self.printer.lookup_object("motion_queuing").register_flush_callback(
+            self.history.pull
+        )
         real_append = toolhead_obj.trapq_append
         real_set_position = toolhead_obj.set_position
         real_flush = toolhead_obj.lookahead.flush
@@ -190,12 +230,16 @@ class Capture:
                 "serial queue did not drain to the output file within %r s"
                 % DRAIN_TIMEOUT_S
             )
+        if not self.history.pulled_at_disconnect:
+            raise UnsupportedRun("step history was not read at disconnect")
         if _shaper_state(self.printer) != self.shaper:
             raise UnsupportedRun("input shaper changed after motion started")
         for stepper in self.toolhead.get_kinematics().get_steppers():
-            self.steppers[stepper.get_name()]["final_mcu_position"] = (
+            name = stepper.get_name()
+            self.steppers[name]["final_mcu_position"] = (
                 stepper.get_mcu_position()
             )
+            self.steppers[name]["step_history"] = self.history.entries[name]
         return {
             "moves": self.moves,
             "steppers": self.steppers,
@@ -221,6 +265,9 @@ def drain_before_disconnect(capture):
 
     def disconnect(self):
         if self.serialqueue is not None:
+            if capture.history is not None:
+                capture.history.pull()
+                capture.history.pulled_at_disconnect = True
             deadline = time.monotonic() + DRAIN_TIMEOUT_S
             while _queued_bytes(self):
                 if time.monotonic() > deadline:

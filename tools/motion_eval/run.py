@@ -89,7 +89,13 @@ def run_klippy(
             raise KlippyRunError(
                 "steppers on secondary MCUs are not decoded: %s" % foreign
             )
-        invert_by_oid = {s["oid"]: s["invert_dir"] for s in steppers.values()}
-        by_oid = stepdecode.decode(dictionary, output_path, invert_by_oid)
+        by_oid = stepdecode.decode(
+            dictionary,
+            output_path,
+            {
+                s["oid"]: (s["invert_dir"], s["step_history"])
+                for s in steppers.values()
+            },
+        )
     traces = {name: by_oid[s["oid"]] for name, s in steppers.items()}
     return RawRun(capture=capture, traces=traces)
