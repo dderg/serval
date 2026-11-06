@@ -1,7 +1,8 @@
 """Real-time smoke: klippy streams servo samples into ethercat-rt-stub.
 
 klippy runs live against a Klipper linux-process MCU, which supplies the
-print_time clock; every axis is an EtherCAT servo, so the MCU drives no pins.
+print_time clock; X and Y are EtherCAT servos, Z a stepper on the MCU's
+simulated GPIO.
 See ethercat_live_support for the binaries it needs.
 """
 
@@ -13,8 +14,10 @@ import time
 import pytest
 from ethercat_live_support import (
     API_TIMEOUT_S,
+    INPUT_SMOOTHER,
     STUB,
     STUB_CYCLE_US,
+    Z_STEPPER,
     Api,
     Printer,
     needs_live,
@@ -27,7 +30,7 @@ from ethercat_support import GCODE
 pytestmark = needs_live
 
 SETTLE_S = 1.5
-COUNTS_PER_MM = [131072 / 40, 131072 / 40, 131072 / 8]
+COUNTS_PER_MM = [131072 / 40, 131072 / 40]
 
 PRINTER_CFG = """
 [mcu]
@@ -65,20 +68,8 @@ endstop_pin: ethercat:y
 position_endstop: 0
 position_max: 250
 
-[stepper_z]
-servo: ethercat
-ethercat_slave: 2
-ethercat_axis: 2
-encoder_counts_per_rev: 131072
-rotation_distance: 8
-endstop_pin: ethercat:z
-position_endstop: 0
-position_max: 200
-
-[input_shaper]
-shaper_type: smooth_mzv
-shaper_freq_x: 50
-shaper_freq_y: 40
+{z_rail}
+{input_shaper}
 """
 
 LONG_MOVES = "\n".join(
@@ -99,6 +90,8 @@ def printer_cfg(tmp, endpoint):
         cycle_us=STUB_CYCLE_US,
         socket=tmp / "ec.sock",
         endpoint=endpoint,
+        z_rail=Z_STEPPER,
+        input_shaper=INPUT_SMOOTHER,
     )
 
 
@@ -121,17 +114,15 @@ def test_live_print_streams_every_cycle_to_the_stub(tmp):
         assert status["anchors"] >= 2
         # Every cycle the plugin pushed was played by every slot: no hole,
         # no late run, no underrun, nothing discarded.
-        assert status["retired_cycles"] == [status["pushed_cycles"]] * 3
+        assert status["retired_cycles"] == [status["pushed_cycles"]] * 2
     finally:
         printer.close()
     log = printer.log.read_text()
-    assert "ethercat: endpoint" in log and "claimed 3 slaves" in log
+    assert "ethercat: endpoint" in log and "claimed 2 slaves" in log
 
 
 def test_endpoint_death_mid_print_shuts_down(tmp):
-    stub = spawn_stub(
-        tmp / "ec.sock", [(axis, COUNTS_PER_MM[axis]) for axis in range(3)]
-    )
+    stub = spawn_stub(tmp / "ec.sock", list(enumerate(COUNTS_PER_MM)))
     printer = Printer(tmp, printer_cfg(tmp, ""))
     try:
         assert printer.state()[0] == "ready", printer.state()

@@ -19,6 +19,7 @@ import resource
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -36,6 +37,58 @@ READY_TIMEOUT_S = 30.0
 API_TIMEOUT_S = 60.0
 STUB_CYCLE_US = 1000
 COUNTS_PER_REV = 131072
+GPIO_SIM_CHIP = 15
+# The simulated stepper (gpio_sim.c) is on lines 0-2 of the chip; any
+# other line is a plain output, or an input that reads 0
+SIM_STEPPER_PINS = {
+    "step_pin": "gpiochip%d/gpio0" % (GPIO_SIM_CHIP,),
+    "dir_pin": "gpiochip%d/gpio1" % (GPIO_SIM_CHIP,),
+    "endstop_pin": "gpiochip%d/gpio2" % (GPIO_SIM_CHIP,),
+}
+NEVER_TRIPS = -(2**31)
+
+# Servos move only smoothed axes, and [input_shaper] cannot shape Z, so Z
+# is a linux-MCU stepper on GPIO lines nobody reads
+Z_STEPPER = """[stepper_z]
+step_pin: gpiochip{chip}/gpio3
+dir_pin: gpiochip{chip}/gpio4
+endstop_pin: gpiochip{chip}/gpio5
+microsteps: 16
+rotation_distance: 8
+position_endstop: 0
+position_max: 200
+""".format(chip=GPIO_SIM_CHIP)
+
+INPUT_SMOOTHER = """[input_shaper]
+shaper_type: smooth_mzv
+shaper_freq_x: 50
+shaper_freq_y: 40
+"""
+
+_gpio_sim = None
+
+
+def gpio_sim_library():
+    global _gpio_sim
+    if _gpio_sim is None:
+        lib = pathlib.Path(tempfile.mkdtemp(prefix="gpio_sim")) / "gpio_sim.so"
+        subprocess.run(
+            [
+                "cc",
+                "-shared",
+                "-fPIC",
+                "-O2",
+                "-Wall",
+                "-Werror",
+                "-o",
+                str(lib),
+                str(REPO_ROOT / "test" / "gpio_sim.c"),
+                "-ldl",
+            ],
+            check=True,
+        )
+        _gpio_sim = lib
+    return _gpio_sim
 
 
 def short_tmp(tmp_path_factory):
@@ -101,16 +154,26 @@ class Api:
 
 class Printer:
     """klippy (with an API socket) on a linux-process MCU; config is the
-    printer.cfg text with {mcu_tty} still to fill in."""
+    printer.cfg text with {mcu_tty} still to fill in. The MCU runs with
+    gpio_sim; its stepper closes its endstop sim_trip_steps from where it
+    started."""
 
-    def __init__(self, tmp, config, mcu_env=None):
+    def __init__(self, tmp, config, sim_trip_steps=NEVER_TRIPS):
         self.tmp = tmp
         self.mcu_tty = tmp / "mcu"
         self.api_path = tmp / "api.sock"
         self.log = tmp / "klippy.log"
         self.mcu = subprocess.Popen(
             [LINUX_MCU, "-I", str(self.mcu_tty)] + realtime_flag(),
-            env=dict(os.environ, **(mcu_env or {})),
+            env=dict(
+                os.environ,
+                LD_PRELOAD=str(gpio_sim_library()),
+                KV2_GPIO_SIM_CHIP=str(GPIO_SIM_CHIP),
+                KV2_GPIO_SIM_STEP="0",
+                KV2_GPIO_SIM_DIR="1",
+                KV2_GPIO_SIM_ENDSTOP="2",
+                KV2_GPIO_SIM_TRIP_STEPS=str(sim_trip_steps),
+            ),
         )
         wait_for(lambda: self.mcu_tty.exists(), "the linux MCU tty")
         config_path = tmp / "printer.cfg"

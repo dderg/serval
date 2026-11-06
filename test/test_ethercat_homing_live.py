@@ -14,21 +14,22 @@ from __future__ import annotations
 import json
 import socket
 import struct
-import subprocess
 import threading
 import time
 
 import pytest
 from ethercat_live_support import (
     COUNTS_PER_REV,
+    INPUT_SMOOTHER,
+    SIM_STEPPER_PINS,
     STUB_CYCLE_US,
+    Z_STEPPER,
     Printer,
     needs_live,
     short_tmp,
     spawn_stub,
     wait_for,
 )
-from ethercat_support import REPO_ROOT
 
 from klippy.plugins.ethercat import wire
 
@@ -47,7 +48,6 @@ REPLY_TIMEOUT_S = 2.0
 # Y as a linux-MCU stepper: 200 full steps x 16 microsteps per 40 mm
 Y_STEPS_PER_MM = 80
 Y_WALL_TRAVEL_MM = 20.0
-GPIO_SIM_CHIP = 15
 Y_OVERSHOOT_STEPS = 2
 
 HOMING_CFG = """
@@ -78,22 +78,14 @@ homing_speed: {x_homing_speed}
 homing_retract_dist: 0
 homing_torque: {homing_torque}
 
-[stepper_z]
-servo: ethercat
-ethercat_slave: 1
-ethercat_axis: 2
-encoder_counts_per_rev: {counts_per_rev}
-rotation_distance: 8
-endstop_pin: ethercat:z
-position_endstop: 0
-position_max: 200
-
+{z_rail}
+{input_shaper}
 {stepper_y}
 """
 
 SERVO_Y = """[stepper_y]
 servo: ethercat
-ethercat_slave: 2
+ethercat_slave: 1
 ethercat_axis: 1
 encoder_counts_per_rev: {counts_per_rev}
 rotation_distance: 40
@@ -103,15 +95,15 @@ position_max: 250
 """.format(counts_per_rev=COUNTS_PER_REV)
 
 STEPPER_Y = """[stepper_y]
-step_pin: gpiochip{chip}/gpio0
-dir_pin: gpiochip{chip}/gpio1
-endstop_pin: gpiochip{chip}/gpio2
+step_pin: {step_pin}
+dir_pin: {dir_pin}
+endstop_pin: {endstop_pin}
 microsteps: 16
 rotation_distance: 40
 position_endstop: 0
 position_max: 40
 homing_speed: 20
-""".format(chip=GPIO_SIM_CHIP)
+""".format(**SIM_STEPPER_PINS)
 
 
 def _connect(sock, path):
@@ -260,8 +252,8 @@ class Tap:
 
 
 class Rig:
-    def __init__(self, tmp, stepper_y, x_max, mcu_env=None):
-        servo_slots = [(0, X_COUNTS_PER_MM), (2, COUNTS_PER_REV / 8.0)]
+    def __init__(self, tmp, stepper_y, x_max, **printer_args):
+        servo_slots = [(0, X_COUNTS_PER_MM)]
         if stepper_y == SERVO_Y:
             servo_slots.append((1, X_COUNTS_PER_MM))
         stub_sock = tmp / "ec.sock"
@@ -284,8 +276,10 @@ class Rig:
                     x_homing_speed=X_HOMING_SPEED,
                     homing_torque=HOMING_TORQUE_PCT,
                     stepper_y=stepper_y,
+                    z_rail=Z_STEPPER,
+                    input_shaper=INPUT_SMOOTHER,
                 ),
-                mcu_env,
+                **printer_args,
             )
         except Exception:
             self.stub.kill()
@@ -309,27 +303,6 @@ class Rig:
 @pytest.fixture
 def tmp(tmp_path_factory):
     return short_tmp(tmp_path_factory)
-
-
-@pytest.fixture(scope="module")
-def gpio_sim(tmp_path_factory):
-    lib = tmp_path_factory.mktemp("gpio_sim") / "gpio_sim.so"
-    subprocess.run(
-        [
-            "cc",
-            "-shared",
-            "-fPIC",
-            "-O2",
-            "-Wall",
-            "-Werror",
-            "-o",
-            str(lib),
-            str(REPO_ROOT / "test" / "gpio_sim.c"),
-            "-ldl",
-        ],
-        check=True,
-    )
-    return lib
 
 
 def home_x_into_the_wall(rig, script):
@@ -386,21 +359,12 @@ def test_homing_without_a_trip_fails_at_the_move_end(tmp):
         rig.close()
 
 
-def test_mixed_printer_homes_servo_and_stepper(tmp, gpio_sim):
+def test_mixed_printer_homes_servo_and_stepper(tmp):
     rig = Rig(
         tmp,
         STEPPER_Y,
         x_max=40.0,
-        mcu_env={
-            "LD_PRELOAD": str(gpio_sim),
-            "KV2_GPIO_SIM_CHIP": str(GPIO_SIM_CHIP),
-            "KV2_GPIO_SIM_STEP": "0",
-            "KV2_GPIO_SIM_DIR": "1",
-            "KV2_GPIO_SIM_ENDSTOP": "2",
-            "KV2_GPIO_SIM_TRIP_STEPS": str(
-                -round(Y_WALL_TRAVEL_MM * Y_STEPS_PER_MM)
-            ),
-        },
+        sim_trip_steps=-round(Y_WALL_TRAVEL_MM * Y_STEPS_PER_MM),
     )
     try:
         contact = home_x_into_the_wall(rig, "G28 X Y")
