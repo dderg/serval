@@ -298,7 +298,7 @@ impl Motion {
     }
 }
 
-fn value(kernel: &PiecewisePolynomialKernel, u: f64) -> f64 {
+pub(super) fn value(kernel: &PiecewisePolynomialKernel, u: f64) -> f64 {
     kernel
         .pieces
         .iter()

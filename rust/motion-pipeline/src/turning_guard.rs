@@ -1102,3 +1102,5 @@ mod backoff_stream_tests;
 mod test_motion;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod valley_stream_tests;
