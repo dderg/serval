@@ -17,7 +17,8 @@ bench configs, so corners now come out sharper. Where even a stop at a
 corner rounds past it, the planner slows the approach to that corner;
 the `corner_floor` startup event shows where that happens. With neither
 corner option set, each corner may miss by the shaper's rounding of a
-stop there plus 0.04 mm. `square_corner_velocity` now grants the
+stop there plus 0.04 mm; that default bounds corners alone and leaves
+arcs and runs of facets to the shaper as before. `square_corner_velocity` now grants the
 rounding a Klipper machine with that value and the same shapers prints,
 in place of its old near-zero cut (0.00015 mm at 70000 mm/s²). Configs
 that relied on `corner_deviation` as the planned cut can raise it by the
