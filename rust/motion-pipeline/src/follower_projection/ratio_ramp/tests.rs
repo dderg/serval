@@ -3,6 +3,7 @@ use std::sync::Arc;
 use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::{FollowerState, SpanSide, Table as SpanTable};
@@ -1943,7 +1944,9 @@ proptest! {
     #![proptest_config(ProptestConfig {
         cases: std::env::var("PROPTEST_CASES")
             .map_or(256, |cases| cases.parse().expect("PROPTEST_CASES must be an integer")),
-        failure_persistence: None,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "proptest-regressions/ratio_ramp.txt",
+        ))),
         ..ProptestConfig::default()
     })]
 
