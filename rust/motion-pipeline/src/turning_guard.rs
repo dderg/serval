@@ -844,14 +844,20 @@ impl TurningGuard {
             .timing
             .partition_point(|timing| timing.t1() < from)
             .saturating_sub(1);
-        let before = (lo == 0).then(|| PhaseSpan::rest(f64::NEG_INFINITY, first.t0));
+        let (head, rest) = entries.spans[lo..]
+            .split_first()
+            .expect("a cell after the first held move's start reads a held move");
+        let skipped = head.partition_point(|span| span.t1 < from);
+        let before =
+            (lo == 0 && skipped == 0).then(|| PhaseSpan::rest(f64::NEG_INFINITY, first.t0));
         let after = entries
             .closed
             .then(|| PhaseSpan::rest(self.segment_end(), f64::INFINITY));
         variation_over(
             before
                 .iter()
-                .chain(entries.spans[lo..].iter().flatten())
+                .chain(&head[skipped..])
+                .chain(rest.iter().flatten())
                 .chain(after.iter()),
             (from, to),
         )

@@ -186,7 +186,7 @@ fn pair_models(pair: &RailPair) -> ([TaylorModel; 3], f64) {
 
 /// The monomials in `u` of the C2 quintic Hermite from `p0` rising by
 /// `rise` with end slopes and curvatures `[m0, c0, m1, c1]`.
-fn quintic_monomials(p0: f64, rise: f64, [m0, c0, m1, c1]: [f64; 4]) -> [f64; 6] {
+pub(super) fn quintic_monomials(p0: f64, rise: f64, [m0, c0, m1, c1]: [f64; 4]) -> [f64; 6] {
     [
         p0,
         m0,
