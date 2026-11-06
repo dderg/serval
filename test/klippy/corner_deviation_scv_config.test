@@ -1,0 +1,6 @@
+# square_corner_velocity in [printer] conflicts with [corner_deviation]
+CONFIG corner_deviation_scv_config.cfg
+DICTIONARY atmega2560.dict
+SHOULD_FAIL
+
+G4 P1

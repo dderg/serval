@@ -1,0 +1,6 @@
+# SQUARE_CORNER_VELOCITY is ambiguous with [corner_deviation]
+CONFIG corner_deviation.cfg
+DICTIONARY atmega2560.dict
+SHOULD_FAIL
+
+SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=8

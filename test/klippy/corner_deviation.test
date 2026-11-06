@@ -1,0 +1,4 @@
+# [corner_deviation] replaces the square_corner_velocity junction term
+CONFIG corner_deviation.cfg
+DICTIONARY atmega2560.dict
+GCODE corner_deviation.gcode
