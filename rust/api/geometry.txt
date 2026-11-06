@@ -508,10 +508,13 @@ pub fn geometry::shaped_corner::ShapedCorners::curve_room_mm(&self, geometry::fr
 pub fn geometry::shaped_corner::ShapedCorners::floor_mm(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::interned([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<&'static Self>
 pub fn geometry::shaped_corner::ShapedCorners::miss_mm(&self, f64, f64, f64, f64) -> f64
-pub fn geometry::shaped_corner::ShapedCorners::new([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<Self>
 pub fn geometry::shaped_corner::ShapedCorners::reach_mm(&self, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::scv_allowance_mm(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::slows(&self, geometry::frontend::CornerBudget, f64, f64, f64) -> bool
+impl geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::new([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<Self>
+impl core::cmp::PartialEq for geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::eq(&self, &Self) -> bool
 pub const geometry::shaped_corner::ARC_FIT_SHARE: f64
 pub const geometry::shaped_corner::PREDICTION_MARGIN: f64
 pub const geometry::shaped_corner::STOP_SHARE: f64
@@ -1251,10 +1254,13 @@ pub fn geometry::shaped_corner::ShapedCorners::curve_room_mm(&self, geometry::fr
 pub fn geometry::shaped_corner::ShapedCorners::floor_mm(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::interned([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<&'static Self>
 pub fn geometry::shaped_corner::ShapedCorners::miss_mm(&self, f64, f64, f64, f64) -> f64
-pub fn geometry::shaped_corner::ShapedCorners::new([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<Self>
 pub fn geometry::shaped_corner::ShapedCorners::reach_mm(&self, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::scv_allowance_mm(&self, f64, f64) -> f64
 pub fn geometry::shaped_corner::ShapedCorners::slows(&self, geometry::frontend::CornerBudget, f64, f64, f64) -> bool
+impl geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::new([core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>; 2]) -> core::option::Option<Self>
+impl core::cmp::PartialEq for geometry::shaped_corner::ShapedCorners
+pub fn geometry::shaped_corner::ShapedCorners::eq(&self, &Self) -> bool
 pub struct geometry::SourceRange
 pub geometry::SourceRange::end_line: u32
 pub geometry::SourceRange::start_line: u32
