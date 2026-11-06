@@ -356,6 +356,13 @@ class MCU_stepper:
 # Helper code to build a stepper object from a config section
 def PrinterStepper(config, units_in_radians=False):
     printer = config.get_printer()
+    servo = config.get("servo", None)
+    if servo is not None:
+        mcu_stepper = printer.load_object(config, servo).setup_stepper(
+            config, units_in_radians
+        )
+        _register_stepper_helpers(printer, config, mcu_stepper)
+        return mcu_stepper
     # Stepper definition
     ppins = printer.lookup_object("pins")
     step_pin = config.get("step_pin")
@@ -381,11 +388,14 @@ def PrinterStepper(config, units_in_radians=False):
         step_pulse_duration,
         units_in_radians,
     )
-    # Register with helper modules
+    _register_stepper_helpers(printer, config, mcu_stepper)
+    return mcu_stepper
+
+
+def _register_stepper_helpers(printer, config, mcu_stepper):
     for mname in ["stepper_enable", "force_move", "motion_report"]:
         m = printer.load_object(config, mname)
         m.register_stepper(config, mcu_stepper)
-    return mcu_stepper
 
 
 # Parse stepper gear_ratio config parameter
