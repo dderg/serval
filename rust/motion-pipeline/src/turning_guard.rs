@@ -1613,8 +1613,8 @@ impl ValleyStuck {
             width_at_rest,
         } = self.overreach;
         panic!(
-            "turning guard: the crawl from t={:.6}s (line {}) lays a valley side reaching up to \
-             {width:.4} mm back, and {width_at_rest:.4} mm with the leaders' rate at the fit's \
+            "turning guard: the crawl from t={:.6}s (line {}) lays a valley side up to \
+             {width:.4} mm wide, and {width_at_rest:.4} mm with the leaders' rate at the fit's \
              tolerance, past the {covered:.4} mm they cover in the {VALLEY_LEAD_BUDGET_S} s \
              before it; the leaders cross it at up to {:.3} mm/s",
             self.crawl, self.line, self.speed

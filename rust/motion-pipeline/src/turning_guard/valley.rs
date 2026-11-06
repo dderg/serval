@@ -2,8 +2,8 @@ use std::cell::OnceCell;
 use std::collections::VecDeque;
 
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RebuildsWithin, VALLEY_LEAD_BUDGET_S, crawl_zero_reach,
-    turns_around, valley_reach, widest_crawl_side_within,
+    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RebuildsWithin, VALLEY_LEAD_BUDGET_S, turns_around,
+    valley_reach, widest_crawl_side_within,
 };
 
 use super::screen::ShapedBox;
@@ -287,11 +287,9 @@ impl CellTrack {
 /// Where along a run of crawling cells the follower projection may lay
 /// its advance valley: its zero stretch spans the crawls it finds there,
 /// at seams and at the legs' slowest points, all within the cells
-/// `cells`, and the ratio steps within its window of them, up to
-/// [`Self::zero_reach`] past them; the projection reads their speed and
-/// rate off the fitted leaders, which set the leaders' reach, the least
-/// each side spans ([`geometry::valley_reach`]), and the floor
-/// ([`geometry::crawl_floor`]).
+/// `cells`; the projection reads their speed and rate off the fitted
+/// leaders, which set the leaders' reach, the least each side spans
+/// ([`geometry::valley_reach`]), and the floor ([`geometry::crawl_floor`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Slot {
     pub cells: (i64, i64),
@@ -345,18 +343,6 @@ impl Slot {
             }));
         }
         slot
-    }
-
-    /// How far past the run the zero stretch may reach over the ratio
-    /// steps the projection holds it at zero around
-    /// ([`geometry::crawl_zero_reach`]): its before side reaches that much
-    /// further back into the [`VALLEY_LEAD_BUDGET_S`] of motion before the
-    /// run, which the projection keeps untaken for it. A side leaves the
-    /// stretch's edge faster than the crawl, which the projection widens
-    /// it for as its own reading of the leaders there needs
-    /// ([`geometry::crawl_side_width`]); the guard leaves the path for it.
-    pub fn zero_reach(&self) -> f64 {
-        crawl_zero_reach(self.width.1)
     }
 
     /// The path range from a point in cell `n` to the slot's centre, the
@@ -652,13 +638,12 @@ impl CoveredAfter {
 /// [`VALLEY_LEAD_BUDGET_S`] of motion beside it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Overreach {
-    /// The furthest the leaders' reach makes the side reach from the run,
-    /// the zero stretch's [`Slot::zero_reach`] included.
+    /// The widest the leaders' reach makes the side.
     pub width: f64,
     /// The least path the leaders cover in the budget beside the crawl.
     pub covered: f64,
-    /// The furthest the side would reach with the leaders' rate at the
-    /// crawl at the fit's tolerance alone.
+    /// The widest the reach would be with the leaders' rate at the crawl
+    /// at the fit's tolerance alone.
     pub width_at_rest: f64,
 }
 
@@ -684,14 +669,14 @@ impl Crawl {
 
     /// The crawl over the slot, with room left for its before side: as
     /// wide as the widest grid width the leaders' least path in the
-    /// [`VALLEY_LEAD_BUDGET_S`] before the run covers past the zero
-    /// stretch's [`Slot::zero_reach`], and reaching every cell that may lie
-    /// within both of the run. The projection reaches no further back than
-    /// where the leaders last rested, nor than the segment's table, which
-    /// starts at the start of cell `table_start + 1`; where either lies
-    /// inside the budget or within the widest reach of the slot, the
-    /// projection holds the weight at zero back to there wherever no side
-    /// fits, and no room is left ([`Reserve::none`]).
+    /// [`VALLEY_LEAD_BUDGET_S`] before the run covers, and reaching every
+    /// cell that may lie within it of the run. The projection reaches no
+    /// further back than where the leaders last rested, nor than the
+    /// segment's table, which starts at the start of cell
+    /// `table_start + 1`; where either lies inside the budget or within the
+    /// widest reach of the slot, the projection holds the weight at zero
+    /// back to there wherever no side fits, and no room is left
+    /// ([`Reserve::none`]).
     pub fn found(
         slot: Slot,
         line: u32,
@@ -704,8 +689,7 @@ impl Crawl {
         let budget_from = first - (VALLEY_LEAD_BUDGET_S / h).floor() as i64;
         let within_reach = |n: i64| {
             n >= budget_from
-                || track.path(n + 1, first - 1).1 + track.drift(n + 1, last, h, fit)
-                    <= slot.width.1 + slot.zero_reach()
+                || track.path(n + 1, first - 1).1 + track.drift(n + 1, last, h, fit) <= slot.width.1
         };
         let rested = (track.base()..first)
             .rev()
@@ -731,13 +715,11 @@ impl Crawl {
         let covered = (budget_from..first)
             .map(|n| track.path(n, first - 1).0 - track.drift(n, first - 1, h, fit))
             .fold(0.0_f64, f64::max);
-        let zero_reach = slot.zero_reach();
-        let Some(width) = widest_crawl_side_within(slot.width.1, covered - zero_reach) else {
-            let width_at_rest = valley_reach(slot.speed, fit.accel);
+        let Some(width) = widest_crawl_side_within(slot.width.1, covered) else {
             return Err(Overreach {
-                width: slot.width.1 + zero_reach,
+                width: slot.width.1,
                 covered,
-                width_at_rest: width_at_rest + crawl_zero_reach(width_at_rest),
+                width_at_rest: valley_reach(slot.speed, fit.accel),
             });
         };
         let mut side_from = first;
