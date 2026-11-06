@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import math
 import statistics
 
@@ -341,18 +342,59 @@ def pinned(ir_x: float) -> dict[str, gate.FloorShortfall]:
     return {"c": gate.FloorShortfall(issue=693, predicted_ir_x=ir_x)}
 
 
-def test_a_pinned_floor_shortfall_passes_at_its_pinned_prediction():
-    verdict = gate.judge(
-        "c", entry(), measurement(), model(1.6, 1.0, 1.4), pinned(1.6)
+def judge_pinned(
+    m: gate.Measurement, fit: dict, pinned_cores_x: float | None = 2.3
+) -> gate.Verdict:
+    return gate.judge(
+        "c", entry(), m, fit, pinned(1.6), pi_pinned_cores_x=pinned_cores_x
     )
+
+
+def test_a_pinned_floor_shortfall_passes_at_its_pinned_prediction():
+    verdict = judge_pinned(measurement(), model(1.6, 1.0, 1.4))
     assert verdict.predicted_x == pytest.approx((1.6, 1.4))
+    assert verdict.problems == ()
+    assert verdict.notes == (
+        "the floor shortfall pinned for #693 holds: the Pi measured this "
+        "tree's worst window at 2.30x on cores 0,1,2",
+    )
+
+
+def test_a_pin_passes_with_the_pinned_cores_window_at_the_floor():
+    verdict = judge_pinned(measurement(), model(1.6), gate.PI_FLOOR_X)
     assert verdict.problems == ()
 
 
-def test_a_pinned_floor_shortfall_that_grows_fails_naming_its_issue():
-    verdict = gate.judge(
-        "c", entry(), measurement(stream=9.0), model(1.6), pinned(1.6)
+def test_a_pin_fails_with_the_pinned_cores_window_below_the_floor():
+    verdict = judge_pinned(measurement(), model(1.6), 1.99)
+    assert verdict.problems == (
+        "the floor shortfall pinned for #693 needs the Pi's worst window on "
+        "cores 0,1,2 at or above the 2.0x floor; the Pi measured this tree "
+        "at 1.99x",
     )
+
+
+def test_a_pin_without_a_pinned_cores_window_of_this_tree_fails():
+    verdict = judge_pinned(measurement(), model(1.6), None)
+    assert len(verdict.problems) == 1
+    assert "has none for this tree" in verdict.problems[0]
+    assert gate.PI_COMMAND in verdict.problems[0]
+
+
+def test_a_vanished_pin_still_needs_its_pinned_cores_window():
+    verdict = judge_pinned(measurement(stream=13.0), model(1.6, 1.0, 2.1), None)
+    assert len(verdict.problems) == 1
+    assert "has none for this tree" in verdict.problems[0]
+
+
+def test_an_unpinned_config_needs_no_pinned_cores_window():
+    verdict = gate.judge("c", entry(), measurement(), model(), {})
+    assert verdict.problems == ()
+    assert verdict.notes == ()
+
+
+def test_a_pinned_floor_shortfall_that_grows_fails_naming_its_issue():
+    verdict = judge_pinned(measurement(stream=9.0), model(1.6))
     assert verdict.problems == (
         "the Pi 2-core worst window Ir predicts, 1.44x, grew the floor "
         "shortfall pinned at 1.60x for #693 (-10.00 %, limit 2.0 %)",
@@ -360,33 +402,19 @@ def test_a_pinned_floor_shortfall_that_grows_fails_naming_its_issue():
 
 
 def test_a_pinned_config_holds_its_live_prediction_to_no_pin():
-    verdict = gate.judge(
-        "c",
-        entry(),
-        measurement(band_pct=0.4),
-        model(1.6, 1.0, 1.2),
-        pinned(1.6),
-    )
+    verdict = judge_pinned(measurement(band_pct=0.4), model(1.6, 1.0, 1.2))
     assert verdict.problems == ()
 
 
 def test_a_pinned_floor_shortfall_that_shrinks_passes():
-    verdict = gate.judge(
-        "c", entry(), measurement(stream=10.5), model(1.6), pinned(1.6)
-    )
+    verdict = judge_pinned(measurement(stream=10.5), model(1.6))
     assert verdict.problems == ()
 
 
 def test_a_pinned_floor_shortfall_that_vanishes_passes_and_says_to_unpin():
-    verdict = gate.judge(
-        "c",
-        entry(),
-        measurement(stream=13.0),
-        model(1.6, 1.0, 2.1),
-        pinned(1.6),
-    )
+    verdict = judge_pinned(measurement(stream=13.0), model(1.6, 1.0, 2.1))
     assert verdict.problems == ()
-    assert len(verdict.notes) == 1
+    assert len(verdict.notes) == 2
     assert "Ir predicts, 2.08x, reaches the 2.0x floor" in verdict.notes[0]
     assert "unpin" in verdict.notes[0]
     assert "#693" in verdict.notes[0]
@@ -404,11 +432,10 @@ def test_a_pinned_shortfall_only_warns_while_the_floor_checks_are_off(
     monkeypatch,
 ):
     monkeypatch.setattr(gate, "PI_FLOOR_FAILS", False)
-    verdict = gate.judge(
-        "c", entry(), measurement(stream=9.0), model(1.6), pinned(1.6)
-    )
+    verdict = judge_pinned(measurement(stream=9.0), model(1.6), None)
     assert verdict.problems == ()
     assert "grew the floor shortfall" in verdict.warnings[0]
+    assert "has none for this tree" in verdict.warnings[1]
 
 
 def test_a_pin_at_or_above_the_floor_is_refused():
@@ -479,20 +506,72 @@ def test_the_lab_sync_rewrites_only_changed_files_and_drops_the_rest(tmp_path):
     assert not (dest / "stale.rs").exists()
 
 
-def test_a_pi_measurement_counts_only_for_the_trees_it_measured(
-    tmp_path, monkeypatch
-):
-    trees = {"rust": "a1", "tools/bench/configs": "b2", "tools/sim/gcode": "c3"}
+TREES = {"rust": "a1", "tools/bench/configs": "b2", "tools/sim/gcode": "c3"}
+
+
+def recorded_window(tmp_path, monkeypatch, **fields) -> None:
     window = tmp_path / "pi_window.json"
     window.write_text(
-        '{"trees": {"rust": "a1", "tools/bench/configs": "b2", '
-        '"tools/sim/gcode": "c3"}, "measured_at": "2026-11-06T00:00:00+00:00", '
-        '"worst_x": {"c": [2.04, 2.01]}}'
+        json.dumps(
+            {
+                "trees": TREES,
+                "measured_at": "2026-11-06T00:00:00+00:00",
+                "worst_x": {"c": [2.04, 2.01], "d": [2.2, 2.3]},
+                **fields,
+            }
+        )
     )
     monkeypatch.setattr(gate, "PI_WINDOW", window)
     monkeypatch.setattr(gate, "ROOT", tmp_path)
-    assert gate.pi_measured_worst(trees) == {"c": 2.01}
-    assert gate.pi_measured_worst({**trees, "rust": "changed"}) == {}
-    assert gate.pi_measured_worst(None) == {}
-    window.unlink()
-    assert gate.pi_measured_worst(trees) == {}
+
+
+def test_a_pi_measurement_counts_only_for_the_trees_it_measured(
+    tmp_path, monkeypatch
+):
+    recorded_window(
+        tmp_path,
+        monkeypatch,
+        pinned_cores=gate.PINNED_CORES,
+        pinned_cores_worst_x={"c": [2.3, 2.2]},
+    )
+    assert gate.pi_window(TREES) == gate.PiWindow(
+        {"c": 2.01, "d": 2.2}, {"c": 2.2}
+    )
+    none = gate.PiWindow({}, {})
+    assert gate.pi_window({**TREES, "rust": "changed"}) == none
+    assert gate.pi_window(None) == none
+    gate.PI_WINDOW.unlink()
+    assert gate.pi_window(TREES) == none
+
+
+def test_a_stale_pinned_cores_window_fails_the_pin(tmp_path, monkeypatch):
+    recorded_window(
+        tmp_path,
+        monkeypatch,
+        pinned_cores=gate.PINNED_CORES,
+        pinned_cores_worst_x={"c": [2.3, 2.2]},
+    )
+    stale = gate.pi_window({**TREES, "rust": "changed"})
+    verdict = judge_pinned(
+        measurement(), model(1.6), stale.pinned_cores_x.get("c")
+    )
+    assert len(verdict.problems) == 1
+    assert "has none for this tree" in verdict.problems[0]
+
+
+def test_a_window_without_pinned_cores_serves_unpinned_configs(
+    tmp_path, monkeypatch
+):
+    recorded_window(tmp_path, monkeypatch)
+    assert gate.pi_window(TREES) == gate.PiWindow({"c": 2.01, "d": 2.2}, {})
+
+
+def test_a_window_pinned_on_other_cores_is_refused(tmp_path, monkeypatch):
+    recorded_window(
+        tmp_path,
+        monkeypatch,
+        pinned_cores="0,1,2,3",
+        pinned_cores_worst_x={"c": [2.3]},
+    )
+    with pytest.raises(gate.GateError, match="0,1,2,3"):
+        gate.pi_window(TREES)
