@@ -19,6 +19,7 @@ use trajectory::continuous::{
 use trajectory::{AxisChainSet, ContinuousAxis, ContinuousSegment};
 
 pub mod audit;
+pub mod corner_budget;
 pub mod waypoints;
 
 use motion_pipeline::live_config::step_capacity::StepCapacityInput;

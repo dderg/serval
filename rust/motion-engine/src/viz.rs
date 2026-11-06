@@ -338,6 +338,65 @@ pub(crate) fn pipeline_snapshot_epoch_samples(
 
 type EpochSamples = (f64, f64, Vec<Vec<(f64, f64, f64)>>);
 
+/// One interior vertex of a print's G-code polyline under its corner
+/// budget ([`snapshot_core::corner_budget`]): where it is, how sharply the
+/// polyline turns there, whether the toolhead extrudes through it, whether
+/// the fitter keeps it as a corner, whether the budget holds it, and the
+/// most its shaped miss may be.
+#[derive(IntoPyObject)]
+pub(crate) struct PyCornerVertex {
+    position: [f64; 3],
+    turn_deg: f64,
+    extrudes: bool,
+    corner: bool,
+    held: bool,
+    budget_mm: f64,
+}
+
+/// A print's corner budget as `(kind, value)`, how far its shaped carriers
+/// may stray on top of it, and every interior vertex's share of it.
+#[derive(IntoPyObject)]
+pub(crate) struct PyCornerBudgets {
+    budget: (&'static str, f64),
+    carrier_slack_mm: f64,
+    vertices: Vec<PyCornerVertex>,
+}
+
+/// What `config_text`'s corner budget holds the shaped path to at each
+/// interior vertex of `waypoints`' polyline, as the path-accuracy audit
+/// reads it.
+#[pyfunction]
+pub(crate) fn corner_vertex_budgets(
+    waypoints: Vec<PyWaypoint>,
+    config_text: &str,
+) -> PyResult<PyCornerBudgets> {
+    use snapshot_core::corner_budget::{Polyline, corner_budgets};
+    let waypoints = waypoints_from_py(waypoints)?;
+    let line = Polyline::of(&waypoints);
+    let budgets = corner_budgets(&line, &waypoints, &planner(config_text)?)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let vertices = budgets
+        .vertices
+        .iter()
+        .enumerate()
+        .filter_map(|(vertex, budget)| {
+            budget.map(|budget| PyCornerVertex {
+                position: line.vertices[vertex],
+                turn_deg: line.turn_deg(vertex),
+                extrudes: line.extrudes_through(vertex),
+                corner: budget.corner,
+                held: budget.held,
+                budget_mm: budget.mm,
+            })
+        })
+        .collect();
+    Ok(PyCornerBudgets {
+        budget: corner_budget_parts(budgets.budget),
+        carrier_slack_mm: budgets.carrier_slack_mm,
+        vertices,
+    })
+}
+
 /// Plan `waypoints` under `config_text` as one stream, as
 /// [`pipeline_snapshot_epoch_samples`] does, and encode the plan in the
 /// live host's dispatch-record format: every segment on host origin 0,
