@@ -163,7 +163,35 @@ fn fresnel_cs(x: f64) -> (f64, f64) {
     if x < 0.0 { (-c, -s) } else { (c, s) }
 }
 
+const OFFSET_SLOTS: usize = 256;
+
+thread_local! {
+    /// The offsets this thread read lately, each by the bits of the
+    /// `(κ₀, σ, s)` it was read at, in the slot those bits hash to: the
+    /// axes of one toolhead sample and the fits probing a segment read the
+    /// same arcs again.
+    static OFFSETS: std::cell::RefCell<[([u64; 3], (f64, f64)); OFFSET_SLOTS]> =
+        const { std::cell::RefCell::new([([u64::MAX; 3], (0.0, 0.0)); OFFSET_SLOTS]) };
+}
+
 pub(super) fn clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
+    let key = [kappa_0.to_bits(), sigma.to_bits(), s.to_bits()];
+    let slot = ((key[0] ^ key[1].rotate_left(21) ^ key[2].rotate_left(42))
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        >> (64 - OFFSET_SLOTS.trailing_zeros())) as usize;
+    OFFSETS.with(|offsets| {
+        let mut offsets = offsets.borrow_mut();
+        let (read_at, offset) = offsets[slot];
+        if read_at == key {
+            return offset;
+        }
+        let offset = fresh_clothoid_offset(kappa_0, sigma, s);
+        offsets[slot] = (key, offset);
+        offset
+    })
+}
+
+fn fresh_clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
     if sigma == 0.0 {
         return constant_curvature_offset(kappa_0, s);
     }
