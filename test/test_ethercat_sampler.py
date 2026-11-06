@@ -280,6 +280,44 @@ def test_window_reaching_finalized_motion_fails(path):
     assert vel[0] == 0.0 and acc[0] == 0.0
 
 
+def straight_move(print_time, start, axes_r, distance, speed):
+    cruise_t = distance / speed
+    return {
+        "print_time": print_time,
+        "accel_t": 0.0,
+        "cruise_t": cruise_t,
+        "decel_t": 0.0,
+        "start_x": start[0],
+        "start_y": start[1],
+        "start_z": start[2],
+        "axes_r_x": axes_r[0],
+        "axes_r_y": axes_r[1],
+        "axes_r_z": axes_r[2],
+        "start_v": speed,
+        "cruise_v": speed,
+        "accel": 0.0,
+    }
+
+
+def test_a_cut_move_blocks_only_the_servos_it_moves():
+    """A homing move cut short stays finalized in the history up to where
+    homing set the position. A servo that move drives must not be sampled
+    over it; a servo it leaves alone samples through it at its position."""
+    ffi_main, ffi_lib = chelper.get_ffi()
+    y_homing = straight_move(1.0, (12.0, 50.0, 0.0), (0.0, -1.0, 0.0), 40, 20)
+    tq = build_trapq([y_homing])
+    ffi_lib.trapq_finalize_moves(tq, ffi_main.cast("double", 1e30), 0.0)
+    inside = 1.5
+    for axis, held in ((b"x", 12.0), (b"z", 0.0)):
+        sk = ffi_main.gc(ffi_lib.cartesian_stepper_alloc(axis), ffi_lib.free)
+        ffi_lib.itersolve_set_position(sk, 12.0, 50.0, 0.0)
+        pos, vel, acc, _, _ = sample(sk, tq, inside, INTERVAL, 4)
+        assert np.all(pos == held) and np.all(vel == 0.0)
+    sk_y = ffi_main.gc(ffi_lib.cartesian_stepper_alloc(b"y"), ffi_lib.free)
+    ret, *_, err, _, _ = generate(sk_y, tq, inside, INTERVAL, 1)
+    assert ret == -2 and err.time == inside
+
+
 def test_nonlinear_kinematics_rejected():
     ffi_main, ffi_lib = chelper.get_ffi()
     sk = ffi_main.gc(

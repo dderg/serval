@@ -75,20 +75,24 @@ trapq_move_pva(const struct move *m, double move_time, struct coord *pva)
     }
 }
 
+// The move leaves this servo where it is: the toolhead stands still, or
+// moves only along directions the servo does not follow (a Y homing move
+// for an X servo)
 static inline int
-move_is_stationary(const struct move *m)
+move_is_stationary(const struct servo_sampler *ss, const struct move *m)
 {
-    return !m->start_v && !m->half_accel;
+    return (!m->start_v && !m->half_accel) || !row_dot(&ss->row, &m->axes_r);
 }
 
-// End of the newest finalized move with motion: a sample whose shaper
-// window reaches back before it would need moves the trapq no longer has
+// End of the newest finalized move that moves this servo: a sample whose
+// shaper window reaches back before it would need moves the trapq no longer
+// has
 static double
-finalized_motion_end(struct trapq *tq)
+finalized_motion_end(const struct servo_sampler *ss)
 {
     struct move *m;
-    list_for_each_entry(m, &tq->history, node) {
-        if (!move_is_stationary(m))
+    list_for_each_entry(m, &ss->sk->tq->history, node) {
+        if (!move_is_stationary(ss, m))
             return m->print_time + m->move_t;
     }
     return -INFINITY;
@@ -113,7 +117,7 @@ sample_one(struct servo_sampler *ss, const struct move *first
         *vel = *acc = 0.;
         return SS_OK;
     }
-    if (move_is_stationary(first)
+    if (move_is_stationary(ss, first)
         && t + sk->gen_steps_post_active < first_end) {
         *pos = itersolve_calc_position_from_coord(
             sk, first->start_pos.x, first->start_pos.y, first->start_pos.z);
@@ -160,7 +164,7 @@ servo_sampler_generate(struct servo_sampler *ss, double start_time
     struct move *head = list_first_entry(&sk->tq->moves, struct move, node);
     struct move *first = list_next_entry(head, node);
     struct move *m = first;
-    double finalized_end = finalized_motion_end(sk->tq);
+    double finalized_end = finalized_motion_end(ss);
     int i;
     for (i = 0; i < count; ++i) {
         double t = start_time + i * interval;
@@ -174,4 +178,15 @@ servo_sampler_generate(struct servo_sampler *ss, double start_time
     if (count)
         sk->commanded_pos = pos[count - 1];
     return SS_OK;
+}
+
+// First time whose sample would not reach back into finalized motion (the
+// remnant of a move cut short, eg by a homing trip); -INFINITY if there is
+// none
+double __visible
+servo_sampler_earliest_sample(struct servo_sampler *ss)
+{
+    struct stepper_kinematics *sk = ss->sk;
+    trapq_check_sentinels(sk->tq);
+    return finalized_motion_end(ss) + sk->gen_steps_pre_active;
 }

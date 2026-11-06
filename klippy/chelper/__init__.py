@@ -227,6 +227,7 @@ defs_servo_sample = """
         , double start_time, double interval, int count
         , double *pos, double *vel, double *acc
         , struct servo_sample_error *err);
+    double servo_sampler_earliest_sample(struct servo_sampler *ss);
 """
 
 defs_kin_idex = """
