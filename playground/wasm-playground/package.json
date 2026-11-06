@@ -1,0 +1,17 @@
+{
+  "name": "motion-playground",
+  "type": "module",
+  "description": "WASM binding for the interactive playground: pasted gcode + config in, pipeline snapshot JSON out. Runs the real fitter → planner → lowerer → shaper stages client-side.",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "files": [
+    "motion_playground_bg.wasm",
+    "motion_playground.js",
+    "motion_playground.d.ts"
+  ],
+  "main": "motion_playground.js",
+  "types": "motion_playground.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
