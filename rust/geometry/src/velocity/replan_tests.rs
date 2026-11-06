@@ -288,6 +288,28 @@ fn assert_physical_limits(m: &Move, velocity: &MoveVelocity) -> Result<(), TestC
     Ok(())
 }
 
+/// The brake moves of the stream's first `scales.len()` moves, each on its
+/// budget scaled by its scale.
+fn floor_brakes(stream: &Stream, scales: &[f64]) -> Vec<BrakeMove> {
+    let mut brakes: Vec<BrakeMove> = Vec::with_capacity(scales.len());
+    for (k, &scale) in scales.iter().enumerate() {
+        let previous = k
+            .checked_sub(1)
+            .map(|up| (&stream.moves[up], &stream.budgets[up], &brakes[up]));
+        let brake = brake_move(
+            &stream.moves[k],
+            &stream.budgets[k],
+            stream.stop_before[k],
+            previous,
+            scale,
+            params(0.0),
+        )
+        .expect("the window's moves have caps");
+        brakes.push(brake);
+    }
+    brakes
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 128,
@@ -384,25 +406,11 @@ proptest! {
         let reach = 1 + ((reach * n as f64) as usize).min(n - 1);
         let scales = &scales[..reach];
         let seams = &stream.window.boundary_speeds[..=reach];
-        let mut brakes: Vec<BrakeMove> = Vec::with_capacity(reach);
-        for k in 0..reach {
-            let previous = k
-                .checked_sub(1)
-                .map(|up| (&stream.moves[up], &stream.budgets[up], &brakes[up]));
-            let brake = brake_move(
-                &stream.moves[k],
-                &stream.budgets[k],
-                stream.stop_before[k],
-                previous,
-                scales[k],
-                params(0.0),
-            )
-            .expect("the window's moves have caps");
-            brakes.push(brake);
-        }
+        let mut brakes = floor_brakes(&stream, scales);
         let horizon = brake_horizon(
-            &brakes,
+            &mut brakes,
             seams[..reach].iter().copied(),
+            reach as u64,
             params(0.0).integration_tol,
         )
         .expect("the window's moves have a brake envelope");
@@ -420,5 +428,39 @@ proptest! {
             0.0,
         );
         prop_assert!(braked.is_ok(), "braking from seam {standing} to rest at {reach}: {braked:?}");
+    }
+
+    /// The envelope the moves keep between horizons finds what integrating
+    /// it afresh finds, for rests that move on and spans that start anywhere
+    /// before them.
+    #[test]
+    fn a_kept_brake_envelope_finds_the_fresh_horizon(
+        stream in arb_stream(),
+        scales in prop::collection::vec(0.3f64..1.0, 64),
+        starts in prop::collection::vec(0.0f64..1.0, 64),
+    ) {
+        let n = stream.moves.len();
+        let scales = &scales[..n];
+        let seams = &stream.window.boundary_speeds[..n];
+        let mut kept = floor_brakes(&stream, scales);
+        for reach in 1..=n {
+            let since = ((starts[reach - 1] * reach as f64) as usize).min(reach - 1);
+            let tol = params(0.0).integration_tol;
+            let found = brake_horizon(
+                &mut kept[since..reach],
+                seams[since..reach].iter().copied(),
+                reach as u64,
+                tol,
+            )
+            .expect("the window's moves have a brake envelope");
+            let fresh = brake_horizon(
+                &mut floor_brakes(&stream, scales)[since..reach],
+                seams[since..reach].iter().copied(),
+                reach as u64,
+                tol,
+            )
+            .expect("the window's moves have a brake envelope");
+            prop_assert_eq!(found, fresh, "rest at seam {}, span from {}", reach, since);
+        }
     }
 }

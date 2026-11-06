@@ -314,12 +314,24 @@ pub fn replan_span(
 }
 
 /// What [`brake_horizon`] reads of a move: its kinematics on its
-/// acceleration budget scaled by a fixed factor, and the ceiling of the seam
-/// into it, `None` at the start of a span.
+/// acceleration budget scaled by a fixed factor, the ceiling of the seam
+/// into it, `None` at the start of a span, and the brake envelope's speed
+/// at its entry once that no longer depends on where the rest lies.
 pub struct BrakeMove {
     kin: Kinematics,
     entry_ceiling: Option<f64>,
     line_no: u32,
+    settled_entry: Option<SettledEntry>,
+}
+
+/// The brake envelope's speed at a move's entry, before the seam's ceiling,
+/// the same for a rest at seam `from` or any later one: a ceiling after the
+/// move clamped the envelope there, and an envelope from a later rest only
+/// rises.
+#[derive(Clone, Copy)]
+struct SettledEntry {
+    speed: f64,
+    from: u64,
 }
 
 /// Move `m`'s [`BrakeMove`] on its budget scaled by `accel_scale`, entered
@@ -361,6 +373,7 @@ pub fn brake_move(
         kin,
         entry_ceiling,
         line_no: m.source.start_line,
+        settled_entry: None,
     })
 }
 
@@ -371,29 +384,50 @@ pub fn brake_move(
 /// lowering of the plan at or past the far end then leaves every seam up to
 /// it standing, the plan before a seam reading only that seam's speed.
 /// `None` where no seam of `moves` stands clear.
+///
+/// `rest` numbers the far end's seam in a count that numbers every seam of
+/// the moves the same in each call: where a seam's ceiling clamps the
+/// envelope, the envelope before it holds for every later rest, and the
+/// moves keep it ([`SettledEntry`]) instead of integrating it again.
 pub fn brake_horizon(
-    moves: &[BrakeMove],
+    moves: &mut [BrakeMove],
     entry_speeds: impl DoubleEndedIterator<Item = f64> + ExactSizeIterator,
+    rest: u64,
     integration_tol: f64,
 ) -> Result<Option<usize>, VelocityError> {
     assert_eq!(entry_speeds.len(), moves.len(), "one entry speed per move");
     let mut brake = 0.0_f64;
-    for (k, (brake_move, seam_speed)) in moves.iter().zip(entry_speeds).enumerate().rev() {
-        let kin = &brake_move.kin;
-        let reach = disk::disk_reach_v_rev(kin, brake, kin.length, integration_tol).ok_or(
-            VelocityError::Diverged {
-                line_no: brake_move.line_no,
-            },
-        )?;
+    let mut settled_from: Option<u64> = None;
+    for (k, (brake_move, seam_speed)) in moves.iter_mut().zip(entry_speeds).enumerate().rev() {
+        let entry = match brake_move.settled_entry {
+            Some(settled) if settled.from <= rest => {
+                settled_from = Some(settled.from);
+                settled.speed
+            }
+            _ => {
+                let kin = &brake_move.kin;
+                let speed = disk::disk_reach_v_rev(kin, brake, kin.length, integration_tol)
+                    .ok_or(VelocityError::Diverged {
+                        line_no: brake_move.line_no,
+                    })?
+                    .v;
+                brake_move.settled_entry = settled_from.map(|from| SettledEntry { speed, from });
+                speed
+            }
+        };
         brake = if k == 0 {
-            reach.v
+            entry
         } else {
-            reach.v.min(brake_move.entry_ceiling.unwrap_or_else(|| {
+            let ceiling = brake_move.entry_ceiling.unwrap_or_else(|| {
                 panic!(
                     "brake horizon: line {} starts a span inside one",
                     brake_move.line_no
                 )
-            }))
+            });
+            if entry >= ceiling {
+                settled_from.get_or_insert(rest);
+            }
+            entry.min(ceiling)
         };
         if seam_speed <= brake {
             return Ok(Some(k));
