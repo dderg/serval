@@ -2224,6 +2224,41 @@ the [command reference](G-Codes.md#input_shaper).
 #   parameter requires no tuning and should not be changed.
 ```
 
+### [corner_deviation]
+
+Junction speed from the input-shaped corner deviation. When this section
+is present it replaces the `square_corner_velocity` junction speed
+limit. Each junction then runs at the highest speed for which the
+corner, after input shaping, stays within `max_deviation` of the
+commanded path. The bound includes the rounding the shaper adds even
+when the toolhead stops at the corner (about `σ²·accel/2`, σ being the
+shaper's time spread), and the overlap of nearby corners on curves and
+short segments.
+
+- If even a stop at a corner would exceed `max_deviation`, the
+  acceleration of the two moves around that corner is lowered until the
+  stop fits.
+- With an input smoother (`smooth_*`), the velocity step at a corner is
+  applied over the smoother's duration and adds its own acceleration.
+  Steps within one smoother duration may use at most half of
+  `max_accel`, and the acceleration of the adjacent moves is lowered so
+  that the total stays within `max_accel`.
+- While input shaping is disabled on X or Y, every change of direction
+  stops, the same as `square_corner_velocity: 0`.
+
+Requires [input_shaper]. Setting `square_corner_velocity` in [printer],
+or `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=`, is an error while this
+section is present. The corner tables are rebuilt whenever the input
+shaper changes, which takes about a second.
+
+```
+[corner_deviation]
+max_deviation:
+#   The largest distance, in mm, that the input-shaped toolhead path may
+#   deviate from the commanded path at a corner. This parameter must be
+#   provided.
+```
+
 ### [adxl345]
 
 Support for ADXL345 accelerometers. This support allows one to query

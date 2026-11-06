@@ -72,11 +72,9 @@ def evaluate(
     dt: float = DEFAULT_DT,
     sample_dt: float | None = DEFAULT_SAMPLE_DT,
     mcu_config: str = mcu_dict.DEFAULT_MCU_CONFIG,
-    corner_budget_mm: float | None = None,
+    klippy_root=run.REPO_ROOT,
 ) -> dict:
-    raw = run.run_klippy(
-        config_path, gcode, start_xyz, mcu_config, corner_budget_mm
-    )
+    raw = run.run_klippy(config_path, gcode, start_xyz, mcu_config, klippy_root)
     return analyze(raw, dt, sample_dt)
 
 
@@ -159,7 +157,9 @@ def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
         "print_time_s": float(seg.end[-1] - seg.t0[0]),
         "phase_time": _phase_times(seg),
         "settings": cap["settings"],
-        "corner_budget_mm": cap.get("corner_budget_mm"),
+        "timing": cap["timing"],
+        "moves_planned": len(cap["moves"]),
+        "corner_deviation": cap["corner_deviation"],
         "shaper": {
             axis: dict(cap["shaper"].get(axis, {}), model=k.describe())
             for axis, k in kernels.items()
