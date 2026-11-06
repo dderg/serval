@@ -15,6 +15,7 @@ fn a_cell_binding_past_the_scale_floor_names_itself_and_the_frozen_seam() {
             to: 0.52,
             demand: 30_000.0,
             max_accel: 20_000.0,
+            asked: Asked::Accel,
         },
         line: 12,
         backoffs: 9,

@@ -240,12 +240,14 @@ pub(super) fn shaped_at(
 }
 
 /// Bounds on the shaped motion across the grid cell between two samples
-/// `h` apart: the least speed, the largest acceleration, `|a × v|` and
-/// jerk, and the range of the acceleration and jerk along the velocity
+/// `h` apart: the least and the largest speed and acceleration, `|a × v|`
+/// and jerk, and the range of the acceleration and jerk along the velocity
 /// wherever the speed is at least [`ADVANCE_VALLEY_SPEED_MM_S`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct CellMotion {
     pub speed_floor: f64,
+    pub speed_ceiling: f64,
+    pub accel_floor: f64,
     pub accel_ceiling: f64,
     pub cross_ceiling: f64,
     pub jerk_ceiling: f64,
@@ -323,6 +325,8 @@ impl CellMotion {
         };
         Self {
             speed_floor,
+            speed_ceiling: fastest_bound,
+            accel_floor: (distance_to_segment(from.accel, to.accel) - accel_radius).max(0.0),
             accel_ceiling,
             cross_ceiling: chord_cross
                 + strongest * velocity_radius
@@ -346,7 +350,8 @@ impl CellMotion {
 
 /// What the advance asks of the extruder's motor at most: `r·(σ̈ + k·σ⃛)`
 /// plus the advance's curvature `c·(r·σ̈)²`, with `σ̈ = a·v̂` and
-/// `σ⃛ = j·v̂ + a⊥²/|v|`, the turning term never negative.
+/// `σ⃛ = j·v̂ + a⊥²/|v|`, the turning term never negative; inside advance
+/// valleys of weight `Φ`, `r·(σ̈ + k·(Φ·σ⃛ + 3Φ′·σ̇·σ̈ + Φ″·σ̇³))`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct AdvanceDemand {
     pub ratio: f64,
@@ -354,13 +359,51 @@ pub(super) struct AdvanceDemand {
     pub curvature_s2_per_mm: f64,
 }
 
+/// What the advance valleys around a cell weigh the advance by: their
+/// weights' product `Φ` within `[weight_floor, 1]`, `|Φ′·σ̇|` within
+/// `rebuild` and `Φ″·σ̇³` within `[−fold, bend]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ValleyRead {
+    pub weight_floor: f64,
+    pub rebuild: f64,
+    pub fold: f64,
+    pub bend: f64,
+}
+
+impl ValleyRead {
+    pub const NONE: Self = Self {
+        weight_floor: 1.0,
+        rebuild: 0.0,
+        fold: 0.0,
+        bend: 0.0,
+    };
+}
+
 impl AdvanceDemand {
     /// The demand with `σ̈` within `accel`, `j·v̂` within `jerk` and the
     /// turning term within `[0, turning]`.
     pub fn of(&self, accel: (f64, f64), jerk: (f64, f64), turning: f64) -> f64 {
-        let least = accel.0 + self.slope_s * jerk.0;
-        let most = accel.1 + self.slope_s * (jerk.1 + turning);
-        let base = self.ratio * accel.0.abs().max(accel.1.abs());
+        self.weighted(accel, jerk, turning, &ValleyRead::NONE)
+    }
+
+    /// [`Self::of`] read through the advance valleys `valley`.
+    pub fn weighted(
+        &self,
+        accel: (f64, f64),
+        jerk: (f64, f64),
+        turning: f64,
+        valley: &ValleyRead,
+    ) -> f64 {
+        let jerk_most = jerk.1 + turning;
+        let weighted = (
+            jerk.0.min(valley.weight_floor * jerk.0),
+            jerk_most.max(valley.weight_floor * jerk_most),
+        );
+        let steepest = accel.0.abs().max(accel.1.abs());
+        let rebuild = 3.0 * valley.rebuild * steepest;
+        let least = accel.0 + self.slope_s * (weighted.0 - rebuild - valley.fold);
+        let most = accel.1 + self.slope_s * (weighted.1 + rebuild + valley.bend);
+        let base = self.ratio * steepest;
         self.ratio * least.abs().max(most.abs()) + self.curvature_s2_per_mm * base * base
     }
 

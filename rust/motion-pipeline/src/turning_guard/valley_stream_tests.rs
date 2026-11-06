@@ -241,9 +241,9 @@ impl Shaped<'_> {
 /// The advance's demand on the extruder along a guarded stream, read the
 /// way the follower projection lays its valleys: at every seam the shaped
 /// leaders cross under [`ADVANCE_VALLEY_SPEED_MM_S`] and at every move's
-/// slowest point inside under it, each a valley from the shared rule,
-/// whether or not the projection would find reading the path through too
-/// steep there.
+/// slowest point inside under it, each a valley from the shared rule
+/// merged into the last where their sides overlap, whether or not the
+/// projection would find reading the path through too steep there.
 struct ValleyReference {
     times: Vec<f64>,
     arcs: Vec<f64>,
@@ -317,13 +317,21 @@ impl ValleyReference {
         {
             return;
         }
-        self.valleys.push(AdvanceValley {
-            start: turn,
-            end: turn,
-            before: reach,
-            after: reach,
-            floor: crawl_floor(speed, rate),
-        });
+        let floor = crawl_floor(speed, rate);
+        match self.valleys.last_mut() {
+            Some(last) if turn - reach < last.reach_end() => {
+                last.end = turn;
+                last.after = last.after.max(reach);
+                last.floor = last.floor.max(floor);
+            }
+            _ => self.valleys.push(AdvanceValley {
+                start: turn,
+                end: turn,
+                before: reach,
+                after: reach,
+                floor,
+            }),
+        }
     }
 
     fn weight(&self, s: f64) -> (f64, f64, f64) {

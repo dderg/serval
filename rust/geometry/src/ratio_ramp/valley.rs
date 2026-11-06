@@ -14,6 +14,11 @@ pub const VALLEY_RAMP_TIME_S: f64 = RATIO_RAMP_MAX_TIME_S;
 /// fit's rounding, far under the rate times this.
 pub const TURNAROUND_SPEED_TIME_S: f64 = 1e-6;
 
+/// How many geometric pieces [`SideWeight::within`] bounds a width range
+/// over: each pairs a narrower span of widths with the floors and shares
+/// ahead they allow.
+const SIDE_WIDTH_PIECES: i32 = 8;
+
 /// How far leaders crossing a point at path speed `speed` and path
 /// acceleration `rate` reach from it in half of `ramp_time`.
 #[must_use]
@@ -175,7 +180,14 @@ fn flattened(distance: f64, floor: f64) -> f64 {
 /// the corners of the ranges, and the products of the non-negative factors
 /// bound the weight and its derivatives wherever in the ranges the valley
 /// lies. Past the side, `W = 1` and its derivatives vanish, which the
-/// bounds include where the distance may reach the width.
+/// bounds include where the distance may reach the width. The largest
+/// slope, fold and bend scale read `ι` and `w̃` of the same side: with the
+/// flattened distance `x = w̃·(1 − ι)`, `ι²/w̃ = (w̃ − x)²/w̃³` peaks over
+/// the width at `w̃ = 3x` and `ι/w̃² = (w̃ − x)/w̃³` at `w̃ = 1.5x`, so each is
+/// read at the nearest distance and the width in range closest to its
+/// peak, where the corners alone would pair the widest share ahead with
+/// the narrowest side. Since `f̃ ≤ w`, `w̃ ≥ (√2 − 1)·w` and no narrower than
+/// the narrowest width flattened over a floor of its own size.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SideWeight {
     pub weight: (f64, f64),
@@ -200,9 +212,43 @@ impl SideWeight {
     };
 
     /// The side's weight over `distance`, `width` and `floor`, each a
-    /// `(least, largest)` range.
+    /// `(least, largest)` range: the union of the bounds over
+    /// [`SIDE_WIDTH_PIECES`] geometric pieces of the width range, each of
+    /// which pairs its widths with floors no wider than they are.
     #[must_use]
     pub fn within(distance: (f64, f64), width: (f64, f64), floor: (f64, f64)) -> Self {
+        let (w0, w1) = width;
+        assert!(
+            0.0 < w0 && w0 <= w1,
+            "a valley side's width range is out of order: {width:?}"
+        );
+        let ratio = libm::pow(w1 / w0, 1.0 / f64::from(SIDE_WIDTH_PIECES));
+        let edge = |piece: i32| match piece {
+            0 => w0,
+            SIDE_WIDTH_PIECES => w1,
+            _ => (w0 * libm::pow(ratio, f64::from(piece))).min(w1),
+        };
+        (0..SIDE_WIDTH_PIECES)
+            .map(|piece| {
+                let (from, to) = (edge(piece), edge(piece + 1));
+                Self::within_widths(distance, (from.min(to), to), floor)
+            })
+            .reduce(Self::union)
+            .expect("a width range has pieces")
+    }
+
+    fn union(self, other: Self) -> Self {
+        let hull = |a: (f64, f64), b: (f64, f64)| (a.0.min(b.0), a.1.max(b.1));
+        Self {
+            weight: hull(self.weight, other.weight),
+            slope: hull(self.slope, other.slope),
+            fold: hull(self.fold, other.fold),
+            bend_scale: hull(self.bend_scale, other.bend_scale),
+            bend: hull(self.bend, other.bend),
+        }
+    }
+
+    fn within_widths(distance: (f64, f64), width: (f64, f64), floor: (f64, f64)) -> Self {
         let ((d0, d1), (w0, w1), (f0, f1)) = (distance, width, floor);
         assert!(
             0.0 <= d0 && d0 <= d1 && 0.0 < w0 && w0 <= w1 && 0.0 <= f0 && f0 <= f1,
@@ -218,7 +264,17 @@ impl SideWeight {
             inside(d1, w0, fe0).clamp(0.0, 1.0),
             inside(d0, w1, fe1).clamp(0.0, 1.0),
         );
-        let span = (flattened(w0, fe1), flattened(w1, fe0));
+        let span = (flattened(w0, fe1.min(w0)), flattened(w1, fe0));
+        let nearest = flattened(d0, fe1);
+        let share_peak = |peak_at: f64, power: i32| {
+            let span = (peak_at * nearest).clamp(span.0.max(nearest), span.1);
+            if span <= nearest {
+                0.0
+            } else {
+                libm::pow(span - nearest, f64::from(power)) / (span * span * span)
+            }
+        };
+        let (folding, rising) = (share_peak(1.5, 1), share_peak(3.0, 2));
         let slope_at = |d: f64, f: f64| if f == 0.0 { 1.0 } else { d / libm::hypot(d, f) };
         let slope = (
             if d0 == 0.0 { 0.0 } else { slope_at(d0, fe1) },
@@ -244,15 +300,12 @@ impl SideWeight {
         let (i0, i1) = inside;
         Self {
             weight: (1.0 - i1 * i1 * i1, 1.0 - i0 * i0 * i0),
-            slope: (
-                3.0 * i0 * i0 * slope.0 / span.1,
-                3.0 * i1 * i1 * slope.1 / span.0,
-            ),
+            slope: (3.0 * i0 * i0 * slope.0 / span.1, 3.0 * rising * slope.1),
             fold: (
                 6.0 * i0 * slope.0 * slope.0 / (span.1 * span.1),
-                6.0 * i1 * slope.1 * slope.1 / (span.0 * span.0),
+                6.0 * folding * slope.1 * slope.1,
             ),
-            bend_scale: (3.0 * i0 * i0 / span.1, 3.0 * i1 * i1 / span.0),
+            bend_scale: (3.0 * i0 * i0 / span.1, 3.0 * rising),
             bend,
         }
     }
