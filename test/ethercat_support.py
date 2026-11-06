@@ -16,6 +16,7 @@ from klippy import chelper
 from klippy.extras import shaper_defs
 from klippy.plugins.ethercat import wire
 from tools.motion_eval.capture import TRAPQ_APPEND_FIELDS
+from tools.motion_eval.stepdecode import StepTrace
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 BATCH_RUNNER = (
@@ -131,7 +132,6 @@ class BatchRun:
     moves: list
     shaper: dict
     servo_file: pathlib.Path
-    mcu_output: pathlib.Path
 
 
 def run_batch(tmp_path, config_text, gcode, dictionary):
@@ -169,7 +169,6 @@ def run_batch(tmp_path, config_text, gcode, dictionary):
         captured.get("moves", []),
         captured.get("shaper", {}),
         pathlib.Path(str(output) + ".ethercat"),
-        output,
     )
 
 
@@ -199,6 +198,28 @@ def lane_samples(runs, slot_idx):
         indices.extend(range(run.start_index, run.end_index))
         samples.extend(run.samples)
     return np.array(indices), samples
+
+
+def step_trace(stepper):
+    """Step clocks and resulting MCU positions from the stepcompress history.
+
+    A queue_step entry of count n steps first at first_clock, each later
+    step interval + i * add ticks after the one before it (src/stepper.c).
+    """
+    clocks, positions = [], []
+    for h in stepper["history"]:
+        assert h["add2"] == 0 and h["shift"] == 0, "high precision steps"
+        n = abs(h["step_count"])
+        if not n:
+            continue
+        k = np.arange(n, dtype=np.int64)
+        clocks.append(
+            h["first_clock"] + k * h["interval"] + h["add"] * k * (k + 1) // 2
+        )
+        direction = 1 if h["step_count"] > 0 else -1
+        positions.append(h["start_position"] + direction * (k + 1))
+    assert clocks, "stepper took no steps"
+    return StepTrace(np.concatenate(clocks), np.concatenate(positions))
 
 
 def isclose_to_any(t, events, eps):

@@ -17,12 +17,13 @@ from ethercat_support import (
     dictionary_path,
     lane_samples,
     run_batch,
+    step_trace,
 )
 
 from klippy.plugins.ethercat import wire
 from klippy.plugins.ethercat.stream import Q16
 from klippy.stepper import MAX_STEPCOMPRESS_ERROR
-from tools.motion_eval import analysis, stepdecode
+from tools.motion_eval import analysis
 
 CYCLE_US = 250
 START = (100.0, 100.0, 10.0)
@@ -143,10 +144,11 @@ def servo_config(shaper, x_endstop="ethercat:x"):
 @pytest.fixture(scope="module", params=["mzv", "smooth_mzv"])
 def shadow_run(request, tmp_path_factory):
     tmp = tmp_path_factory.mktemp("ethercat_" + request.param)
-    dictionary = dictionary_path(request)
-    run = run_batch(tmp, servo_config(request.param), GCODE, dictionary)
+    run = run_batch(
+        tmp, servo_config(request.param), GCODE, dictionary_path(request)
+    )
     assert run.returncode == 0, run.log[-4000:]
-    return run, dictionary
+    return run
 
 
 def servo_trajectory(run):
@@ -165,7 +167,7 @@ def servo_trajectory(run):
 
 
 def test_runs_abut_and_are_anchored_once(shadow_run):
-    run, _ = shadow_run
+    run = shadow_run
     runs, t, pos, vel, _ = servo_trajectory(run)
     assert runs[0].flags & wire.FLAG_REANCHOR
     assert not any(r.flags & wire.FLAG_REANCHOR for r in runs[1:])
@@ -178,30 +180,28 @@ def test_runs_abut_and_are_anchored_once(shadow_run):
 
 
 def test_servo_targets_follow_the_shaped_trajectory(shadow_run):
-    run, _ = shadow_run
+    run = shadow_run
     runs, t, pos, vel, resolution = servo_trajectory(run)
     seg = analysis.Segments.from_moves(run.moves)
     kernel = analysis.Kernel.from_shaper(run.shaper["x"])
     jump_times, jumps = seg.velocity_jumps()
-    model = analysis.executed_axis(seg, kernel, 0, t, jump_times, jumps)
+    model = analysis.executed_axis(
+        seg, kernel, 0, t[0], CYCLE_US * 1e-6, len(t), jump_times, jumps
+    )
     # stepper_x of a cartesian printer is the x coordinate itself. The
-    # smoother model is a 128-node quadrature whose error at a velocity kink
-    # is far below one encoder count, so the count resolution is the bound.
+    # smoother model is a discrete convolution on a fine grid whose error at
+    # a velocity kink is far below one encoder count, so the count
+    # resolution is the bound.
     error = np.abs(pos - model.pos)
     worst = int(np.argmax(error))
     assert error[worst] <= resolution, (float(t[worst]), float(error[worst]))
 
 
 def test_servo_follows_shadow_stepper_steps(shadow_run):
-    run, dictionary = shadow_run
+    run = shadow_run
     runs, t, pos, vel, resolution = servo_trajectory(run)
     shadow = run.steppers["stepper_x1"]
-    traces = stepdecode.decode(
-        dictionary, run.mcu_output, {shadow["oid"]: shadow["invert_dir"]}
-    )
-    trace = traces[shadow["oid"]]
-    assert len(trace.clocks) > 0
-    stepper_pos = analysis.zoh_stepper_position(shadow, trace, t)
+    stepper_pos = analysis.zoh_stepper_position(shadow, step_trace(shadow), t)
     # Between steps the shadow is within half a step of the commanded
     # position; a step may come late or early by the stepcompress bound
     # plus one MCU tick, during which the commanded position moves at most
