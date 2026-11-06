@@ -372,6 +372,79 @@ fn the_holds_of_a_brief_rest_cover_the_kernels_on_both_sides_together() {
     );
 }
 
+/// The hold the box kernel settles at under [`STREAM_ACCEL`].
+fn settled_hold() -> f64 {
+    let radius = 0.5 * PATH_DEVIATION_MM;
+    let settled_after = KERNEL_REACH_S - libm::cbrt(radius * 12.0 * KERNEL_REACH_S / STREAM_ACCEL);
+    let cell = KERNEL_REACH_S / crate::frontend::SETTLE_CELLS as f64;
+    (settled_after / cell).ceil() * cell
+}
+
+/// An extrusion along x, a retract, a z hop of `hop_mm` at 40 mm/s, a
+/// travel along x, the hop back down, a prime and an extrusion: the
+/// retract and the prime meet the travel only across the unshaped z.
+fn hop_stream(hop_mm: f64) -> Vec<Move> {
+    let limits = VelocityLimits::try_new(1000.0, STREAM_ACCEL, 0.0, f64::INFINITY)
+        .unwrap()
+        .with_extruder_caps(Some(roomy_caps()))
+        .unwrap();
+    let points: [([f64; 3], f64, f64); 7] = [
+        ([10.0, 0.0, 0.0], 10.0 * RATIO, 150.0),
+        ([10.0, 0.0, 0.0], -0.5, 40.0),
+        ([10.0, 0.0, hop_mm], 0.0, 40.0),
+        ([20.0, 0.0, hop_mm], 0.0, 150.0),
+        ([20.0, 0.0, 0.0], 0.0, 40.0),
+        ([20.0, 0.0, 0.0], 0.5, 40.0),
+        ([30.0, 0.0, 0.0], 10.0 * RATIO, 150.0),
+    ];
+    let mut from = [0.0; 3];
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, &(to, e_delta, feedrate_mm_s))| {
+            let ctx = MoveContext {
+                extruder_axis: 3,
+                feedrate_mm_s,
+                limits,
+                source: SourceRange {
+                    start_line: index as u32,
+                    end_line: index as u32,
+                },
+            };
+            let m = line_move(from, to, e_delta, ctx).unwrap();
+            from = to;
+            m
+        })
+        .collect()
+}
+
+#[test]
+fn a_z_hop_longer_than_the_kernels_leaves_no_hold_on_its_side() {
+    let holds: Vec<[f64; 2]> = extrusion_budgets(&hop_stream(0.4), EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+        .iter()
+        .map(|budget| budget.rest_holds_s)
+        .collect();
+    assert!(0.4 / 40.0 > KERNEL_REACH_S);
+    let hold = settled_hold();
+    assert_eq!(holds[1], [hold, 0.0], "{holds:?}");
+    assert_eq!(holds[5], [0.0, hold], "{holds:?}");
+}
+
+#[test]
+fn a_z_hop_shorter_than_the_kernels_shortens_the_hold_by_its_least_time() {
+    let hop_mm = 0.04;
+    let lead = hop_mm / 40.0;
+    assert!(lead < settled_hold());
+    let holds: Vec<[f64; 2]> =
+        extrusion_budgets(&hop_stream(hop_mm), EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)
+            .iter()
+            .map(|budget| budget.rest_holds_s)
+            .collect();
+    let shortened = settled_hold() - lead;
+    assert!((holds[1][1] - shortened).abs() <= 1e-12, "{holds:?}");
+    assert!((holds[5][0] - shortened).abs() <= 1e-12, "{holds:?}");
+}
+
 #[test]
 fn the_axes_in_reach_are_those_the_path_moves_on_within_the_spill() {
     let limits = VelocityLimits::try_new(1000.0, 20_000.0, 0.0, f64::INFINITY)

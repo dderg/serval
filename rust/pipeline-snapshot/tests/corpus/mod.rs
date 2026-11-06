@@ -408,6 +408,13 @@ pub fn corner_flow_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
         .collect()
 }
 
+/// The corner_flow file on each of `configs` as the one print it is, named
+/// `corner_flow_cases/<config>`: each case opens where the one before left
+/// the machine, a state no case planned alone starts from.
+pub fn corner_flow_run_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
+    print_cases("corner_flow_cases", configs)
+}
+
 pub fn sim_cases() -> Vec<(String, String, PathBuf)> {
     SIM_GCODES
         .iter()
@@ -430,6 +437,8 @@ pub fn all_cases() -> Vec<(String, String, PathBuf)> {
     cases.extend(profile_cases());
     cases.extend(corner_flow_cases(&SIM_CONFIGS));
     cases.extend(corner_flow_cases(&PROFILE_CONFIGS));
+    cases.extend(corner_flow_run_cases(&SIM_CONFIGS));
+    cases.extend(corner_flow_run_cases(&PROFILE_CONFIGS));
     cases
 }
 
