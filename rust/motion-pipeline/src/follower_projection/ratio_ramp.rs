@@ -140,15 +140,12 @@ pub(super) struct PendingSegment {
     table_end: f64,
 }
 
-/// Where the span table's ratio or its slope steps, and the half-width a
-/// ratio step there is smoothed over once the width there is final
-/// ([`RatioSmoothing::final_through`]).
+/// Where the span table's ratio or its slope steps.
 #[derive(Debug, Clone, Copy)]
 struct Seam {
     s: f64,
     step: f64,
     slope_after: f64,
-    final_width: Option<f64>,
 }
 
 impl Seam {
@@ -157,11 +154,10 @@ impl Seam {
     fn between(before: &RatioSpan, after: &RatioSpan) -> Option<Self> {
         let step = after.r0 - before.r1;
         let slope_after = after.ratio_slope();
-        (step != 0.0 || slope_after != before.ratio_slope()).then(|| Self {
+        (step != 0.0 || slope_after != before.ratio_slope()).then_some(Self {
             s: after.s0,
             step,
             slope_after,
-            final_width: None,
         })
     }
 }
@@ -281,23 +277,8 @@ impl SeamTable {
             .iter()
             .filter(|seam| seam.step != 0.0)
             .fold(Jet::ZERO, |total, seam| {
-                total + step_correction(seam, width.step_width(seam), s)
+                total + step_correction(seam, width.step_width(seam.s), s)
             })
-    }
-
-    /// Keeps the half-width of every ratio step at or before `width_final`,
-    /// where the width no longer changes.
-    fn keep_final_widths(&mut self, width: &WidthField, width_final: f64) {
-        for seam in self
-            .seams
-            .iter_mut()
-            .rev()
-            .skip_while(|seam| seam.s > width_final)
-            .take_while(|seam| seam.final_width.is_none())
-            .filter(|seam| seam.step != 0.0)
-        {
-            seam.final_width = Some(width.width(seam.s));
-        }
     }
 
     /// The ratio steps whose own windows reach into `[lo, hi]`, each with
@@ -315,7 +296,7 @@ impl SeamTable {
         self.seams_near(lo - reach, hi + reach)
             .iter()
             .filter(|seam| seam.step != 0.0)
-            .map(|seam| (*seam, width.step_width(seam)))
+            .map(|seam| (*seam, width.step_width(seam.s)))
             .filter(move |&(seam, h)| h > 0.0 && seam.s - h < hi && seam.s + h > lo)
     }
 }
@@ -1208,17 +1189,14 @@ impl WidthField {
         }
     }
 
-    /// The half-width the ratio step at `seam` is smoothed over: the width
-    /// there, kept once final, and none past the last node, whose width no
-    /// evaluation within [`RatioSmoothing::final_through`] reads.
-    fn step_width(&self, seam: &Seam) -> f64 {
-        if let Some(width) = seam.final_width {
-            return width;
-        }
-        if seam.s > self.nodes[self.nodes.len() - 1].s + SPAN_LOOKUP_SLACK_MM {
+    /// The half-width a ratio step at `s` is smoothed over: the width
+    /// there, none past the last node, whose width no evaluation within
+    /// [`RatioSmoothing::final_through`] reads.
+    fn step_width(&self, s: f64) -> f64 {
+        if s > self.nodes[self.nodes.len() - 1].s + SPAN_LOOKUP_SLACK_MM {
             return 0.0;
         }
-        self.width(seam.s)
+        self.width(s)
     }
 
     /// [`Self::jet`]'s value alone, by the same arithmetic.
@@ -1701,9 +1679,6 @@ impl RatioSmoothing {
         let Some(width_final) = self.width.final_through() else {
             return self.floor;
         };
-        for table in [&mut self.laid, &mut self.advance] {
-            table.keep_final_widths(&self.width, width_final);
-        }
         let width = self.width.searcher();
         let fits = |s: f64| s + width.width(s) <= table_end;
         let steps_reach_back_to = if width_final >= table_end {
