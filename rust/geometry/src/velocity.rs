@@ -22,7 +22,7 @@ mod step_capacity;
 mod z_caps;
 
 pub use extrusion_reach::{ExtrusionBudget, ExtrusionReach, extrusion_budgets};
-pub use law::{LawSegment, RailPair, RailPairShape, ScalarLaw};
+pub use law::{LawSegment, LawVariation, RailPair, RailPairShape, ScalarLaw};
 
 use disk::Kinematics;
 

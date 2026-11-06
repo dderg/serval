@@ -673,3 +673,74 @@ fn a_rail_holding_a_held_cap_lays_it_in_few_knots() {
         seg.rail_knots().len()
     );
 }
+
+/// The variation of `seg`'s acceleration and speed read at `steps` instants
+/// per knot pair: a lower bound on their total variation.
+fn sampled_variation(seg: &LawSegment, steps: u32) -> (f64, f64) {
+    let mut times = vec![0.0];
+    for pair in seg.rail_pairs(0.0, seg.dt) {
+        let (lo, hi) = (pair.t_lo.max(0.0), pair.t_hi.min(seg.dt));
+        times.extend(
+            (1..=steps).map(|k| lo + (hi - lo) * (f64::from(k) / f64::from(steps)).powi(2)),
+        );
+    }
+    times.push(seg.dt);
+    times.sort_by(f64::total_cmp);
+    let states: Vec<(f64, f64, f64)> = times.iter().map(|&t| seg.state_at(seg.t0 + t)).collect();
+    states.windows(2).fold((0.0, 0.0), |(accel, speed), w| {
+        (
+            accel + (w[1].2 - w[0].2).abs(),
+            speed + (w[1].1 - w[0].1).abs(),
+        )
+    })
+}
+
+#[test]
+fn a_rail_variation_bounds_what_its_interpolated_motion_travels() {
+    let accel = 50_000.0_f64;
+    let apex_kappa = -575.525_278_267_944_3_f64;
+    let launch = rail(
+        (accel / apex_kappa.abs()).sqrt(),
+        accel,
+        apex_kappa,
+        821_979.862_028_279,
+        false,
+        0.000_700_169_559_930_343_1,
+    );
+    let departing = rail((2500.0_f64).sqrt(), 5000.0, 2.0, -40.0, false, 0.05);
+    let (running, lo, hi) = rail_running_into_its_cap();
+    let cut = running.cut_at_time(lo + 0.5 * (hi - lo));
+    let gentle = rail(
+        3.617_106_127_137_380_8,
+        47_884.320_049_387_56,
+        33.2,
+        -0.41,
+        false,
+        3.5,
+    );
+    for (name, seg) in [
+        ("launch", &launch),
+        ("departing", &departing),
+        ("running", &running),
+        ("cut", &cut),
+        ("gentle", &gentle),
+    ] {
+        let bound = seg.variation();
+        let (accel_seen, speed_seen) = sampled_variation(seg, 64);
+        let tol = |seen: f64| 1e-9 * seen + 1e-9;
+        assert!(
+            bound.accel + tol(accel_seen) >= accel_seen
+                && bound.speed + tol(speed_seen) >= speed_seen,
+            "{name}: the variation {bound:?} is under what the motion travels: accel \
+             {accel_seen}, speed {speed_seen}"
+        );
+        assert!(
+            bound.accel <= 1.5 * accel_seen + 1.0 && bound.speed <= 1.5 * speed_seen + 1e-3,
+            "{name}: the variation {bound:?} is far over what the motion travels: accel \
+             {accel_seen}, speed {speed_seen}"
+        );
+    }
+    let flat = LawSegment::new(0.0, 0.2, 0.0, 10.0, ScalarLaw::ConstAccel { a0: -4.0 });
+    assert_eq!(flat.variation().accel, 0.0);
+    assert!((flat.variation().speed - 0.8).abs() < 1e-12);
+}

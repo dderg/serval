@@ -26,6 +26,28 @@ fn exact_demand(leaders: &Leaders, motion: &Motion, t: f64) -> Option<f64> {
     Some(flow.abs() + DEMAND.curvature_s2_per_mm * (DEMAND.ratio * tangential).powi(2))
 }
 
+/// A random piece of a random motion as a stretch on the grid, with the
+/// summaries of the planned time the kernels read over it.
+fn random_stretch(
+    rng: &mut Rng,
+    kernels: &FollowerKernels,
+) -> (Motion, (f64, f64), Vec<MoveSummary>) {
+    let motion = random_motion(rng);
+    let piece_ends = motion.breaks();
+    let index = (rng.unit() * (piece_ends.len() - 1) as f64) as usize;
+    let stretch = (
+        (piece_ends[index] / H).floor() * H,
+        (piece_ends[index + 1] / H).ceil() * H,
+    );
+    let (back, ahead) = kernels.sample_span();
+    let window = motion.summaries(stretch.0 - back as f64 * H, stretch.1 + ahead as f64 * H);
+    (motion, stretch, window)
+}
+
+fn instants((t0, t1): (f64, f64)) -> impl Iterator<Item = f64> {
+    (0..=SAMPLES_PER_MOVE).map(move |step| t0 + (t1 - t0) * step as f64 / SAMPLES_PER_MOVE as f64)
+}
+
 #[test]
 fn a_move_the_screen_passes_never_asks_more_than_the_limit_of_the_exact_shaped_motion() {
     let leaders = Leaders::new();
@@ -33,26 +55,19 @@ fn a_move_the_screen_passes_never_asks_more_than_the_limit_of_the_exact_shaped_m
     let mut rng = Rng::new(0x005C_2EE7);
     let mut checked = 0;
     for _ in 0..CASES {
-        let motion = random_motion(&mut rng);
-        let piece_ends = motion.breaks();
-        let index = (rng.unit() * (piece_ends.len() - 1) as f64) as usize;
-        let stretch = (piece_ends[index], piece_ends[index + 1]);
-        let worst = (0..=SAMPLES_PER_MOVE)
-            .filter_map(|step| {
-                let t = stretch.0 + (stretch.1 - stretch.0) * step as f64 / SAMPLES_PER_MOVE as f64;
-                exact_demand(&leaders, &motion, t)
-            })
+        let (motion, stretch, window) = random_stretch(&mut rng, &kernels);
+        let worst = instants(stretch)
+            .filter_map(|t| exact_demand(&leaders, &motion, t))
             .fold(0.0_f64, f64::max);
         if worst == 0.0 {
             continue;
         }
         checked += 1;
-        let (from, to) = leaders.read(stretch);
-        let window = motion.summaries(from, to);
         assert!(
             !passes(
                 &kernels,
                 window.iter().copied(),
+                stretch,
                 &DEMAND,
                 |axes| leaders.jerk_gain(axes),
                 worst * (1.0 - 1e-9),
@@ -64,5 +79,48 @@ fn a_move_the_screen_passes_never_asks_more_than_the_limit_of_the_exact_shaped_m
     assert!(
         checked * 2 > CASES as usize,
         "only {checked} cases asked anything"
+    );
+}
+
+/// The jerk bound holds the exact convolution's jerk on every shaped axis
+/// at every instant of the stretch, and an isolated step meets it: the
+/// bound is the largest of `|Δa|·|w|` over the stretch, which the exact
+/// jerk reaches where the stretch holds the kernel's peak.
+#[test]
+fn the_switch_jerk_bound_holds_the_exact_shaped_jerk_on_every_axis() {
+    let leaders = Leaders::new();
+    let kernels = leaders.grid_kernels(H);
+    let mut rng = Rng::new(0x0005_1EC7);
+    let mut tightest = f64::INFINITY;
+    for _ in 0..CASES {
+        let (motion, stretch, window) = random_stretch(&mut rng, &kernels);
+        let mut bound = JerkBound::new(&kernels, stretch);
+        for summary in &window {
+            bound.add(summary);
+        }
+        let per_axis = bound.finish().per_axis;
+        let mut seen = [0.0_f64; 3];
+        for t in instants(stretch) {
+            let (_, _, jerk) = motion.shaped(&leaders.axes(), t);
+            for axis in 0..3 {
+                seen[axis] = seen[axis].max(jerk[axis].abs());
+            }
+        }
+        for axis in 0..2 {
+            assert!(
+                seen[axis] <= per_axis[axis] * (1.0 + 1e-9) + 1e-6,
+                "axis {axis}: the exact shaped jerk reaches {} over a bound of {}: {window:#?}",
+                seen[axis],
+                per_axis[axis]
+            );
+            if seen[axis] > 0.0 {
+                tightest = tightest.min(per_axis[axis] / seen[axis]);
+            }
+        }
+        assert_eq!(per_axis[2], 0.0, "the unfollowed axis reads no jerk");
+    }
+    assert!(
+        tightest < 1.02,
+        "no case comes within 2% of its bound: tightest {tightest}"
     );
 }

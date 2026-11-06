@@ -197,6 +197,115 @@ fn quintic_monomials(p0: f64, rise: f64, [m0, c0, m1, c1]: [f64; 4]) -> [f64; 6]
     ]
 }
 
+/// The slope's largest magnitude, `30·u²·(1 − u)²` at `u = ½`, of the
+/// quintic Hermite's rise basis `10u³ − 15u⁴ + 6u⁵`.
+const RISE_BASIS_SLOPE_PEAK: f64 = 1.875;
+
+/// What a rail knot pair's interpolated motion does between its knots: its
+/// acceleration at `t_lo` and at `t_hi`, and bounds on the total variation
+/// of its acceleration and of its speed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PairSweep {
+    pub accel_lo: f64,
+    pub accel_hi: f64,
+    pub accel_variation: f64,
+    pub speed_variation: f64,
+}
+
+/// [`PairSweep`] of `pair`. Its acceleration is a polynomial in the pair's
+/// variable, `u` or `z`, which runs monotonically with time, so the
+/// variation of the polynomial's Bernstein control polygon over the pair
+/// bounds the acceleration's, and the polygon's ends are its ends. Where
+/// every coefficient shares a sign the acceleration does, and the speed it
+/// integrates to varies by its rise; otherwise by at most the largest
+/// coefficient over the pair's duration. A quintic pair's speed rises by
+/// `v_hi − v_lo` while its acceleration integrates to the integrator's own
+/// rise: the difference rides the rise basis, whose slope peaks at
+/// [`RISE_BASIS_SLOPE_PEAK`].
+#[must_use]
+pub(super) fn pair_sweep(pair: &RailPair) -> PairSweep {
+    let h = pair.t_hi - pair.t_lo;
+    let (power, (from, to), rise, mismatch) = match pair.shape {
+        RailPairShape::Quintic { rise, slopes } => {
+            let rising = quintic_monomials(0.0, rise, slopes);
+            let power: Vec<f64> = (1..rising.len())
+                .map(|degree| degree as f64 * rising[degree] / h)
+                .collect();
+            (
+                power,
+                (0.0, 1.0),
+                rise,
+                (pair.v_hi - pair.v_lo - rise).abs(),
+            )
+        }
+        RailPairShape::Departure {
+            from_lo,
+            coefficients: [c2, c3, c4, c5],
+        } => {
+            let (sign, ends) = if from_lo {
+                (1.0, (0.0, 1.0))
+            } else {
+                (-1.0, (1.0, 0.0))
+            };
+            let power = [c2, 1.5 * c3, 2.0 * c4, 2.5 * c5].map(|c| sign * c / h);
+            (power.to_vec(), ends, pair.v_hi - pair.v_lo, 0.0)
+        }
+        RailPairShape::Clipped {
+            coefficients: [c2, c3, c4, c5],
+            h: parent,
+            theta_lo,
+            theta_hi,
+            ..
+        } => {
+            let direction = (theta_hi - theta_lo).signum();
+            let power = [c2, 1.5 * c3, 2.0 * c4, 2.5 * c5].map(|c| direction * c / parent);
+            let ends = ((theta_lo / parent).sqrt(), (theta_hi / parent).sqrt());
+            (power.to_vec(), ends, pair.v_hi - pair.v_lo, 0.0)
+        }
+    };
+    let control = bernstein_between(&power, from, to);
+    let accel_variation = control.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
+    let largest = control.iter().fold(0.0_f64, |acc, c| acc.max(c.abs()));
+    let one_signed = control.iter().all(|c| *c >= 0.0) || control.iter().all(|c| *c <= 0.0);
+    let accel_speed_variation = if one_signed { rise.abs() } else { largest * h };
+    PairSweep {
+        accel_lo: control[0],
+        accel_hi: control[control.len() - 1],
+        accel_variation,
+        speed_variation: accel_speed_variation + RISE_BASIS_SLOPE_PEAK * mismatch,
+    }
+}
+
+/// The Bernstein coefficients over `y ∈ [0, 1]` of `p(from + (to − from)·y)`,
+/// `p(x) = Σ cⱼ·xʲ`.
+fn bernstein_between(power: &[f64], from: f64, to: f64) -> Vec<f64> {
+    let n = power.len();
+    let mut shifted = power.to_vec();
+    for done in 0..n {
+        for j in (done..n - 1).rev() {
+            shifted[j] += from * shifted[j + 1];
+        }
+    }
+    let width = to - from;
+    let mut scale = 1.0;
+    for c in &mut shifted {
+        *c *= scale;
+        scale *= width;
+    }
+    let degree = n - 1;
+    (0..n)
+        .map(|i| {
+            (0..=i)
+                .map(|j| binomial(i, j) / binomial(degree, j) * shifted[j])
+                .sum()
+        })
+        .collect()
+}
+
+fn binomial(n: usize, k: usize) -> f64 {
+    (0..k).fold(1.0, |acc, i| acc * (n - i) as f64 / (i + 1) as f64)
+}
+
 /// The proven defects of `pair`'s interpolant against `law`: its
 /// acceleration's against the law's, and — between knots at or below the
 /// curvature cap — how far its normal acceleration `|κ|·v²` overshoots

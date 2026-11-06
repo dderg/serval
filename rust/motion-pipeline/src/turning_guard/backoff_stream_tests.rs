@@ -4,7 +4,8 @@ use geometry::ExtruderCaps;
 use planner_config::{PlannerConfig, RuntimeLimits};
 use trajectory::AxisChainSet;
 
-use super::TurningGuard;
+use super::screen::{JerkBound, MoveSummary};
+use super::{TurningGuard, expect_sample};
 use crate::fit_stage::FitStage;
 use crate::live_config::{GcodeLine, GcodeMoveBase, extruder_caps, stream_config};
 use crate::planner::Planner;
@@ -260,4 +261,68 @@ fn back_offs_under_an_under_estimated_jerk_gain_never_change_emitted_motion() {
 #[test]
 fn back_offs_cascading_under_a_planner_blind_to_the_advance_jerk_never_reach_emitted_motion() {
     UnsoundPlanner::new(&without_a_z_shaper(), 0.0).assert_guards(&hole_perimeters());
+}
+
+/// A zigzag infill: 20 mm strokes 0.45 mm apart at 300 mm/s, each turned
+/// round in a hairpin.
+fn zigzag() -> Vec<GcodeLine> {
+    let mut lines = Vec::new();
+    let mut at = [100.0, 100.0];
+    for stroke in 0..12_u32 {
+        let across = [at[0] + if stroke % 2 == 0 { 20.0 } else { -20.0 }, at[1]];
+        lines.push(line(2 * stroke, at, across, 0.8, 300.0));
+        let up = [across[0], across[1] + 0.45];
+        lines.push(line(2 * stroke + 1, across, up, 0.02, 300.0));
+        at = up;
+    }
+    lines
+}
+
+/// The screen's jerk bound on each shaped axis holds the shadow
+/// convolution's proven jerk, `|j| − miss`, at every grid instant of every
+/// move's stretch of planned streams with corners, curves and hairpins.
+#[test]
+fn the_screen_jerk_bound_holds_the_shadow_convolution_of_planned_streams() {
+    let planner = UnsoundPlanner::new(HIGH_ACCEL_RAMP, 1.0);
+    let mut checked = 0;
+    for lines in [corner_after_a_travel(), hole_perimeters(), zigzag()] {
+        let mut guard = TurningGuard::new(planner.config.clone(), &planner.chains);
+        for item in planner.plan(&lines) {
+            match item {
+                PlannedItem::Move(planned) => guard.admit(planned),
+                PlannedItem::Drain => break,
+                PlannedItem::Control(_) => {}
+            }
+        }
+        guard.entries.closed = true;
+        guard.extend_grid();
+        let h = guard.h();
+        let (back, ahead) = guard.span;
+        let (_, follower) = &guard.followers[0];
+        for timing in &guard.entries.timing {
+            let stretch = ((timing.t0 / h).floor() * h, (timing.t1() / h).ceil() * h);
+            let window: Vec<MoveSummary> = guard
+                .summaries_over((stretch.0 - back as f64 * h, stretch.1 + ahead as f64 * h))
+                .collect();
+            let mut bound = JerkBound::new(&follower.coarse, stretch);
+            for summary in &window {
+                bound.add(summary);
+            }
+            let per_axis = bound.finish().per_axis;
+            for n in (stretch.0 / h).round() as i64..=(stretch.1 / h).round() as i64 {
+                let sample = expect_sample(&follower.coarse, &guard.grid, n);
+                for axis in 0..3 {
+                    let proven = sample.jerk[axis].abs() - sample.jerk_miss[axis];
+                    assert!(
+                        proven <= per_axis[axis] * (1.0 + 1e-9) + 1e-6,
+                        "t={}: axis {axis}'s shaped jerk is at least {proven} over the bound {}",
+                        n as f64 * h,
+                        per_axis[axis]
+                    );
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 1000, "only {checked} instants checked");
 }

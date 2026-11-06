@@ -35,6 +35,56 @@ pub(super) struct KernelCells {
     /// Upper bounds on `∫w⁺` and `∫w⁻`.
     pub positive_mass: f64,
     pub negative_mass: f64,
+    /// A bound on the total variation of `w`, its steps included.
+    pub variation: f64,
+    /// Each cell's bound on `|w|`, and on `|w′|` off the kernel's steps.
+    value_peaks: RangeMax,
+    slope_peaks: RangeMax,
+}
+
+impl Linear {
+    /// The largest `|f|` across its cell of width `h`.
+    fn peak(&self, h: f64) -> f64 {
+        self.at.abs() + 0.5 * h * self.slope.abs() + self.miss
+    }
+}
+
+/// Whether a cell bound is read off `w` or off its regular slope `w′`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Of {
+    Value,
+    Slope,
+}
+
+/// The largest of a run of values over any range of them, in two lookups:
+/// level `k` holds the largest of every `2ᵏ` consecutive values.
+#[derive(Debug, Clone)]
+struct RangeMax {
+    levels: Vec<Vec<f64>>,
+}
+
+impl RangeMax {
+    fn new(values: Vec<f64>) -> Self {
+        let count = values.len();
+        let mut levels = vec![values];
+        let mut width = 1;
+        while 2 * width <= count {
+            let below = &levels[levels.len() - 1];
+            let level = (0..=count - 2 * width)
+                .map(|i| below[i].max(below[i + width]))
+                .collect();
+            levels.push(level);
+            width *= 2;
+        }
+        Self { levels }
+    }
+
+    /// The largest of the values `lo..=hi`.
+    fn over(&self, lo: usize, hi: usize) -> f64 {
+        let level = (hi - lo + 1).ilog2() as usize;
+        let row = &self.levels[level];
+        row[lo].max(row[hi + 1 - (1 << level)])
+    }
 }
 
 impl KernelCells {
@@ -45,7 +95,7 @@ impl KernelCells {
         let last = (hi / h).ceil() as i64;
         let slopes = differentiated(&kernel.pieces);
         let curvatures = differentiated(&slopes);
-        let (value, slope) = (first..last)
+        let (value, slope): (Vec<Linear>, Vec<Linear>) = (first..last)
             .map(|j| {
                 let (a, b) = (j as f64 * h, (j + 1) as f64 * h);
                 (
@@ -55,15 +105,44 @@ impl KernelCells {
             })
             .unzip();
         let (positive_mass, negative_mass) = signed_masses(&kernel.pieces);
+        let peaks = |cells: &[Linear]| RangeMax::new(cells.iter().map(|c| c.peak(h)).collect());
+        let jumps = jump_total(&kernel.pieces);
         Self {
             first,
+            variation: slope.iter().map(|cell| cell.peak(h) * h).sum::<f64>() + jumps,
+            value_peaks: peaks(&value),
+            slope_peaks: peaks(&slope),
             value,
             slope,
-            jumps: jump_total(&kernel.pieces),
+            jumps,
             jerk_rate_per_accel: absolute_integral(&curvatures) + jump_total(&slopes),
             positive_mass,
             negative_mass,
         }
+    }
+
+    /// The cells' indices, `first..end`: they cover `u ∈ [first·h, end·h]`.
+    pub fn span(&self) -> (i64, i64) {
+        (self.first, self.first + self.value.len() as i64)
+    }
+
+    /// A bound on `|w|` (or on `|w′|` off the kernel's steps) over
+    /// `u ∈ [lo, hi]`: the largest bound of the cells that interval meets,
+    /// their ends included, 0 where it misses the kernel.
+    pub fn peak_over(&self, of: Of, (lo, hi): (f64, f64), h: f64) -> f64 {
+        let last = self.first + self.value.len() as i64 - 1;
+        let from = ((lo / h).floor() as i64).max(self.first);
+        let to = ((hi / h).ceil() as i64 - 1)
+            .max((lo / h).floor() as i64)
+            .min(last);
+        if from > to {
+            return 0.0;
+        }
+        let peaks = match of {
+            Of::Value => &self.value_peaks,
+            Of::Slope => &self.slope_peaks,
+        };
+        peaks.over((from - self.first) as usize, (to - self.first) as usize)
     }
 }
 

@@ -3,8 +3,8 @@ use std::collections::VecDeque;
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
 use geometry::{
-    BrakeMove, ExtrusionBudget, Move, MoveVelocity, ScalarLaw, VelocityError, VelocityPlanParams,
-    brake_horizon, brake_move, replan_span, seam_requires_stop,
+    BrakeMove, ExtrusionBudget, LawSegment, Move, MoveVelocity, ScalarLaw, VelocityError,
+    VelocityPlanParams, brake_horizon, brake_move, replan_span, seam_requires_stop,
 };
 use trajectory::AxisChainSet;
 
@@ -14,7 +14,7 @@ mod kernel_cells;
 mod screen;
 mod shadow;
 
-use screen::{MoveSummary, Read};
+use screen::{AccelChanges, MoveSummary, Read};
 use shadow::{
     AdvanceDemand, CellMotion, FollowerKernels, GridSample, PlannedGrid, Ride, shaped_at,
 };
@@ -395,11 +395,13 @@ impl TurningGuard {
         if m.segment.spatial.is_none() {
             return Check::Passed;
         }
-        let window = (timing.t0 - back as f64 * h, timing.t1() + ahead as f64 * h);
+        let stretch = ((timing.t0 / h).floor() * h, (timing.t1() / h).ceil() * h);
+        let window = (stretch.0 - back as f64 * h, stretch.1 + ahead as f64 * h);
         let nearby: Vec<MoveSummary> = self.summaries_over(window).collect();
         if screen::passes(
             &follower.coarse,
             nearby.iter().copied(),
+            stretch,
             &demand,
             |axes| caps.path_jerk_gain(axes),
             caps.max_accel_mm_s2,
@@ -484,18 +486,21 @@ impl TurningGuard {
         ))
     }
 
-    /// The summaries of the planned motion over `[from, to]`, rest where it
-    /// runs past either end of the segment.
+    /// The summaries of the planned motion over `[from, to]` in time order,
+    /// rest where it runs past either end of the segment.
     fn summaries_over(&self, (from, to): (f64, f64)) -> impl Iterator<Item = MoveSummary> + '_ {
         let end = self.segment_end();
         let before = (from < 0.0).then(|| MoveSummary::rest(from, 0.0));
         let after = (to > end).then(|| MoveSummary::rest(end, to));
-        self.history
-            .iter()
-            .chain(self.entries.summaries.iter())
-            .filter(move |summary| summary.t1 > from && summary.t0 < to)
-            .copied()
-            .chain(before)
+        before
+            .into_iter()
+            .chain(
+                self.history
+                    .iter()
+                    .chain(self.entries.summaries.iter())
+                    .filter(move |summary| summary.t1 > from && summary.t0 < to)
+                    .copied(),
+            )
             .chain(after)
     }
 
@@ -1085,11 +1090,123 @@ fn summary_of(
         accel: timing.accel,
         accel_bound: accel_bound(segment, velocity),
         moves_on: std::array::from_fn(|axis| segment.lean_on(axis).plane != 0.0),
+        changes: changes_of(segment, velocity, timing.t0),
         ratio: m
             .limits
             .extruder
             .map(|caps| (caps.axis_index, budget.ratio_in_reach)),
     }
+}
+
+/// How the planned acceleration `a = a_t·t̂ + v²·dt̂/ds` changes along a
+/// move starting at `t0`: its steps where one phase's tangential
+/// acceleration hands over to the next's, placed in time, and the
+/// variation its phases add on their own ([`phase_variation`]). The
+/// acceleration stays in the segment's plane, so each axis's share is the
+/// plane's lean on it. Phases hand over their speed, unless they step it:
+/// a kink.
+fn changes_of(segment: &Segment, velocity: &MoveVelocity, t0: f64) -> AccelChanges {
+    let origin = velocity.phases.first().map_or(0.0, |phase| phase.s0);
+    let length = segment.s_len();
+    let local = |s: f64| (s - origin).clamp(0.0, length);
+    let accel_at = |s: f64, v: f64, a: f64| {
+        let (heading, turning) = (segment.heading_at(s), segment.dheading_ds(s));
+        std::array::from_fn(|axis| a * heading[axis] + v * v * turning[axis])
+    };
+    let velocity_at = |s: f64, v: f64| segment.heading_at(s).map(|component| v * component);
+    let mut changes = AccelChanges::STILL;
+    let mut variation = 0.0;
+    let mut elapsed = 0.0;
+    let mut end: Option<(f64, f64, f64)> = None;
+    for phase in &velocity.phases {
+        let start = phase.state_at(phase.t0);
+        let s = local(start.0);
+        match end {
+            None => {
+                changes.accel_ends[0] = accel_at(s, start.1, start.2);
+                changes.velocity_ends[0] = velocity_at(s, start.1);
+            }
+            Some((_, v, a)) => {
+                let heading = segment.heading_at(s);
+                if start.2 != a {
+                    changes.step(t0 + elapsed, heading.map(|c| (start.2 - a) * c));
+                }
+                for (kink, c) in changes.kinks.iter_mut().zip(heading) {
+                    *kink += ((start.1 - v) * c).abs();
+                }
+            }
+        }
+        let finish = phase.end_state();
+        variation += phase_variation(
+            segment,
+            phase,
+            (s, start.1),
+            (local(finish.0), finish.1),
+            velocity.accel,
+        );
+        elapsed += phase.dt;
+        end = Some(finish);
+    }
+    let (s, v, a) = end.expect("a planned move has phases");
+    changes.accel_ends[1] = accel_at(local(s), v, a);
+    changes.velocity_ends[1] = velocity_at(local(s), v);
+    for (axis, share) in changes.variation.iter_mut().enumerate() {
+        *share += segment.lean_on(axis).plane * variation;
+    }
+    changes
+}
+
+/// A bound on the total variation of the planned acceleration vector over
+/// one phase from arc `s_a` at speed `v_a` to `s_b` at `v_b` on a planar
+/// segment of curvature `κ(s)` linear in `s`: with `n̂` the normal and `θ̇ =
+/// vκ`, `d(a_t·t̂ + v²κ·n̂)/dt = (ȧ_t − v²κ·θ̇)·t̂ + (d(v²κ)/dt + a_t·θ̇)·n̂`
+/// and `d(v²κ)/dt = 2a_t·vκ + v³·κ′`, so over the phase it travels at most
+/// `TV(a_t) + 3·α·Θ + N·Θ + ∫v²|κ′| ds`, `α` the largest `|a_t|`, `Θ = ∫|κ| ds`
+/// the turn, `N` the largest normal acceleration `v²|κ|`, which the disk
+/// keeps within the budget, as [`accel_bound`] reads it, and `v² ≤ min(v̄²,
+/// N/|κ|)` with `v̄` the phase's fastest, at most `min(v_a, v_b)` plus how
+/// far its speed travels.
+fn phase_variation(
+    segment: &Segment,
+    phase: &LawSegment,
+    (s_a, v_a): (f64, f64),
+    (s_b, v_b): (f64, f64),
+    budget: f64,
+) -> f64 {
+    let swept = phase.variation();
+    let tangential = match phase.law {
+        ScalarLaw::ConstAccel { a0 } => a0.abs(),
+        ScalarLaw::DiskRail { .. } => phase.interpolated_acceleration_bound(0.0, phase.dt),
+    };
+    let (k_a, k_b) = (segment.kappa(s_a), segment.kappa(s_b));
+    if k_a == 0.0 && k_b == 0.0 {
+        return swept.accel;
+    }
+    let arc = (s_b - s_a).abs();
+    let (low, high) = (k_a.abs().min(k_b.abs()), k_a.abs().max(k_b.abs()));
+    let crosses = k_a * k_b < 0.0;
+    let turn = if crosses {
+        arc * (k_a * k_a + k_b * k_b) / (2.0 * (k_a.abs() + k_b.abs()))
+    } else {
+        0.5 * (low + high) * arc
+    };
+    let fastest = v_a.min(v_b) + swept.speed;
+    let fastest_sq = fastest * fastest;
+    let normal = (fastest_sq * high).min(budget);
+    let sweep = |from: f64, to: f64| {
+        if normal == 0.0 {
+            return 0.0;
+        }
+        let knee = normal / fastest_sq;
+        fastest_sq * (to.min(knee) - from.min(knee))
+            + normal * libm::log(to.max(knee) / from.max(knee))
+    };
+    let curvature_sweep = if crosses {
+        sweep(0.0, k_a.abs()) + sweep(0.0, k_b.abs())
+    } else {
+        sweep(low, high)
+    };
+    swept.accel + (3.0 * tangential + normal) * turn + curvature_sweep
 }
 
 #[cfg(test)]

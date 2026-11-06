@@ -55,6 +55,14 @@ pub enum ScalarLaw {
     },
 }
 
+/// Bounds on how far a segment's interpolated acceleration and speed
+/// travel across it, every step counted ([`LawSegment::variation`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LawVariation {
+    pub accel: f64,
+    pub speed: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RailKnot {
     t: f64,
@@ -1066,6 +1074,35 @@ impl LawSegment {
     pub fn rail_defects(&self) -> impl Iterator<Item = PairDefect> + '_ {
         self.rail_pairs(0.0, self.dt)
             .map(|pair| defect::pair_defect(&self.law, &pair))
+    }
+
+    /// Bounds on the total variation of the segment's interpolated
+    /// acceleration and speed across it: a rail's knot pairs each by their
+    /// [`defect::pair_sweep`], plus any step between one pair's end and the
+    /// next one's start.
+    #[must_use]
+    pub fn variation(&self) -> LawVariation {
+        match self.law {
+            ScalarLaw::ConstAccel { a0 } => LawVariation {
+                accel: 0.0,
+                speed: a0.abs() * self.dt,
+            },
+            ScalarLaw::DiskRail { .. } => {
+                let mut total = LawVariation {
+                    accel: 0.0,
+                    speed: 0.0,
+                };
+                let mut previous_end: Option<f64> = None;
+                for pair in self.rail_pairs(0.0, self.dt) {
+                    let sweep = defect::pair_sweep(&pair);
+                    total.accel += sweep.accel_variation
+                        + previous_end.map_or(0.0, |end| (sweep.accel_lo - end).abs());
+                    total.speed += sweep.speed_variation;
+                    previous_end = Some(sweep.accel_hi);
+                }
+                total
+            }
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
 use trajectory::{build_smooth_mzv_kernel, build_smooth_zv_kernel};
 
-use super::screen::MoveSummary;
+use super::screen::{AccelChanges, MoveSummary};
 use super::shadow::{FollowerKernels, GridSample, PlannedGrid, Ride};
 
 /// Gauss–Legendre nodes and weights on `[-1, 1]`, exact for polynomials
@@ -72,13 +72,6 @@ impl Leaders {
             return 0.0;
         }
         PiecewisePolynomialKernel::directional_variation(&moving)
-    }
-
-    /// The instants a shaped `t` reads the planned motion over: `t − u`
-    /// for `u` in either kernel's support.
-    pub fn read(&self, (t0, t1): (f64, f64)) -> (f64, f64) {
-        let (x, y) = (self.x.support(), self.y.support());
-        (t0 - x.1.max(y.1), t1 - x.0.min(y.0))
     }
 }
 
@@ -291,6 +284,11 @@ impl Motion {
                     moves_on: std::array::from_fn(|axis| {
                         v_a[axis] != 0.0 || v_b[axis] != 0.0 || accel[axis] != 0.0
                     }),
+                    changes: AccelChanges {
+                        velocity_ends: [v_a, v_b],
+                        accel_ends: [accel, accel],
+                        ..AccelChanges::STILL
+                    },
                     ratio: None,
                 }
             })
