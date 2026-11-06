@@ -1661,8 +1661,12 @@ fn a_kernel_after_the_advance_spares_a_crawl_its_valley() {
 fn a_crawl_inside_a_laid_valleys_floor_lays_no_second_valley() {
     let (turn, reach, floor) = (468.816, 0.184_87, 3.830e-3);
     let mut smoothing = RatioSmoothing::default();
-    smoothing.place_valley(turn, (turn, reach, reach), floor);
-    smoothing.place_valley(turn + 1e-5, (turn + 1e-5, 0.184_83, 0.184_83), 3.831e-3);
+    smoothing.place_valley(turn, ((turn, turn), (reach, reach)), (floor, floor));
+    smoothing.place_valley(
+        turn + 1e-5,
+        ((turn + 1e-5, turn + 1e-5), (0.184_83, 0.184_83)),
+        (3.831e-3, 3.831e-3),
+    );
     let laid = AdvanceValley {
         start: turn,
         end: turn,
@@ -1693,8 +1697,12 @@ fn a_crawl_within_the_last_crawl_valleys_reach_widens_it_to_one_valley() {
     let (turn, reach, floor) = (500.0, 0.18, 4.0e-3);
     let (next, next_reach, next_floor) = (500.02, 0.17, 3.0e-3);
     let mut smoothing = RatioSmoothing::default();
-    smoothing.place_valley(turn, (turn, reach, reach), floor);
-    smoothing.place_valley(next, (next, next_reach, next_reach), next_floor);
+    smoothing.place_valley(turn, ((turn, turn), (reach, reach)), (floor, floor));
+    smoothing.place_valley(
+        next,
+        ((next, next), (next_reach, next_reach)),
+        (next_floor, next_floor),
+    );
     let merged = AdvanceValley {
         start: turn,
         end: next,
@@ -1717,8 +1725,8 @@ fn a_crawl_within_the_last_crawl_valleys_reach_widens_it_to_one_valley() {
 #[test]
 fn crawls_further_apart_than_their_reach_lay_a_valley_each() {
     let mut smoothing = RatioSmoothing::default();
-    smoothing.place_valley(500.0, (500.0, 0.18, 0.18), 4.0e-3);
-    smoothing.place_valley(500.4, (500.4, 0.17, 0.17), 3.0e-3);
+    smoothing.place_valley(500.0, ((500.0, 500.0), (0.18, 0.18)), (4.0e-3, 4.0e-3));
+    smoothing.place_valley(500.4, ((500.4, 500.4), (0.17, 0.17)), (3.0e-3, 3.0e-3));
     let first = AdvanceValley {
         start: 500.0,
         end: 500.0,
@@ -1772,7 +1780,7 @@ fn advanced_smoothing() -> RatioSmoothing {
 #[should_panic(expected = "steps its weight at s=499.5")]
 fn a_crawl_valley_held_at_zero_back_to_where_the_leaders_move_fails_loudly() {
     let mut smoothing = advanced_smoothing();
-    smoothing.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
+    smoothing.place_valley(500.0, ((499.5, 500.0), (0.0, 0.18)), (4.0e-3, 4.0e-3));
 }
 
 /// Held at zero back to the floor, where the leaders rest, or to the end
@@ -1782,7 +1790,7 @@ fn a_crawl_valley_held_at_zero_back_to_where_the_leaders_move_fails_loudly() {
 fn a_crawl_valley_held_at_zero_back_to_a_rest_keeps_the_weight_continuous() {
     let mut floored = advanced_smoothing();
     floored.close_at(499.5);
-    floored.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
+    floored.place_valley(500.0, ((499.5, 500.0), (0.0, 0.18)), (4.0e-3, 4.0e-3));
     let mut rested = advanced_smoothing();
     rested.valleys.push(AdvanceValley {
         start: 499.4,
@@ -1793,7 +1801,7 @@ fn a_crawl_valley_held_at_zero_back_to_a_rest_keeps_the_weight_continuous() {
         floor_after: 0.0,
         kind: ValleyKind::Rest,
     });
-    rested.place_valley(500.0, (499.5, 0.0, 0.18), 4.0e-3);
+    rested.place_valley(500.0, ((499.5, 500.0), (0.0, 0.18)), (4.0e-3, 4.0e-3));
     for s in [499.5 - 1e-9, 499.5 + 1e-9] {
         assert_eq!(rested.valley_weight(s).0, 0.0, "the weight at s={s} mm");
     }

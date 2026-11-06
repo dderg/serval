@@ -2,7 +2,7 @@
 //! advance valley, laid by the follower projection and bounded by the
 //! turning guard from the same rule.
 
-use super::{ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_MAX_TIME_S};
+use super::{ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S};
 
 /// The ramp time over which a turnaround or crawl valley releases and
 /// rebuilds the advance's lead, the longest, whatever the step there; and
@@ -58,6 +58,30 @@ pub fn valley_reach(speed: f64, rate: f64) -> f64 {
 #[must_use]
 pub fn widest_crawl_reach(rate: f64) -> f64 {
     valley_reach(ADVANCE_VALLEY_SPEED_MM_S, rate)
+}
+
+/// The share of a crawl's leaders' reach ([`valley_reach`]) a ratio step
+/// at the crawl, or inside its valley's sides, ramps within either side of
+/// it. The reach at a crawl of speed `v` is at least `v·τ/2`, `τ` the
+/// [`VALLEY_RAMP_TIME_S`], so a window `w` of this share is at least
+/// `v·τ_min/2`, the half-width the shortest ramp
+/// ([`RATIO_RAMP_MIN_TIME_S`]) lays at that speed. Over it the step's flow
+/// asks `¾·|Δ|·ṡ²/w` with `ṡ² ≤ v² + 2A·d` a distance `d` from the crawl:
+/// at most the `1.5·|Δ|·v/τ_min` the shortest ramp asks at the crawl's
+/// speed, plus `1.5·|Δ|·A·d/w`, which no share changes for a step within
+/// the window of the crawl (`d ≤ 2w`). It is the narrowest share whose
+/// flow is no steeper than a ramp the rule lays: any wider releases the
+/// advance over more path.
+const CRAWL_STEP_WINDOW_REACH_SHARE: f64 = RATIO_RAMP_MIN_TIME_S / VALLEY_RAMP_TIME_S;
+
+/// The half-width a crawl valley caps a ratio step's ramp to, and holds
+/// its weight at zero over on either side of the step, where the leaders'
+/// reach at the crawl is `reach`: the step's flow `r̃·ṡ` alone reaches the
+/// follower there, `r̃′·ṡ²` its acceleration, which needs no advance's
+/// room, and the valley's sides start past it.
+#[must_use]
+pub fn crawl_step_window(reach: f64) -> f64 {
+    CRAWL_STEP_WINDOW_REACH_SHARE * reach
 }
 
 /// The leaders turn around where they cross at a speed their rate builds
