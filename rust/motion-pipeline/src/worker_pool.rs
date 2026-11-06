@@ -252,9 +252,8 @@ impl WorkerPool {
 /// the fan-outs ask before every emit.
 pub(crate) fn cores() -> usize {
     static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CORES.get_or_init(|| {
-        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-    })
+    *CORES
+        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
 }
 
 impl Default for WorkerPool {
