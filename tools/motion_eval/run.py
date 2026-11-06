@@ -14,6 +14,7 @@ from . import mcu_dict, stepdecode
 REPO_ROOT = mcu_dict.REPO_ROOT
 MAIN_MCU = "mcu"
 LOG_TAIL_CHARS = 6000
+NO_CORNER_BUDGET = "-"
 
 
 class KlippyRunError(RuntimeError):
@@ -37,7 +38,11 @@ def wrap_gcode(gcode: str, start_xyz) -> str:
 
 
 def run_klippy(
-    config_path, gcode: str, start_xyz, mcu_config=mcu_dict.DEFAULT_MCU_CONFIG
+    config_path,
+    gcode: str,
+    start_xyz,
+    mcu_config=mcu_dict.DEFAULT_MCU_CONFIG,
+    corner_budget_mm=None,
 ) -> RawRun:
     dictionary = mcu_dict.build(mcu_config)
     with tempfile.TemporaryDirectory(prefix="motion_eval_") as tmp:
@@ -52,6 +57,9 @@ def run_klippy(
             "-m",
             "tools.motion_eval.capture",
             str(capture_path),
+            NO_CORNER_BUDGET
+            if corner_budget_mm is None
+            else repr(float(corner_budget_mm)),
             str(pathlib.Path(config_path).resolve()),
             "-i",
             str(gcode_path),
@@ -81,7 +89,13 @@ def run_klippy(
             raise KlippyRunError(
                 "steppers on secondary MCUs are not decoded: %s" % foreign
             )
-        invert_by_oid = {s["oid"]: s["invert_dir"] for s in steppers.values()}
-        by_oid = stepdecode.decode(dictionary, output_path, invert_by_oid)
+        by_oid = stepdecode.decode(
+            dictionary,
+            output_path,
+            {
+                s["oid"]: (s["invert_dir"], s["step_history"])
+                for s in steppers.values()
+            },
+        )
     traces = {name: by_oid[s["oid"]] for name, s in steppers.items()}
     return RawRun(capture=capture, traces=traces)

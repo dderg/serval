@@ -399,6 +399,8 @@ set_next_step_dir(struct stepcompress *sc, int sdir)
     return 0;
 }
 
+static int queue_append_extend(struct stepcompress *sc);
+
 // Slow path for queue_append() - handle next step far in future
 static int
 queue_append_far(struct stepcompress *sc)
@@ -410,7 +412,11 @@ queue_append_far(struct stepcompress *sc)
         return ret;
     if (step_clock >= sc->last_step_clock + CLOCK_DIFF_MAX)
         return sc->queue_flush_far(sc, step_clock);
+    sc->next_step_clock = step_clock;
+    if (unlikely(sc->queue_next >= sc->queue_end))
+        return queue_append_extend(sc);
     *sc->queue_next++ = step_clock;
+    sc->next_step_clock = 0;
     return 0;
 }
 

@@ -10,11 +10,17 @@ written to CAPTURE_JSON once klippy exits.
 
 from __future__ import annotations
 
+import collections
 import json
+import math
 import sys
+import time
 
-from klippy import chelper, printer, toolhead
+from klippy import chelper, printer, serialhdl, toolhead
 from klippy.extras import input_shaper
+
+from . import shaper_corner
+from .run import NO_CORNER_BUDGET
 
 TRAPQ_APPEND_FIELDS = (
     "print_time",
@@ -32,6 +38,8 @@ TRAPQ_APPEND_FIELDS = (
     "accel",
 )
 
+DRAIN_TIMEOUT_S = 30.0
+DRAIN_POLL_S = 0.005
 UNIT_COORDS = (
     (0.0, 0.0, 0.0),
     (1.0, 0.0, 0.0),
@@ -90,29 +98,87 @@ def _shaper_state(printer_obj):
     return state
 
 
+HISTORY_BATCH = 4096
+HISTORY_END_CLOCK = (1 << 63) - 1
+
+
+class StepHistory:
+    def __init__(self, steppers):
+        self.steppers = steppers
+        self.entries = {s.get_name(): [] for s in steppers}
+        self.newest_first_clock = {s.get_name(): -1 for s in steppers}
+        self.pulled_at_disconnect = False
+
+    def pull(self, *_flush_times):
+        for stepper in self.steppers:
+            name = stepper.get_name()
+            newest = self.newest_first_clock[name]
+            batch = HISTORY_BATCH
+            while True:
+                data, count = stepper.dump_steps(
+                    batch, max(newest, 0), HISTORY_END_CLOCK
+                )
+                if count < batch:
+                    break
+                batch *= 2
+            fresh = [
+                [data[i].first_clock, data[i].step_count, data[i].interval,
+                 data[i].add]
+                for i in range(count)
+                if data[i].first_clock > newest
+            ]  # fmt: skip
+            fresh.reverse()
+            self.entries[name].extend(fresh)
+            if fresh:
+                self.newest_first_clock[name] = fresh[-1][0]
+
+
 class Capture:
-    def __init__(self):
+    def __init__(self, corner_budget_mm=None):
         self.toolhead = None
         self.printer = None
+        self.corner_budget_mm = corner_budget_mm
         self.moves = []
         self.linear_maps = {}
         self.steppers = None
         self.shaper = None
         self.settings = None
+        self.undrained_serial = False
+        self.history = None
 
     def attach(self, toolhead_obj):
         self.toolhead = toolhead_obj
         self.printer = toolhead_obj.printer
         for stepper in toolhead_obj.get_kinematics().get_steppers():
             self.linear_maps[stepper.get_name()] = _stepper_linear_map(stepper)
+        self.history = StepHistory(toolhead_obj.get_kinematics().get_steppers())
+        self.printer.lookup_object("motion_queuing").register_flush_callback(
+            self.history.pull
+        )
         real_append = toolhead_obj.trapq_append
         real_set_position = toolhead_obj.set_position
+        real_flush = toolhead_obj.lookahead.flush
+        requested = collections.deque()
+
+        def flush(lazy=False):
+            moves = real_flush(lazy=lazy)
+            requested.extend(
+                math.sqrt(m.max_cruise_v2) for m in moves if m.is_kinematic_move
+            )
+            return moves
 
         def trapq_append(tq, *args):
             if tq == toolhead_obj.trapq:
                 if not self.moves:
                     self._snapshot_start()
-                self.moves.append(dict(zip(TRAPQ_APPEND_FIELDS, args)))
+                if not requested:
+                    raise UnsupportedRun(
+                        "toolhead trapq move that did not pass the lookahead"
+                        " (drip/homing move)"
+                    )
+                move = dict(zip(TRAPQ_APPEND_FIELDS, args))
+                move["max_cruise_v"] = requested.popleft()
+                self.moves.append(move)
             return real_append(tq, *args)
 
         def set_position(newpos, homing_axes=""):
@@ -125,6 +191,11 @@ class Capture:
 
         toolhead_obj.trapq_append = trapq_append
         toolhead_obj.set_position = set_position
+        toolhead_obj.lookahead.flush = flush
+        if self.corner_budget_mm is not None:
+            shaper_corner.install(
+                toolhead_obj, self.corner_budget_mm, _shaper_state
+            )
 
     def _snapshot_start(self):
         th = self.toolhead
@@ -154,23 +225,65 @@ class Capture:
     def finish(self):
         if not self.moves:
             raise UnsupportedRun("gcode produced no toolhead motion")
+        if self.undrained_serial:
+            raise UnsupportedRun(
+                "serial queue did not drain to the output file within %r s"
+                % DRAIN_TIMEOUT_S
+            )
+        if not self.history.pulled_at_disconnect:
+            raise UnsupportedRun("step history was not read at disconnect")
         if _shaper_state(self.printer) != self.shaper:
             raise UnsupportedRun("input shaper changed after motion started")
         for stepper in self.toolhead.get_kinematics().get_steppers():
-            self.steppers[stepper.get_name()]["final_mcu_position"] = (
+            name = stepper.get_name()
+            self.steppers[name]["final_mcu_position"] = (
                 stepper.get_mcu_position()
             )
+            self.steppers[name]["step_history"] = self.history.entries[name]
         return {
             "moves": self.moves,
             "steppers": self.steppers,
             "shaper": self.shaper,
             "settings": self.settings,
+            "corner_budget_mm": self.corner_budget_mm,
         }
 
 
+def _queued_bytes(reader):
+    reader.ffi_lib.serialqueue_get_stats(
+        reader.serialqueue, reader.stats_buf, len(reader.stats_buf)
+    )
+    stats = dict(
+        field.split("=", 1)
+        for field in reader.ffi_main.string(reader.stats_buf).decode().split()
+    )
+    return int(stats["ready_bytes"]) + int(stats["upcoming_bytes"])
+
+
+def drain_before_disconnect(capture):
+    real_disconnect = serialhdl.SerialReader.disconnect
+
+    def disconnect(self):
+        if self.serialqueue is not None:
+            if capture.history is not None:
+                capture.history.pull()
+                capture.history.pulled_at_disconnect = True
+            deadline = time.monotonic() + DRAIN_TIMEOUT_S
+            while _queued_bytes(self):
+                if time.monotonic() > deadline:
+                    capture.undrained_serial = True
+                    break
+                time.sleep(DRAIN_POLL_S)
+        real_disconnect(self)
+
+    serialhdl.SerialReader.disconnect = disconnect
+
+
 def main():
-    capture_path = sys.argv[1]
-    capture = Capture()
+    capture_path, budget_arg = sys.argv[1:3]
+    capture = Capture(
+        None if budget_arg == NO_CORNER_BUDGET else float(budget_arg)
+    )
     real_init = toolhead.ToolHead.__init__
 
     def init(self, config):
@@ -178,7 +291,8 @@ def main():
         capture.attach(self)
 
     toolhead.ToolHead.__init__ = init
-    sys.argv = ["klippy"] + sys.argv[2:]
+    drain_before_disconnect(capture)
+    sys.argv = ["klippy"] + sys.argv[3:]
     printer.main()
     with open(capture_path, "w") as f:
         json.dump(capture.finish(), f)
