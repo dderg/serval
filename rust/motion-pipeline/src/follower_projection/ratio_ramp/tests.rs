@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use geometry::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep};
+use geometry::{
+    RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioSlide, RatioStep,
+    WIDTH_SQUARE_CURVATURE_BOUND, WIDTH_SQUARE_SLOPE_BOUND,
+};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
@@ -1314,6 +1317,7 @@ fn a_slow_corner_beside_a_ratio_step_does_not_narrow_its_window() {
         },
         step: 0.034,
         peak_ratio: 0.034,
+        slides: [RatioSlide::FLAT; 2],
         ramp_time: None,
     });
     let seam_width = 0.5 * CORNER_SPEED_MM_S * field.seam_ramp_time(0);
@@ -1379,6 +1383,7 @@ fn a_ratio_step_crossed_at_cruise_holds_its_width_over_every_window_reaching_it(
                 },
                 step: LINE_RATIO,
                 peak_ratio: LINE_RATIO,
+                slides: [RatioSlide::FLAT; 2],
                 ramp_time: None,
             });
             let seam_width = 0.5 * speed * field.seam_ramp_time(0);
@@ -1454,6 +1459,7 @@ fn a_stream_creeping_off_a_rest_keeps_no_node_a_sliver_past_it() {
         },
         step: 0.034,
         peak_ratio: 0.034,
+        slides: [RatioSlide::FLAT; 2],
         ramp_time: None,
     });
     let mut t = 0.0;
@@ -1467,6 +1473,9 @@ fn a_stream_creeping_off_a_rest_keeps_no_node_a_sliver_past_it() {
 
 const CREEP_JERK_MM_S3: f64 = 1500.0;
 
+/// The nodes of `field` lie a window apart, and `h²` bends within what
+/// the ramp rule budgets the moving window's slope term for
+/// ([`WIDTH_SQUARE_SLOPE_BOUND`], [`WIDTH_SQUARE_CURVATURE_BOUND`]).
 fn assert_moving_nodes_lie_a_window_apart(field: &WidthField) {
     for pair in field.nodes.windows(2) {
         let (a, b) = (pair[0], pair[1]);
@@ -1478,6 +1487,17 @@ fn assert_moving_nodes_lie_a_window_apart(field: &WidthField) {
                 b.s,
                 a.target,
                 b.target
+            );
+        }
+        for s in probes(b.s - a.s, 64).map(|offset| a.s + offset) {
+            let h = field.jet(s);
+            let square = h * h;
+            assert!(
+                square.d2.abs() <= WIDTH_SQUARE_SLOPE_BOUND * (1.0 + 1e-9)
+                    && h.value * square.d3.abs() <= WIDTH_SQUARE_CURVATURE_BOUND * (1.0 + 1e-9),
+                "the width bends h² by {} and h·(h²)‴ by {} at {s} mm",
+                square.d2,
+                h.value * square.d3
             );
         }
     }
@@ -2184,17 +2204,25 @@ impl RampCrossing {
         (self.speed * self.speed + 2.0 * self.accel * (s - self.step_s)).sqrt()
     }
 
-    /// The advanced follower's velocity and acceleration at `s`,
-    /// `f + k·ḟ` and its rate, with `f = r̃(s)·ṡ`.
     fn follower_demand(&self, state: &FollowerState, s: f64) -> (f64, f64) {
-        let laid = state.laid_on(SpanTable::Laid, s, SpanSide::After);
-        let (r, slope, curvature) = (laid.ratio, laid.slope, laid.curvature);
-        let (v, a, k) = (self.path_speed(s), self.accel, self.advance_slope_s);
-        let velocity = r * v + k * (slope * v * v + r * a);
-        let acceleration =
-            slope * v * v + r * a + k * (curvature * v * v * v + 3.0 * slope * v * a);
-        (velocity, acceleration)
+        advanced_follower(
+            state,
+            s,
+            (self.path_speed(s), self.accel),
+            self.advance_slope_s,
+        )
     }
+}
+
+/// The advanced follower's velocity and acceleration at `s`, `f + k·ḟ`
+/// and its rate, with `f = r̃(s)·ṡ`, the leaders crossing `s` at `speed`
+/// under a steady `accel`.
+fn advanced_follower(state: &FollowerState, s: f64, (v, a): (f64, f64), k: f64) -> (f64, f64) {
+    let laid = state.laid_on(SpanTable::Laid, s, SpanSide::After);
+    let (r, slope, curvature) = (laid.ratio, laid.slope, laid.curvature);
+    let velocity = r * v + k * (slope * v * v + r * a);
+    let acceleration = slope * v * v + r * a + k * (curvature * v * v * v + 3.0 * slope * v * a);
+    (velocity, acceleration)
 }
 
 fn ramp_crossing_strategy() -> impl Strategy<Value = RampCrossing> {
@@ -2261,6 +2289,18 @@ proptest! {
     ) {
         assert_ramp_within_rule(&crossing)?;
     }
+
+    /// Wherever a ratio change lies, a step, a slide longer than its ends'
+    /// windows, or both, under a width field that varies along it and
+    /// closes on a rest, the advanced follower across it stays within what
+    /// the ramp rule budgets a step of the ratio's total variation at the
+    /// narrowest width its seams hold: the slope the moving window carries
+    /// along the slide bends with the width, and that bend is the rule's to
+    /// budget too.
+    #[test]
+    fn a_ratio_change_asks_no_more_than_its_rule(slide in slide_crossing_strategy()) {
+        assert_change_within_rule(&slide)?;
+    }
 }
 
 /// The advanced follower across `crossing`'s ramp against the rule's
@@ -2286,6 +2326,7 @@ fn assert_ramp_within_rule(crossing: &RampCrossing) -> Result<(), TestCaseError>
     let step = RatioStep {
         ratio_step: crossing.variation(),
         peak_ratio: crossing.r_after.max(crossing.r_before).max(crossing.mid()),
+        slides: [RatioSlide::FLAT; 2],
         speed_mm_s: fastest,
         accel_mm_s2: crossing.accel.abs(),
         jerk_mm_s3: 0.0,
@@ -2354,4 +2395,176 @@ fn a_slide_short_of_a_rest_is_ramped_within_its_rule() {
         advance_slope_s: 0.005,
     })
     .unwrap();
+}
+
+/// A ratio change starting `start` past a rest: `r_before`, then a slide
+/// from `r_start` to `r_end` over `slide` mm, then `r_after` up to a rest
+/// `rest_ahead` further on, under a width field asking for `base` times
+/// each of `factors` in turn every `spacing` mm, no closer than the real
+/// field lays its nodes ([`NODE_SPACING_PER_WIDTH`] of the narrower
+/// target), crossed by leaders at `speed` accelerating at `accel` with an
+/// advance of `advance_slope_s`, the extruder accelerating at up to
+/// `max_accel`.
+#[derive(Debug, Clone)]
+struct SlideCrossing {
+    ratios: [f64; 4],
+    start: f64,
+    slide: f64,
+    rest_ahead: f64,
+    base: f64,
+    factors: Vec<f64>,
+    spacing: f64,
+    speed: f64,
+    accel: f64,
+    advance_slope_s: f64,
+    max_accel: f64,
+}
+
+impl SlideCrossing {
+    fn state(&self) -> FollowerState {
+        let [r_before, r_start, r_end, r_after] = self.ratios;
+        let table = vec![
+            (self.start, r_before, r_before),
+            (self.slide, r_start, r_end),
+            (self.rest_ahead, r_after, r_after),
+        ];
+        let node = |s: f64| libm::round(s / self.spacing) as usize % self.factors.len();
+        smoothed(
+            &table,
+            width(length(&table), self.spacing, |s| {
+                self.base * self.factors[node(s)]
+            }),
+        )
+    }
+
+    fn seams(&self) -> [f64; 2] {
+        [self.start, self.start + self.slide]
+    }
+
+    fn slope(&self) -> f64 {
+        (self.ratios[2] - self.ratios[1]) / self.slide
+    }
+
+    fn variation(&self) -> f64 {
+        self.ratios
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .sum()
+    }
+
+    fn peak_ratio(&self) -> f64 {
+        self.ratios.iter().copied().fold(0.0, f64::max)
+    }
+
+    fn path_speed(&self, s: f64) -> f64 {
+        (self.speed * self.speed + 2.0 * self.accel * (s - self.start)).sqrt()
+    }
+}
+
+fn slide_crossing_strategy() -> impl Strategy<Value = SlideCrossing> {
+    let ratio = 0.0..0.05_f64;
+    (
+        (ratio.clone(), ratio.clone(), ratio.clone(), ratio),
+        (prop::bool::ANY, prop::bool::ANY),
+        (0.2..6.0_f64, 0.3..12.0_f64, 0.05..6.0_f64),
+        (
+            0.05..2.0_f64,
+            prop::collection::vec(0.15..1.0_f64, 1..8),
+            0.75..1.5_f64,
+        ),
+        (5.0..300.0_f64, -0.45..0.45_f64),
+        (0.005..0.08_f64, 2_000.0..60_000.0_f64),
+    )
+        .prop_map(
+            |(
+                (r_before, r_start, r_end, r_after),
+                (step_in, step_out),
+                (start, slide_widths, rest_ahead),
+                (base, factors, spacing_share),
+                (speed, accel_share),
+                (advance_slope_s, max_accel),
+            )| {
+                let slide = slide_widths * base;
+                let narrowest = factors.iter().copied().fold(1.0, f64::min);
+                SlideCrossing {
+                    ratios: [
+                        r_before,
+                        if step_in { r_start } else { r_before },
+                        r_end,
+                        if step_out { r_after } else { r_end },
+                    ],
+                    start,
+                    slide,
+                    rest_ahead,
+                    base,
+                    factors,
+                    spacing: spacing_share * narrowest * base,
+                    speed,
+                    accel: accel_share * speed * speed / (slide + 2.0 * base),
+                    advance_slope_s,
+                    max_accel,
+                }
+            },
+        )
+}
+
+/// The advanced follower across `slide`'s change against the rule's
+/// budget for a step of its total variation at the narrowest width its
+/// seams hold, where that budget fits the extruder (see
+/// `a_ratio_change_asks_no_more_than_its_rule`).
+fn assert_change_within_rule(slide: &SlideCrossing) -> Result<(), TestCaseError> {
+    let state = slide.state();
+    let smoothing = &state.smoothing;
+    let laid = &smoothing.laid;
+    let [start, end] = slide.seams();
+    let first = laid.seams.partition_point(|seam| seam.s < start);
+    prop_assume!(laid.cluster_holding(&smoothing.width, first).seams.len() == 1);
+    let seam_width = |s: f64| laid.step_width(&smoothing.width, s);
+    let h = seam_width(start).min(seam_width(end));
+    prop_assume!(h > 0.0 && slide.variation() > 0.0);
+    let (lo, hi) = (start - seam_width(start), end + seam_width(end));
+    let fastest = slide.path_speed(lo).max(slide.path_speed(hi));
+    let rule = RatioRampRule {
+        advance_slope_s: slide.advance_slope_s,
+        max_velocity_mm_s: f64::INFINITY,
+        max_accel_mm_s2: slide.max_accel,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let step = RatioStep {
+        ratio_step: slide.variation(),
+        peak_ratio: slide.peak_ratio(),
+        slides: [
+            RatioSlide::FLAT,
+            RatioSlide {
+                slope: slide.slope(),
+                length_mm: slide.slide,
+            },
+        ],
+        speed_mm_s: fastest,
+        accel_mm_s2: slide.accel.abs(),
+        jerk_mm_s3: 0.0,
+    };
+    let (velocity_budget, accel_budget) = rule.demand(2.0 * h / fastest, &step);
+    prop_assume!(accel_budget <= rule.max_accel_mm_s2);
+    let samples = 4_000;
+    for k in 0..=samples {
+        let s = lo + (hi - lo) * f64::from(k) / f64::from(samples);
+        let (velocity, acceleration) = advanced_follower(
+            &state,
+            s,
+            (slide.path_speed(s), slide.accel),
+            slide.advance_slope_s,
+        );
+        prop_assert!(
+            velocity.abs() <= velocity_budget * (1.0 + 1e-9) + 1e-9,
+            "the follower runs at {velocity} mm/s at {s} mm across a change budgeted \
+             {velocity_budget}"
+        );
+        prop_assert!(
+            acceleration.abs() <= accel_budget * (1.0 + 1e-9) + 1e-6,
+            "the follower accelerates at {acceleration} mm/s² at {s} mm across a change budgeted \
+             {accel_budget}"
+        );
+    }
+    Ok(())
 }

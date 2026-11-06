@@ -61,6 +61,7 @@ fn at_a_steady_speed_the_demand_is_the_sampled_peak_of_the_advanced_smoothstep()
             let step = RatioStep {
                 ratio_step: 0.04,
                 peak_ratio: 0.055,
+                slides: [RatioSlide::FLAT; 2],
                 speed_mm_s: 100.0,
                 accel_mm_s2: 0.0,
                 jerk_mm_s3: 0.0,
@@ -84,6 +85,7 @@ fn under_acceleration_the_demand_bounds_the_sampled_ramp_at_its_fastest() {
                 let crossing = RatioStep {
                     ratio_step: 0.033,
                     peak_ratio: 0.033,
+                    slides: [RatioSlide::FLAT; 2],
                     speed_mm_s: 20.0,
                     accel_mm_s2: accel,
                     jerk_mm_s3: 0.0,
@@ -116,6 +118,7 @@ fn cruise(ratio_step: f64, speed_mm_s: f64) -> RatioStep {
     RatioStep {
         ratio_step,
         peak_ratio: ratio_step,
+        slides: [RatioSlide::FLAT; 2],
         speed_mm_s,
         accel_mm_s2: 0.0,
         jerk_mm_s3: 0.0,
@@ -185,6 +188,7 @@ impl Seam {
             step: RatioStep {
                 ratio_step: self.ratio_step,
                 peak_ratio: self.peak_ratio,
+                slides: [RatioSlide::FLAT; 2],
                 speed_mm_s,
                 accel_mm_s2: self.accel_mm_s2,
                 jerk_mm_s3: 0.0,
@@ -417,6 +421,7 @@ fn crossing_at_path_share(ratio_step: f64, share: f64) -> RatioStep {
     RatioStep {
         ratio_step,
         peak_ratio: P4_PEAK_RATIO,
+        slides: [RatioSlide::FLAT; 2],
         speed_mm_s: P4_SPEED_MM_S,
         accel_mm_s2: P4_ACCEL_MM_S2,
         jerk_mm_s3: (own_accel - P4_ACCEL_MM_S2).max(0.0) / P4.advance_slope_s,
@@ -477,6 +482,7 @@ fn the_ramp_at_rest_adds_its_per_accel_share_over_the_longest_ramp() {
         let at_rest = RatioStep {
             ratio_step,
             peak_ratio: 0.0,
+            slides: [RatioSlide::FLAT; 2],
             speed_mm_s: 0.0,
             accel_mm_s2: accel,
             jerk_mm_s3: 0.0,
@@ -488,4 +494,112 @@ fn the_ramp_at_rest_adds_its_per_accel_share_over_the_longest_ramp() {
             "{ramp_accel} against {expected}"
         );
     }
+}
+
+/// The largest `|(h²)″|` and `h·|(h²)‴|` along `h = from + (to − from)·q(x)`
+/// over `x = s/gap` in `[0, 1]`, `q` and its first three derivatives given
+/// at `x`.
+fn square_bends(from: f64, to: f64, gap: f64, q: impl Fn(f64) -> [f64; 4]) -> (f64, f64) {
+    let samples = 20_000;
+    (0..=samples).fold((0.0_f64, 0.0_f64), |(slope, curvature), i| {
+        let [value, d1, d2, d3] = q(f64::from(i) / f64::from(samples));
+        let rise = to - from;
+        let h = from + rise * value;
+        let (h1, h2, h3) = (
+            rise * d1 / gap,
+            rise * d2 / gap.powi(2),
+            rise * d3 / gap.powi(3),
+        );
+        (
+            slope.max((2.0 * (h1 * h1 + h * h2)).abs()),
+            curvature.max((h * 2.0 * (3.0 * h1 * h2 + h * h3)).abs()),
+        )
+    })
+}
+
+fn smootherstep(x: f64) -> [f64; 4] {
+    [
+        x * x * x * (10.0 - 15.0 * x + 6.0 * x * x),
+        30.0 * x * x * (1.0 - x) * (1.0 - x),
+        60.0 * x * (1.0 - x) * (1.0 - 2.0 * x),
+        60.0 - 360.0 * x + 360.0 * x * x,
+    ]
+}
+
+fn rise_from_rest(x: f64) -> [f64; 4] {
+    let left = 1.0 - x;
+    [
+        1.0 - left * left * left,
+        3.0 * left * left,
+        -6.0 * left,
+        6.0,
+    ]
+}
+
+#[test]
+fn the_width_square_bounds_hold_every_node_pair_the_field_lays_and_are_reached() {
+    let gap = 1.0;
+    let narrowest = gap / RATIO_RAMP_NODE_SPACING_PER_WIDTH;
+    let widest_rise = RATIO_RAMP_ENVELOPE_SLOPE * gap;
+    let steps = 40;
+    let mut peaks = (0.0_f64, 0.0_f64);
+    for i in 0..=steps {
+        let narrower = narrowest * f64::from(i) / f64::from(steps);
+        for j in 0..=steps {
+            let wider = narrower + widest_rise * f64::from(j) / f64::from(steps);
+            for (from, to) in [(narrower, wider), (wider, narrower)] {
+                let (slope, curvature) = square_bends(from, to, gap, smootherstep);
+                peaks = (peaks.0.max(slope), peaks.1.max(curvature));
+            }
+        }
+    }
+    let (rest_slope, rest_curvature) = square_bends(0.0, widest_rise, gap, rise_from_rest);
+    assert!(
+        rest_slope <= WIDTH_SQUARE_SLOPE_BOUND && rest_curvature <= WIDTH_SQUARE_CURVATURE_BOUND,
+        "a rise off a rest bends h² by {rest_slope} and {rest_curvature}"
+    );
+    assert!(
+        peaks.0 <= WIDTH_SQUARE_SLOPE_BOUND && peaks.0 >= WIDTH_SQUARE_SLOPE_BOUND - 1e-3,
+        "the smootherstep bends h² by up to {}, bound {WIDTH_SQUARE_SLOPE_BOUND}",
+        peaks.0
+    );
+    assert!(
+        peaks.1 <= WIDTH_SQUARE_CURVATURE_BOUND * (1.0 + 1e-12)
+            && peaks.1 >= WIDTH_SQUARE_CURVATURE_BOUND * (1.0 - 1e-12),
+        "the smootherstep bends h²'s slope by up to {} against h, bound \
+         {WIDTH_SQUARE_CURVATURE_BOUND}",
+        peaks.1
+    );
+}
+
+#[test]
+fn a_run_carries_its_slope_where_it_outlasts_the_ramp_path_and_none_under_half_of_it() {
+    let slide = RatioSlide {
+        slope: -0.01,
+        length_mm: 2.0,
+    };
+    assert_eq!(slide.moving_slope(2.0), 0.01);
+    assert_eq!(slide.moving_slope(1.0), 0.01);
+    assert_eq!(slide.moving_slope(4.0), 0.0);
+    assert!((slide.moving_slope(3.0) - 0.01 / 3.0).abs() < 1e-15);
+}
+
+#[test]
+fn a_moving_slope_lengthens_the_ramp_it_asks_for() {
+    let rule = RatioRampRule {
+        max_accel_mm_s2: 20_000.0,
+        ..unlimited(0.03)
+    };
+    let flat = cruise(0.01, 200.0);
+    let sloped = RatioStep {
+        slides: [
+            RatioSlide::FLAT,
+            RatioSlide {
+                slope: 0.005,
+                length_mm: f64::INFINITY,
+            },
+        ],
+        ..flat
+    };
+    assert!(rule.ramp_time(&sloped) > rule.ramp_time(&flat));
 }

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::frontend::LeaderSpill;
 use crate::path::{CurvatureProfile, Segment};
-use crate::ratio_ramp::{RatioStep, StepCrossing, longest_ramp_time, ramp_accel_at_rest_per_accel};
+use crate::ratio_ramp::{
+    RatioSlide, RatioStep, StepCrossing, longest_ramp_time, ramp_accel_at_rest_per_accel,
+};
 
 use super::rate_cap::LinearRate;
 
@@ -225,7 +227,10 @@ fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
 /// ramp time, and over less where the leaders rest within the room `dn`'s
 /// budget gives, so the planned speed at the join must stay where that ramp
 /// keeps the advanced follower within its limits under the acceleration
-/// `A` around it ([`crate::RatioRampRule::step_speed_cap`]).
+/// `A` around it ([`crate::RatioRampRule::step_speed_cap`]). A move whose
+/// ratio slides over more path than its ends' windows gather is averaged
+/// by the moving window, whose bend the ramp budgets with the step
+/// ([`RatioSlide::moving_slope`]).
 ///
 /// Where the planner budgets the path's jerk at the isolated-switch gain
 /// ([`ExtruderCaps::plans_isolated_switches`]), `A` is the larger of the
@@ -285,6 +290,13 @@ pub(super) fn ratio_step_ceiling(
         (strongest_accel, 0.0)
     };
     let flow = StepFlow::new(&caps, [up_start, up_end, dn_start, dn_end], fastest, accel);
+    let slides = [(up, up_start, up_end), (dn, dn_start, dn_end)].map(|(side, start, end)| {
+        let length_mm = side.segment.s_len();
+        RatioSlide {
+            slope: (end - start) / length_mm,
+            length_mm,
+        }
+    });
     caps.ratio_ramp_rule().step_speed_cap(fastest, |planned| {
         let speed_mm_s = flow.shaped_speed(planned);
         let half_ramp_s = 0.5 * longest_ramp_time(speed_mm_s, dn_budget.rest_room_mm);
@@ -292,6 +304,7 @@ pub(super) fn ratio_step_ceiling(
             step: RatioStep {
                 ratio_step: moved,
                 peak_ratio: flow.peak_ratio,
+                slides,
                 speed_mm_s,
                 accel_mm_s2: accel,
                 jerk_mm_s3,

@@ -22,7 +22,21 @@
 //! demand, which the ramp's adds to: the larger ratio about the step times
 //! `|a| + k·|ȧ|`. At a steady speed the bounds are exact:
 //! `τ ≥ √(6kΔ/A)` wherever `τ ≤ 2k`, with `Δ = |Δr|·v`, and `τ ≥ 3Δ/(2A)`
-//! without an advance. The ramp time is the shortest in
+//! without an advance.
+//!
+//! A sloped span of ratio slope `m` longer than its ends' windows is
+//! averaged by a window that follows the width along the path. That
+//! window leads the table's extrusion by `0.1·m·h²`, so the smoothed ratio
+//! carries `0.1·m·(h²)′`, its slope `0.1·m·(h²)″` and its curvature
+//! `0.1·m·(h²)‴` wherever the width bends, and the advance turns them into
+//! `0.1·m·((h²)″·(v² + 3k·v·a) + (h²)‴·k·v³)` of acceleration and
+//! `0.1·m·(h²)″·k·v²` of velocity beyond the table's own slope
+//! ([`RatioRampRule::demand`]), with `|(h²)″|` and `h·|(h²)‴|` at most
+//! what the width field's node shape allows
+//! ([`WIDTH_SQUARE_SLOPE_BOUND`], [`WIDTH_SQUARE_CURVATURE_BOUND`]) and
+//! `h = v·τ/2`.
+//!
+//! The ramp time is the shortest in
 //! [`RATIO_RAMP_MIN_TIME_S`, `RATIO_RAMP_MAX_TIME_S`] whose addition fits
 //! within what the path's own demand leaves of the follower's limits, and
 //! never within less than [`RAMP_HEADROOM_FLOOR`] of them: the ramp's
@@ -60,6 +74,44 @@ pub const ADVANCE_VALLEY_SPEED_MM_S: f64 = 2.0;
 /// window `d` along the path from a rest is at most `ENVELOPE_SLOPE·d`
 /// wide.
 pub const RATIO_RAMP_ENVELOPE_SLOPE: f64 = 0.25;
+/// How far apart on the path two moving width nodes lie at least, in
+/// units of the narrower of their targets: the smootherstep between nodes
+/// `L` apart that differ by at most `ENVELOPE_SLOPE·L` bends `h` by up to
+/// `h''' = 60·ENVELOPE_SLOPE/L²`, which the smoothed ratio's curvature
+/// carries, so an advance turns it into extruder acceleration. Nodes most
+/// of a window's width apart keep that bend within the window's own; short
+/// of a whole width, since at cruise on the shortest ramp a width is one
+/// time tick of path exactly, and a tie there would hang the choice on how
+/// the path's rounding falls.
+pub const RATIO_RAMP_NODE_SPACING_PER_WIDTH: f64 = 0.75;
+/// `½∫u²K`: a ratio of slope `m` averaged by the kernel over a window of
+/// half-width `h` leads the table's extrusion by this times `m·h²`.
+const KERNEL_HALF_VARIANCE: f64 = 0.1;
+/// The smootherstep's third derivative at its ends, its largest.
+const SMOOTHERSTEP_PEAK_JERK: f64 = 60.0;
+/// The widest a moving width node is, in units of the path to its
+/// neighbour: the narrower of the two at most `1/NODE_SPACING_PER_WIDTH`
+/// of it, the wider [`RATIO_RAMP_ENVELOPE_SLOPE`] of it more.
+const WIDEST_NODE_PER_GAP: f64 =
+    1.0 / RATIO_RAMP_NODE_SPACING_PER_WIDTH + RATIO_RAMP_ENVELOPE_SLOPE;
+/// The most the width field bends `h²` per unit of path squared,
+/// `max |(h²)″| = max 2·|h′² + h·h″|`: between two moving nodes `L` apart,
+/// the smootherstep `h = h_a + Δ·S(x)` with `|Δ| ≤ ENVELOPE_SLOPE·L` and `h`
+/// at most [`WIDEST_NODE_PER_GAP`]` ·L` peaks at `4.4447` where the wider
+/// node falls by the most to the narrower, `x ≈ 0.2` from the wider; a rise
+/// off a rest, `h = H·ψ`, `H ≤ ENVELOPE_SLOPE·L`, reaches `9/8` there.
+pub const WIDTH_SQUARE_SLOPE_BOUND: f64 = 4.445;
+/// The most the width field bends `h²`'s slope against the width there,
+/// `max h·|(h²)‴| = max 2h·|3h′h″ + h·h‴|`: at a moving node the
+/// smootherstep's `h′ = h″ = 0` and `h‴` peaks at
+/// `60·ENVELOPE_SLOPE/L`, so `2h²·60·ENVELOPE_SLOPE/L` with `h` at most
+/// [`WIDEST_NODE_PER_GAP`]` ·L`; a rise off a rest bends `h²` far less
+/// against its own width.
+pub const WIDTH_SQUARE_CURVATURE_BOUND: f64 = 2.0
+    * WIDEST_NODE_PER_GAP
+    * WIDEST_NODE_PER_GAP
+    * RATIO_RAMP_ENVELOPE_SLOPE
+    * SMOOTHERSTEP_PEAK_JERK;
 /// The share of the path between a ratio step and a rest of the leaders
 /// that the step's ramp takes on that side. A window `u` past the step,
 /// under the rest's cone `c·(d − u)`, reaches back to the step only while
@@ -126,15 +178,64 @@ pub struct RatioRampRule {
 }
 
 /// A ratio step as the leaders cross it: the step, the larger ratio on
-/// either side, and the magnitudes of the leaders' speed, acceleration and
-/// jerk there.
+/// either side, the spans either side ([`RatioSlide`]), and the magnitudes
+/// of the leaders' speed, acceleration and jerk there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RatioStep {
     pub ratio_step: f64,
     pub peak_ratio: f64,
+    pub slides: [RatioSlide; 2],
     pub speed_mm_s: f64,
     pub accel_mm_s2: f64,
     pub jerk_mm_s3: f64,
+}
+
+impl RatioStep {
+    /// The steepest ratio slope the moving window carries beside the step
+    /// on a ramp of `tau` seconds at `speed_mm_s`
+    /// ([`RatioSlide::moving_slope`]).
+    fn moving_slope(&self, speed_mm_s: f64, tau: f64) -> f64 {
+        self.slides
+            .iter()
+            .map(|slide| slide.moving_slope(speed_mm_s * tau))
+            .fold(0.0, f64::max)
+    }
+}
+
+/// A run of the ratio table beside a ratio step: its ratio slope per
+/// millimetre and the path it slopes over.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RatioSlide {
+    pub slope: f64,
+    pub length_mm: f64,
+}
+
+impl RatioSlide {
+    /// The flat run of a step's side that has none.
+    pub const FLAT: Self = Self {
+        slope: 0.0,
+        length_mm: f64::INFINITY,
+    };
+
+    /// The ratio slope the moving window carries over the run where the
+    /// step's window is `ramp_path_mm/2` wide, `ramp_path_mm = v·τ`: all of
+    /// it where the run is at least that long, none where it is at most
+    /// half that, and in between a share rising linearly with the length,
+    /// so a ramp time derived from it moves continuously with the run. The
+    /// run joins its ends' cluster where their windows overlap across it;
+    /// a run that leaves them apart is at least as long as the narrower
+    /// window is wide twice, so the step at its narrower end reads all of
+    /// its slope.
+    #[must_use]
+    pub fn moving_slope(&self, ramp_path_mm: f64) -> f64 {
+        let half = 0.5 * ramp_path_mm;
+        let share = if half > 0.0 {
+            ((self.length_mm - half) / half).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        self.slope.abs() * share
+    }
 }
 
 /// A ratio step as the planner lets the leaders cross it: `step` at their
@@ -194,8 +295,8 @@ impl RatioRampRule {
     }
 
     /// What a ramp of `tau` seconds adds to the follower's peak velocity
-    /// and acceleration across `step`: proportional to the step, and
-    /// shrinking as the ramp lengthens.
+    /// and acceleration across `step`: proportional to the step and the
+    /// moving window's slope bend, and shrinking as the ramp lengthens.
     fn ramp_demand(&self, tau: f64, step: &RatioStep) -> (f64, f64) {
         (self.ramp_velocity(tau, step), self.ramp_accel(tau, step))
     }
@@ -204,14 +305,27 @@ impl RatioRampRule {
         let k = self.advance_slope_s;
         let (v, a) = (step.speed_mm_s, step.accel_mm_s2.abs());
         let advanced = v + k * a;
-        step.ratio_step * (velocity_overshoot(ramp_ratio(k, v, advanced, tau)) - 1.0) * advanced
+        let overshoot = step.ratio_step
+            * (velocity_overshoot(ramp_ratio(k, v, advanced, tau)) - 1.0)
+            * advanced;
+        let bend =
+            KERNEL_HALF_VARIANCE * step.moving_slope(v, tau) * WIDTH_SQUARE_SLOPE_BOUND * k * v * v;
+        overshoot + bend
     }
 
+    /// The ramp's own acceleration, and the moving window's slope bend at
+    /// the width `h = v·τ/2`: `k·v³·h·|(h²)‴|/h = 2k·v²·h·|(h²)‴|/τ`.
     fn ramp_accel(&self, tau: f64, step: &RatioStep) -> f64 {
         let k = self.advance_slope_s;
         let (v, a) = (step.speed_mm_s, step.accel_mm_s2.abs());
         let rate = v + 2.0 * k * a;
-        step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau))
+        let ramp = step.ratio_step * rate / tau * acceleration_gain(ramp_ratio(k, v, rate, tau));
+        let bend = KERNEL_HALF_VARIANCE
+            * step.moving_slope(v, tau)
+            * v
+            * (WIDTH_SQUARE_SLOPE_BOUND * (v + 3.0 * k * a)
+                + 2.0 * WIDTH_SQUARE_CURVATURE_BOUND * k * v / tau);
+        ramp + bend
     }
 
     /// Whether the leaders crossing a ratio step as `crossing` lays out keep
@@ -268,7 +382,7 @@ impl RatioRampRule {
     /// none does. Its demand is continuous in the ramp time and every input
     /// and falls as the ramp lengthens, and the headroom is continuous and
     /// positive, so the ramp time is continuous in its inputs and the
-    /// shortest as the step vanishes.
+    /// shortest as the step and the slopes vanish.
     #[must_use]
     pub fn ramp_time(&self, step: &RatioStep) -> f64 {
         assert!(
@@ -281,7 +395,11 @@ impl RatioRampRule {
             .iter()
             .all(|value| value.is_finite())
                 && step.ratio_step >= 0.0
-                && step.speed_mm_s >= 0.0,
+                && step.speed_mm_s >= 0.0
+                && step
+                    .slides
+                    .iter()
+                    .all(|slide| slide.slope.is_finite() && slide.length_mm >= 0.0),
             "a ratio ramp is asked for an ill-formed step {step:?}"
         );
         let (velocity_headroom, accel_headroom) = self.ramp_headroom(step);

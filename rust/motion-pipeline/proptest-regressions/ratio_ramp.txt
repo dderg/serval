@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc fc7eca3c34aebca230c0395b6250ecf58a7806c2b215cbaf1f8ee816ab42a9da # shrinks to slide = SlideCrossing { ratios: [0.0, 0.0, 0.04081060291255291, 0.04081060291255291], start: 1.501473225193708, slide: 0.9560976189838427, rest_ahead: 4.159167862068651, base: 1.5603616063273704, factors: [0.9217079365492483, 0.24760086936354656], spacing: 0.2897601676861177, speed: 186.34384434762572, accel: 0.0, advance_slope_s: 0.005, max_accel: 54502.62045913593 }
+cc 54f928fc1717bddd472a7d62475cf7092f6a6e06d388611c26401d6e60d3e16b # shrinks to slide = SlideCrossing { ratios: [0.04474251047941921, 0.04474251047941921, 0.04480282562220234, 0.04480282562220234], start: 4.226708166810074, slide: 0.599706494792902, rest_ahead: 5.417005441285701, base: 0.7126449748279493, factors: [0.7264318585946913, 0.2972175420801588, 0.8078370979332968], spacing: 0.1588579408456048, speed: 279.917844511958, accel: 0.0, advance_slope_s: 0.005, max_accel: 2000.0 }

@@ -2,8 +2,10 @@ use std::collections::VecDeque;
 
 use geometry::{
     ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE,
-    RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
-    TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around, valley_reach,
+    RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S,
+    RATIO_RAMP_NODE_SPACING_PER_WIDTH as NODE_SPACING_PER_WIDTH, RatioRampRule, RatioSlide,
+    RatioStep, TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around,
+    valley_reach,
 };
 use trajectory::ContinuousSegment;
 
@@ -27,16 +29,6 @@ pub(super) const WIDTH_SLOPE_BOUND: f64 = 3.0 * ENVELOPE_SLOPE;
 /// Width nodes per ramp time: one every half of the shortest ramp.
 const WIDTH_NODES_PER_RAMP_TIME: f64 = 2.0;
 const NODE_SPACING_S: f64 = RATIO_RAMP_MIN_TIME_S / WIDTH_NODES_PER_RAMP_TIME;
-/// How far apart on the path two moving width nodes lie at least, in
-/// units of the narrower of their targets: the smootherstep between nodes
-/// `L` apart that differ by at most `ENVELOPE_SLOPE·L` bends `h` by up to
-/// `h''' = 60·ENVELOPE_SLOPE/L²`, which the smoothed ratio's curvature
-/// carries, so an advance turns it into extruder acceleration. Nodes most
-/// of a window's width apart keep that bend within the window's own; short
-/// of a whole width, since at cruise on the shortest ramp a width is one
-/// time tick of path exactly, and a tie there would hang the choice on how
-/// the path's rounding falls.
-const NODE_SPACING_PER_WIDTH: f64 = 0.75;
 /// The path one time tick covers at cruise on the shortest ramp, in units
 /// of that ramp's width `V·τ/2`; on a longer ramp a tick is less of it.
 const TICK_WIDTHS: f64 = 2.0 / WIDTH_NODES_PER_RAMP_TIME;
@@ -1069,8 +1061,9 @@ impl Candidate {
 /// A ratio step as its ramp time is derived: where and when the leaders
 /// cross it, how fast and under what acceleration, how far the ratio moves
 /// there — its step and the change along the span it opens, which a window
-/// may gather as one step where that span is short — and the largest ratio
-/// about it.
+/// may gather as one step where that span is short — the largest ratio
+/// about it, and the spans either side, whose slope the moving window
+/// carries where they are long.
 #[derive(Debug, Clone, Copy)]
 struct TimedSeam {
     t: f64,
@@ -1078,7 +1071,37 @@ struct TimedSeam {
     crossing: Crossing,
     step: f64,
     peak_ratio: f64,
+    slides: [RatioSlide; 2],
     ramp_time: Option<f64>,
+}
+
+/// The slide `spans[index]` runs on: its slope, over the path the spans
+/// either side carry it on, cut from it only by rounding. A run the table
+/// ends or starts on may carry on past what is laid, so its length is
+/// unbounded.
+fn slide_through(spans: &[RatioSpan], index: usize) -> RatioSlide {
+    let carries_on =
+        |pair: &[RatioSpan]| Seam::between(&pair[0], &pair[1]).is_none_or(|seam| !seam.significant);
+    let first = index
+        - spans[..=index]
+            .windows(2)
+            .rev()
+            .take_while(|pair| carries_on(pair))
+            .count();
+    let last = index
+        + spans[index..]
+            .windows(2)
+            .take_while(|pair| carries_on(pair))
+            .count();
+    let length_mm = if first == 0 || last + 1 == spans.len() {
+        f64::INFINITY
+    } else {
+        spans[last].s1 - spans[first].s0
+    };
+    RatioSlide {
+        slope: spans[index].ratio_slope(),
+        length_mm,
+    }
 }
 
 /// The last moving node the width field kept: when and where, its ramp
@@ -1294,7 +1317,8 @@ impl WidthField {
         }
     }
 
-    /// The ramp time seam `index` asks for, with the steps it gathers.
+    /// The ramp time seam `index` asks for, with the steps it gathers and
+    /// the slopes beside it the moving window carries.
     fn seam_ramp_time(&mut self, index: usize) -> f64 {
         if let Some(ramp_time) = self.seams[index].ramp_time {
             return ramp_time;
@@ -1311,6 +1335,7 @@ impl WidthField {
         let ramp_time = rule.ramp_time(&RatioStep {
             ratio_step: step,
             peak_ratio,
+            slides: seam.slides,
             speed_mm_s: seam.crossing.speed,
             accel_mm_s2: seam.crossing.rate,
             jerk_mm_s3: seam.crossing.jerk,
@@ -1983,7 +2008,11 @@ impl WidthSearch<'_> {
 ///
 /// At cruise `h = v·τ/2`, so a cluster adds `1.5·k·V·v/τ` to the extruder
 /// velocity and `6·k·V·v/τ²` to its acceleration, whether it is one seam
-/// or a slide of many.
+/// or a slide of many. Along a slope `m` longer than its ends' windows the
+/// lead `0.1·h²·m` bends with the width: `r̃' − m = 0.1·m·(h²)''` and
+/// `r̃'' = 0.1·m·(h²)'''`, which each seam's ramp budgets beside its step
+/// from the steepest such slope next to it ([`geometry::RatioSlide`],
+/// [`slide_through`]).
 #[derive(Debug, Default)]
 pub(super) struct RatioSmoothing {
     width: WidthField,
@@ -2113,7 +2142,7 @@ impl RatioSmoothing {
         let mut crossings = LegCrossings::of(leaders);
         self.width.widen_seams_into(&mut crossings, leg.support);
         self.time_seams(
-            &spans[new_seams.start.saturating_sub(1)..],
+            (spans, new_seams.start.saturating_sub(1)),
             &mut crossings,
             leg,
         );
@@ -2429,14 +2458,19 @@ impl RatioSmoothing {
         laid
     }
 
-    /// Hands the width field the seams between consecutive `spans`, timed
-    /// where the leaders of `leg` cross them, with how they cross the ramp
-    /// on either side: within `leg`, and over the tails of the legs before
-    /// it the ramp reaches back into.
-    fn time_seams(&mut self, spans: &[RatioSpan], crossings: &mut LegCrossings, leg: &RampLeg) {
+    /// Hands the width field the seams between consecutive spans from
+    /// `spans[from]` on, timed where the leaders of `leg` cross them, with
+    /// how they cross the ramp on either side: within `leg`, and over the
+    /// tails of the legs before it the ramp reaches back into.
+    fn time_seams(
+        &mut self,
+        (spans, from): (&[RatioSpan], usize),
+        crossings: &mut LegCrossings,
+        leg: &RampLeg,
+    ) {
         let path = LegPath::of(crossings.leaders, leg);
-        for pair in spans.windows(2) {
-            let (before, after) = (&pair[0], &pair[1]);
+        for index in from + 1..spans.len() {
+            let (before, after) = (&spans[index - 1], &spans[index]);
             let Some(seam) = Seam::between(before, after) else {
                 continue;
             };
@@ -2455,6 +2489,7 @@ impl RatioSmoothing {
                 crossing,
                 step: seam.step.abs() + (after.r1 - after.r0).abs(),
                 peak_ratio: before.r1.abs().max(after.r0.abs()).max(after.r1.abs()),
+                slides: [slide_through(spans, index - 1), slide_through(spans, index)],
                 ramp_time: None,
             });
         }
@@ -3129,6 +3164,7 @@ impl RestSide {
             rule.ramp_time(&RatioStep {
                 ratio_step: ratio,
                 peak_ratio: ratio,
+                slides: [RatioSlide::FLAT; 2],
                 speed_mm_s: leaders.speed,
                 accel_mm_s2: leaders.rate,
                 jerk_mm_s3: leaders.jerk,
@@ -3158,11 +3194,10 @@ impl RestSide {
         (from, to): (f64, f64),
     ) -> bool {
         let first = spans.partition_point(|span| span.s0 <= from).max(1);
-        spans[first - 1..]
-            .windows(2)
-            .take_while(|pair| pair[1].s0 < to)
-            .any(|pair| {
-                let (before, after) = (&pair[0], &pair[1]);
+        (first..spans.len())
+            .take_while(|&index| spans[index].s0 < to)
+            .any(|index| {
+                let (before, after) = (&spans[index - 1], &spans[index]);
                 let Some(seam) = Seam::between(before, after) else {
                     return false;
                 };
@@ -3179,6 +3214,7 @@ impl RestSide {
                     &RatioStep {
                         ratio_step: seam.step.abs() + within_window(before) + within_window(after),
                         peak_ratio: before.r1.abs().max(after.r0.abs()).max(after.r1.abs()),
+                        slides: [slide_through(spans, index - 1), slide_through(spans, index)],
                         speed_mm_s: leaders.speed,
                         accel_mm_s2: leaders.rate,
                         jerk_mm_s3: leaders.jerk,
