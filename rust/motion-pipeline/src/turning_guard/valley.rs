@@ -86,6 +86,25 @@ impl CellBounds {
         }
     }
 
+    /// The bounds both `self` and `other` hold, each of the same motion
+    /// across the cell.
+    pub fn meet(self, other: Self) -> Self {
+        let overlap = |what: &str, a: (f64, f64), b: (f64, f64)| {
+            let (lo, hi) = (a.0.max(b.0), a.1.min(b.1));
+            assert!(
+                lo <= hi + 1e-9 * hi.abs().max(1.0),
+                "turning guard: two bounds on a cell's {what} miss each other: {a:?} and {b:?}"
+            );
+            (lo.min(hi), hi)
+        };
+        Self {
+            speed: overlap("speed", self.speed, other.speed),
+            accel: overlap("acceleration", self.accel, other.accel),
+            turn: self.turn.min(other.turn),
+            tangential: overlap("path acceleration", self.tangential, other.tangential),
+        }
+    }
+
     /// The range of the fitted leaders' path acceleration across the cell:
     /// with their velocity within `δ` of the shaped `v` and their
     /// acceleration within `α` of it, their direction strays by at most
@@ -351,16 +370,30 @@ impl Slot {
     /// runs backwards, so the least reads only the cells between `n` and
     /// the run: the crawl lies inside it.
     fn distance(&self, track: &CellTrack, n: i64, h: f64, fit: FitMiss) -> (f64, f64) {
+        self.distance_along(
+            n,
+            |from, to| track.path(from, to),
+            |from, to| track.drift(from, to, h, fit),
+        )
+    }
+
+    /// [`Self::distance`] with the least and most path the shaped motion
+    /// covers across cells read off `path`, and the odometer's stray off
+    /// `drift`.
+    fn distance_along(
+        &self,
+        n: i64,
+        path: impl Fn(i64, i64) -> (f64, f64),
+        drift: impl Fn(i64, i64) -> f64,
+    ) -> (f64, f64) {
         let (m0, m1) = self.cells;
-        let most_drift = track.drift(n.min(m0), n.max(m1), h, fit);
+        let most_drift = drift(n.min(m0), n.max(m1));
         let (least, most) = if n < m0 {
-            let between = track.path(n + 1, m0 - 1).0 - track.drift(n + 1, m0 - 1, h, fit);
-            (between, track.path(n, m1).1)
+            (path(n + 1, m0 - 1).0 - drift(n + 1, m0 - 1), path(n, m1).1)
         } else if n > m1 {
-            let between = track.path(m1 + 1, n - 1).0 - track.drift(m1 + 1, n - 1, h, fit);
-            (between, track.path(m0, n).1)
+            (path(m1 + 1, n - 1).0 - drift(m1 + 1, n - 1), path(m0, n).1)
         } else {
-            (0.0, track.path(n.min(m0), n.max(m1)).1)
+            (0.0, path(n.min(m0), n.max(m1)).1)
         };
         (least.max(0.0), most + most_drift)
     }
@@ -430,8 +463,8 @@ pub(super) struct Reserve {
 /// The fitted leaders across a crawl valley side: as its rebuild reads
 /// them, cell by cell, joined over every [`REBUILD_SCREEN_CELLS`] of them
 /// and over all its cells, each of which bounds what the rebuild asks in
-/// any cell it joins ([`RebuildsWithin`] grows with the distance range, the
-/// speed and the acceleration); and the bound over the whole side
+/// any cell it joins ([`RebuildsWithin`] grows as the distance, speed and
+/// path acceleration ranges widen); and the bound over the whole side
 /// ([`CrawlSide::rebuild`]) once read.
 #[derive(Debug, Clone, PartialEq)]
 struct SideLeaders {
@@ -451,52 +484,44 @@ const REBUILD_SCREEN_CELLS: usize = 32;
 /// once read.
 #[derive(Debug, Clone, PartialEq)]
 struct CellBlock {
-    leaders: JoinedLeaders,
+    leaders: Leaders,
     within: OnceCell<f64>,
 }
 
-/// The distance range, the fastest speed and the strongest acceleration
-/// of the fitted leaders over some cells of a crawl valley side.
+/// The ranges of the fitted leaders' distance from the crawl, of their
+/// speed and of their path acceleration away from it, `o`, over some cells
+/// of a crawl valley side.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct JoinedLeaders {
+struct Leaders {
     distance: (f64, f64),
-    speed: f64,
-    accel: f64,
+    speed: (f64, f64),
+    outward: (f64, f64),
 }
 
-impl JoinedLeaders {
-    fn over(cells: &[CellLeaders]) -> Self {
-        cells.iter().fold(
-            Self {
-                distance: (f64::INFINITY, 0.0),
-                speed: 0.0,
-                accel: 0.0,
-            },
-            |joined, cell| Self {
-                distance: (
-                    joined.distance.0.min(cell.distance.0),
-                    joined.distance.1.max(cell.distance.1),
-                ),
-                speed: joined.speed.max(cell.speed),
-                accel: joined.accel.max(cell.accel),
-            },
-        )
+impl Leaders {
+    fn joined(cells: &[CellLeaders]) -> Self {
+        let hull = |a: (f64, f64), b: (f64, f64)| (a.0.min(b.0), a.1.max(b.1));
+        cells
+            .iter()
+            .map(|cell| cell.leaders)
+            .reduce(|joined, cell| Self {
+                distance: hull(joined.distance, cell.distance),
+                speed: hull(joined.speed, cell.speed),
+                outward: hull(joined.outward, cell.outward),
+            })
+            .expect("turning guard: a crawl side joins at least one cell")
     }
 
     fn rebuild(&self, within: &RebuildsWithin) -> f64 {
-        within.at(self.distance, self.speed, self.accel)
+        within.at(self.distance, self.speed, self.outward)
     }
 }
 
-/// The fitted leaders in one cell of a crawl valley side: their distance
-/// range from the crawl, how fast they are and how hard they accelerate at
-/// most, and what [`RebuildsWithin`] bounds the rebuild there by once
-/// read.
+/// The fitted leaders in one cell of a crawl valley side, and what
+/// [`RebuildsWithin`] bounds the rebuild there by once read.
 #[derive(Debug, Clone, PartialEq)]
 struct CellLeaders {
-    distance: (f64, f64),
-    speed: f64,
-    accel: f64,
+    leaders: Leaders,
     within: OnceCell<f64>,
 }
 
@@ -519,7 +544,12 @@ impl Reserve {
     /// The side `width` wide over the cells `cells` of the `slot`'s
     /// valley: in each, the least of the bound over the whole side
     /// ([`CrawlSide::rebuild`]) and the one the cell's own fitted leaders
-    /// set at their distance from the crawl ([`RebuildsWithin`]).
+    /// set at their distance from the crawl ([`RebuildsWithin`]). Past the
+    /// run, a cell's shaped motion is bounded by both the track and its
+    /// `shadow` convolution, which a box over a whole move leaves far
+    /// looser: that sets the path to the run, so the distance, the speed
+    /// there, and the sign of the path acceleration away from the crawl.
+    /// Within the run the crawl may lie either way.
     fn over(
         slot: &Slot,
         track: &CellTrack,
@@ -528,13 +558,53 @@ impl Reserve {
         shadow: &dyn Fn(i64) -> CellBounds,
     ) -> Self {
         let side = slot.leaders(track, cells, (h, fit), shadow);
-        let crossing: Vec<CellLeaders> = (cells.0..=cells.1)
+        let (m0, m1) = slot.cells;
+        let beyond_the_run = |n: i64| n < m0 || n > m1;
+        let bounds: Vec<CellBounds> = (cells.0..=cells.1)
             .map(|n| {
-                let cell = track.get(n);
+                let tracked = track.get(n);
+                if beyond_the_run(n) {
+                    tracked.meet(shadow(n))
+                } else {
+                    tracked
+                }
+            })
+            .collect();
+        let covered: Vec<(f64, f64)> = std::iter::once((0.0, 0.0))
+            .chain(bounds.iter().scan((0.0, 0.0), |(least, most), cell| {
+                *least += cell.speed.0 * h;
+                *most += cell.speed.1 * h;
+                Some((*least, *most))
+            }))
+            .collect();
+        let index = |n: i64| usize::try_from(n - cells.0).expect("a cell of the side");
+        let path = |from: i64, to: i64| {
+            if to < from {
+                return (0.0, 0.0);
+            }
+            let (before, through) = (covered[index(from)], covered[index(to) + 1]);
+            (through.0 - before.0, through.1 - before.1)
+        };
+        let crossing: Vec<CellLeaders> = (cells.0..=cells.1)
+            .zip(&bounds)
+            .map(|(n, cell)| {
+                let strongest = cell.accel.1 + fit.accel;
+                let outward = if !beyond_the_run(n) {
+                    (-strongest, strongest)
+                } else if n < m0 {
+                    let (lo, hi) = cell.fitted_tangential(fit);
+                    (-hi, -lo)
+                } else {
+                    cell.fitted_tangential(fit)
+                };
                 CellLeaders {
-                    distance: slot.distance(track, n, h, fit),
-                    speed: cell.speed.1 + fit.speed,
-                    accel: cell.accel.1 + fit.accel,
+                    leaders: Leaders {
+                        distance: slot.distance_along(n, path, |from, to| {
+                            track.drift(from, to, h, fit)
+                        }),
+                        speed: ((cell.speed.0 - fit.speed).max(0.0), cell.speed.1 + fit.speed),
+                        outward,
+                    },
                     within: OnceCell::new(),
                 }
             })
@@ -543,7 +613,7 @@ impl Reserve {
         let blocks = crossing
             .chunks(REBUILD_SCREEN_CELLS)
             .map(|cells| CellBlock {
-                leaders: JoinedLeaders::over(cells),
+                leaders: Leaders::joined(cells),
                 within: OnceCell::new(),
             })
             .collect();
@@ -552,7 +622,7 @@ impl Reserve {
             cells,
             leaders: Some(SideLeaders {
                 side,
-                joined: JoinedLeaders::over(&crossing).rebuild(&within),
+                joined: Leaders::joined(&crossing).rebuild(&within),
                 within,
                 cells: crossing,
                 blocks,
@@ -588,7 +658,7 @@ impl Reserve {
         let cell = &leaders.cells[index];
         let within = *cell
             .within
-            .get_or_init(|| leaders.within.at(cell.distance, cell.speed, cell.accel));
+            .get_or_init(|| cell.leaders.rebuild(&leaders.within));
         binds(within).then(|| {
             within.min(
                 *leaders

@@ -180,8 +180,10 @@ proptest! {
 
     /// Read where they are, the leaders leaving a crawl however they
     /// please within the side's speed and acceleration meet no more rebuild
-    /// than [`CrawlSide::rebuild_within`] bounds at their own distance,
-    /// speed and acceleration.
+    /// than [`CrawlSide::rebuilds_within`] bounds at their own distance,
+    /// speed and path acceleration away from the crawl, each read within a
+    /// range around them, nor than it bounds with the acceleration read
+    /// either way.
     #[test]
     fn the_rebuild_read_where_the_leaders_are_bounds_what_they_meet_there(
         speed in 0.0f64..2.0,
@@ -190,13 +192,14 @@ proptest! {
         fastest_over in 0.0f64..200.0,
         widening in 1.0f64..40.0,
         pieces in prop::collection::vec((-1.0f64..1.0, 1e-4f64..0.02), 1..6),
-        spreads in prop::array::uniform2(0.0f64..0.3),
+        spreads in prop::array::uniform6(0.0f64..0.3),
     ) {
         let rate = rate_share * accel;
         let floor = crawl_floor(speed, rate);
         let width = valley_reach(speed, rate) * widening;
         let fastest = speed + fastest_over;
         let side = CrawlSide::either_way(speed, accel, fastest, (floor, floor));
+        let within = side.rebuilds_within(width);
         let valley = crawl_valley(width, floor);
         let steps_per_piece = 400;
         let (mut s, mut v) = (0.0_f64, speed);
@@ -208,11 +211,23 @@ proptest! {
                 if weight < 1.0 && step % 10 == 0 {
                     let met = (curvature * v * v * v + 3.0 * slope * v * rate).abs();
                     let distance = around(s, spreads[0] * width, spreads[1] * width, 0.0);
-                    let bound = side.rebuilds_within(width).at(distance, v, rate.abs());
+                    let speeds = around(v, spreads[2] * fastest, spreads[3] * fastest, 0.0);
+                    let outward = around(rate, spreads[4] * accel, spreads[5] * accel, -accel);
+                    let signed = within.at(distance, speeds, outward);
+                    let either_way = within.at(
+                        distance,
+                        (0.0, speeds.1),
+                        (outward.0.min(-accel), outward.1.max(accel)),
+                    );
                     prop_assert!(
-                        met <= bound * (1.0 + 1e-6) + 1e-9,
+                        met <= signed * (1.0 + 1e-6) + 1e-9,
                         "at {s} mm, {v} mm/s and {rate} mm/s² the leaders meet a rebuild of \
-                         {met}, past its bound {bound} within {distance:?}"
+                         {met}, past its bound {signed} within {distance:?}, {speeds:?} mm/s \
+                         and {outward:?} mm/s²"
+                    );
+                    prop_assert!(
+                        signed <= either_way * (1.0 + 1e-12),
+                        "the signed read {signed} is looser than {either_way} read either way"
                     );
                 }
                 s += v * dt + 0.5 * rate * dt * dt;
@@ -281,6 +296,22 @@ fn the_coupled_bend_bound_is_the_golden_ratio_to_the_three_halves_where_the_floo
     assert!(
         slower < bound,
         "a crawl slower than its floor allows bends {slower}, no less than {bound}"
+    );
+}
+
+/// Leaders speeding up away from a crawl, past where its floor bends the
+/// weight, meet a fold and a slope of opposite signs: read with their
+/// speed and acceleration where they are, the two offset.
+#[test]
+fn leaders_speeding_up_away_from_a_crawl_offset_its_fold_against_its_slope() {
+    let side = CrawlSide::either_way(1.0, 2000.0, 60.0, (5e-4, 5e-4));
+    let within = side.rebuilds_within(2.0);
+    let distance = (0.8, 0.81);
+    let signed = within.at(distance, (33.0, 34.0), (450.0, 550.0));
+    let either_way = within.at(distance, (0.0, 34.0), (-550.0, 550.0));
+    assert!(
+        signed < 0.6 * either_way,
+        "the signed read {signed} keeps most of the {either_way} read either way"
     );
 }
 

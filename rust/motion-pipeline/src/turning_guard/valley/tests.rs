@@ -93,7 +93,7 @@ fn the_block_screen_leaves_every_cell_s_rebuild_as_its_own_bound_reads_it() {
     let own: Vec<f64> = leaders
         .cells
         .iter()
-        .map(|cell| leaders.within.at(cell.distance, cell.speed, cell.accel))
+        .map(|cell| cell.leaders.rebuild(&leaders.within))
         .collect();
     let (least, most) = own
         .iter()

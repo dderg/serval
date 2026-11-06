@@ -540,31 +540,7 @@ impl CrawlSide {
                 let slowest =
                     libm::sqrt(2.0 * self.outward.0.max(0.0) * (near - signed_from).max(0.0))
                         .min(fastest);
-                let (fastest_cubed, slowest_cubed) =
-                    (fastest * fastest * fastest, slowest * slowest * slowest);
-                let bend = if weight.bend.1 == 0.0 {
-                    0.0
-                } else {
-                    weight.bend_scale.1 * (weight.bend.1 * fastest_cubed).min(coupled)
-                };
-                let least_bend = weight.bend_scale.0 * weight.bend.0 * slowest_cubed;
-                let lead = |out: f64| {
-                    3.0 * if out >= 0.0 {
-                        weight.slope.1 * fastest * out
-                    } else {
-                        weight.slope.0 * slowest * out
-                    }
-                };
-                let least_lead = |out: f64| {
-                    3.0 * if out >= 0.0 {
-                        weight.slope.0 * slowest * out
-                    } else {
-                        weight.slope.1 * fastest * out
-                    }
-                };
-                let largest = bend - weight.fold.0 * slowest_cubed + lead(out_hi);
-                let least = least_bend - weight.fold.1 * fastest_cubed + least_lead(out_lo);
-                largest.max(-least).max(0.0)
+                signed_rebuild(&weight, coupled, (slowest, fastest), (out_lo, out_hi))
             })
             .fold(0.0, f64::max)
     }
@@ -609,16 +585,19 @@ impl CrawlSide {
 }
 
 /// The most `|W″·ṡ³ + 3W′·ṡ·s̈|` asks of leaders within a distance range of
-/// a crawl, no faster than a speed and with `|s̈|` within an acceleration
-/// there, over a side of one width ([`CrawlSide::rebuilds_within`]):
-/// `|W″| ≤ max(bend_scale·β, fold)` with `β·ṡ³` within [`coupled_bend`]
-/// too, and `|W′|` within its slope, read by [`SideWeight`] over that
-/// distance, the side's floor range split as [`CrawlSide::rebuild`] splits
-/// it. It reads the leaders where they are, which bounds a side across a
-/// long crawl far closer than [`CrawlSide::rebuild`], whose speed grows
-/// from the crawl's with the strongest acceleration anywhere along the
-/// side. What reads neither the distance nor the leaders there is read
-/// once per floor piece.
+/// a crawl, within a speed range and with their path acceleration away
+/// from the crawl within a range there, over a side of one width
+/// ([`CrawlSide::rebuilds_within`]): `Ŵ″·ṡ³ + 3Ŵ′·ṡ·o` read as
+/// [`CrawlSide::rebuild`] reads each piece of its side, with `Ŵ`, `Ŵ′` and
+/// `Ŵ″` read by [`SideWeight`] over that distance and `β·ṡ³` within
+/// [`coupled_bend`] too, the side's floor range split as
+/// [`CrawlSide::rebuild`] splits it. It reads the leaders where they are,
+/// which bounds a side across a long crawl far closer than
+/// [`CrawlSide::rebuild`], whose speed grows from the crawl's with the
+/// strongest acceleration anywhere along the side; where they are known to
+/// speed up away from the crawl, the fold and the slope offset. What reads
+/// neither the distance nor the leaders there is read once per floor
+/// piece.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RebuildsWithin {
     width: f64,
@@ -628,27 +607,26 @@ pub struct RebuildsWithin {
 
 impl RebuildsWithin {
     /// The most the rebuild asks of leaders within `distance` of the crawl,
-    /// a `(least, largest)` range, no faster than `speed` and with `|s̈|`
-    /// within `accel` there.
+    /// within `speed` there and with their path acceleration away from the
+    /// crawl, `o`, within `outward`, each a `(least, largest)` range. It
+    /// grows as any of the ranges widens.
     #[must_use]
-    pub fn at(&self, distance: (f64, f64), speed: f64, accel: f64) -> f64 {
+    pub fn at(&self, distance: (f64, f64), speed: (f64, f64), outward: (f64, f64)) -> f64 {
         assert!(
-            speed >= 0.0 && accel >= 0.0 && 0.0 <= distance.0,
-            "a crawl side's leaders are ill-formed: {speed} mm/s, {accel} mm/s² within \
-             {distance:?} mm"
+            0.0 <= distance.0
+                && distance.0 <= distance.1
+                && 0.0 <= speed.0
+                && speed.0 <= speed.1
+                && outward.0 <= outward.1,
+            "a crawl side's leaders are ill-formed: {speed:?} mm/s, {outward:?} mm/s² away from \
+             the crawl within {distance:?} mm"
         );
-        let speed = speed.min(self.fastest);
-        let cubed = speed * speed * speed;
+        let fastest = speed.1.min(self.fastest);
+        let speed = (speed.0.min(fastest), fastest);
         self.pieces
             .iter()
             .map(|(side, coupled)| {
-                let weight = side.weight_within(distance);
-                let bend = if weight.bend.1 == 0.0 || cubed == 0.0 {
-                    0.0
-                } else {
-                    weight.bend_scale.1 * (weight.bend.1 * cubed).min(*coupled)
-                };
-                bend.max(weight.fold.1 * cubed) + 3.0 * weight.slope.1 * speed * accel
+                signed_rebuild(&side.weight_within(distance), *coupled, speed, outward)
             })
             .fold(0.0, f64::max)
     }
@@ -686,7 +664,9 @@ impl RebuildsWithin {
             let from_far = far.1 * far.1 + 2.0 * growth * (far.0 - from);
             libm::sqrt(from_near.min(from_far))
         };
-        let fits = |range: (f64, f64)| self.at(range, speed_over(range), accel) <= room;
+        let fits = |range: (f64, f64)| {
+            self.at(range, (0.0, speed_over(range)), (-accel, accel)) <= room
+        };
         if fits((lo, hi)) {
             return true;
         }
@@ -699,6 +679,44 @@ impl RebuildsWithin {
             fits((from, to))
         })
     }
+}
+
+/// The most `|Ŵ″·ṡ³ + 3Ŵ′·ṡ·o|` asks of leaders where the side's weight
+/// lies within `weight`, its bend's `β·ṡ³` within `coupled`, their speed
+/// within `[slowest, fastest]` and `o` within `[out_lo, out_hi]`. With
+/// `Ŵ″ = bend_scale·β − fold` and `Ŵ′ ≥ 0`, its largest and least values
+/// pair each term's own extreme, so a fold and a slope of opposite signs,
+/// where the leaders speed up away from the crawl, offset.
+fn signed_rebuild(
+    weight: &SideWeight,
+    coupled: f64,
+    (slowest, fastest): (f64, f64),
+    (out_lo, out_hi): (f64, f64),
+) -> f64 {
+    let (fastest_cubed, slowest_cubed) = (fastest * fastest * fastest, slowest * slowest * slowest);
+    let bend = if weight.bend.1 == 0.0 || fastest == 0.0 {
+        0.0
+    } else {
+        weight.bend_scale.1 * (weight.bend.1 * fastest_cubed).min(coupled)
+    };
+    let least_bend = weight.bend_scale.0 * weight.bend.0 * slowest_cubed;
+    let lead = |out: f64| {
+        3.0 * if out >= 0.0 {
+            weight.slope.1 * fastest * out
+        } else {
+            weight.slope.0 * slowest * out
+        }
+    };
+    let least_lead = |out: f64| {
+        3.0 * if out >= 0.0 {
+            weight.slope.0 * slowest * out
+        } else {
+            weight.slope.1 * fastest * out
+        }
+    };
+    let largest = bend - weight.fold.0 * slowest_cubed + lead(out_hi);
+    let least = least_bend - weight.fold.1 * fastest_cubed + least_lead(out_lo);
+    largest.max(-least).max(0.0)
 }
 
 /// The floor range `floor` within a side `width` wide, in geometric pieces
