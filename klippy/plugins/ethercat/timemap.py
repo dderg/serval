@@ -16,6 +16,27 @@ class GridRegression(Exception):
     pass
 
 
+class PrintTimeRegression:
+    """The main MCU's print_time as the (time, clock, freq) regression
+    SecondarySync reads from its main clock, built from the public
+    MCU.estimated_print_time(), which is linear in host time between
+    clocksync updates. Its "clock" counts print-time seconds."""
+
+    mcu_freq = 1.0
+
+    def __init__(self, mcu):
+        self.mcu = mcu
+        self.clock_est = (0.0, 0.0, 0.0)
+
+    def refresh(self, eventtime):
+        print_time = self.mcu.estimated_print_time(eventtime)
+        rate = self.mcu.estimated_print_time(eventtime + 1.0) - print_time
+        self.clock_est = (eventtime, print_time, rate)
+
+    def estimated_print_time(self, eventtime):
+        return self.mcu.estimated_print_time(eventtime)
+
+
 class EndpointClockMap(clocksync.SecondarySync):
     """print_time <-> endpoint clock (CLOCK_MONOTONIC_RAW nanoseconds).
 
@@ -26,13 +47,21 @@ class EndpointClockMap(clocksync.SecondarySync):
     already emitted never move when the main MCU's regression changes.
     """
 
-    def __init__(self, reactor, main_sync, eventtime):
-        clocksync.SecondarySync.__init__(self, reactor, main_sync)
+    def __init__(self, reactor, mcu, eventtime):
+        main = PrintTimeRegression(mcu)
+        main.refresh(eventtime)
+        clocksync.SecondarySync.__init__(self, reactor, main)
         self.mcu_freq = RAW_NS_PER_S
         self.clock_est = (0.0, 0.0, RAW_NS_PER_S)
-        main_print_time = main_sync.estimated_print_time(eventtime)
+        main_print_time = main.estimated_print_time(eventtime)
         self.clock_adj = (main_print_time - eventtime, RAW_NS_PER_S)
         self.calibrate_clock(0.0, eventtime)
+
+    def calibrate_clock(self, print_time, eventtime):
+        self.main_sync.refresh(eventtime)
+        return clocksync.SecondarySync.calibrate_clock(
+            self, print_time, eventtime
+        )
 
     def exact_clock(self, print_time):
         offset, freq = self.clock_adj

@@ -291,7 +291,7 @@ class LiveEndpoint:
             )
         mcu = self.printer.lookup_object("mcu")
         self.clock_map = EndpointClockMap(
-            self.reactor, mcu._clocksync, self.reactor.monotonic()
+            self.reactor, mcu, self.reactor.monotonic()
         )
         self.grid = EndpointGrid(
             self.clock_map, self.cycle_ns, grid.grid_index, grid.grid_clock
