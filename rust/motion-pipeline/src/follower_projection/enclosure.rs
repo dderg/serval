@@ -478,7 +478,7 @@ impl<'a> FollowerSignal<'a> {
         let read = match reading {
             Reading::Follower => [(); 3].map(|()| TaylorModel::UNBOUNDED),
             Reading::AdvanceWithoutJerk | Reading::Advance => {
-                let advance_laid = match self.state.advance_table() {
+                let advance_laid = match self.advance_table() {
                     Table::Laid => None,
                     Table::Advance => Some(self.table_models(Table::Advance, &s, centre, reach)?),
                 };
