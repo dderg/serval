@@ -1119,7 +1119,10 @@ impl KernelFit<'_> {
         for piece in &mut input_pieces {
             piece.coeffs.resize(piece.coeffs.len().max(6), 0.0);
         }
-        let nonnegative_demand = !window.iter().any(|segment| segment.reach_retracts);
+        let nonnegative_demand = !window
+            .iter()
+            .filter(|segment| segment.t_end > read_lo && segment.t_start < read_hi)
+            .any(|segment| segment.reach_retracts);
         let group_tol = follower_fit_tol(
             fit_tol,
             group
@@ -2193,13 +2196,12 @@ impl FollowerState {
 
     /// Whether a span the smoothed table reads anywhere on `[s_lo, s_hi]`
     /// retracts: a window there averages the table no further than its
-    /// width either side, so nothing laid past that reach decides it.
+    /// width either side, and a span only touching that reach is read
+    /// nowhere, so nothing laid past it decides this.
     fn retracts_within(&self, s_lo: f64, s_hi: f64) -> bool {
-        let lo = s_lo - SPAN_LOOKUP_SLACK_MM;
-        let hi = s_hi + SPAN_LOOKUP_SLACK_MM;
         let (reach_lo, reach_hi) = (
-            lo - self.smoothing.reach_back(lo),
-            hi + self.smoothing.reach_back(hi),
+            s_lo - self.smoothing.reach_back(s_lo),
+            s_hi + self.smoothing.reach_back(s_hi),
         );
         self.spans
             .iter()

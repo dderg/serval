@@ -554,15 +554,6 @@ fn try_project_all_at_once(
     Ok(committed)
 }
 
-/// How much of the raw track each streamed call sees: the batch it shapes,
-/// or everything still to come, as a shaper does whose raw input runs far
-/// ahead of its shaped frontier.
-#[derive(Clone, Copy)]
-enum RawAhead {
-    Batch,
-    Whole,
-}
-
 /// Feed the track the way the shaper does: a few more segments each call,
 /// asking to commit every segment whose kernel window the buffered track
 /// already covers, dropping what was committed, and forcing the rest out at
@@ -571,7 +562,6 @@ fn project_streamed(
     track: &Track,
     chains: &AxisChainSet,
     batch_sizes: &[usize],
-    raw_ahead: RawAhead,
 ) -> Vec<ContinuousSegment> {
     let reach_ahead = chains.chains[E_AXIS]
         .kernel()
@@ -587,10 +577,7 @@ fn project_streamed(
         if !forced {
             end = (end + batches.next().expect("cycled")).min(track.base.len());
         }
-        let base = match raw_ahead {
-            RawAhead::Batch => &track.base[start..end],
-            RawAhead::Whole => &track.base[start..],
-        };
+        let base = &track.base[start..end];
         let frontier = &track.frontier[start..end];
         let covered_through = frontier.last().map_or(f64::NEG_INFINITY, |seg| seg.t_end);
         let mut out: Vec<ContinuousSegment> = if forced {
@@ -900,7 +887,7 @@ proptest! {
         let track = build_track(heading, &steps);
         let chains = chains(smoothing(smooth_time));
         let one_shot = project_all_at_once(&track, &chains);
-        let streamed = project_streamed(&track, &chains, &batch_sizes, RawAhead::Batch);
+        let streamed = project_streamed(&track, &chains, &batch_sizes);
         assert_streams_like_one_shot(&streamed, &one_shot)?;
     }
 
@@ -942,7 +929,7 @@ proptest! {
         let limits = limits.map(|limits| track.extruder_peaks.limits_above(advance_k, limits));
         let chains = chains(limited(follower_chain(Some(advance_k), smooth_time), limits));
         let one_shot = project_all_at_once(&track, &chains);
-        let streamed = project_streamed(&track, &chains, &batch_sizes, RawAhead::Batch);
+        let streamed = project_streamed(&track, &chains, &batch_sizes);
         assert_streams_like_one_shot(&streamed, &one_shot)?;
     }
 
@@ -957,7 +944,7 @@ proptest! {
         let one_shot = project_all_at_once(&track, &chains);
         assert_lays_the_oracle(&track, &one_shot)?;
         assert_seams_weld(&one_shot)?;
-        let streamed = project_streamed(&track, &chains, &batch_sizes, RawAhead::Batch);
+        let streamed = project_streamed(&track, &chains, &batch_sizes);
         assert_streams_like_one_shot(&streamed, &one_shot)?;
     }
 
@@ -965,7 +952,6 @@ proptest! {
     /// stream ingests past it — a retract further on included — leaves
     /// every committed bit as fed one segment at a time.
     #[test]
-    #[ignore = "#798: ratio_bounds' reach and the table-start read still see spans laid past the fit"]
     fn a_follower_commits_the_same_bits_however_far_ahead_it_is_fed(
         heading in 0.0..std::f64::consts::TAU,
         steps in prop::collection::vec(retracting_step_strategy(), 1..12),
@@ -975,8 +961,8 @@ proptest! {
     ) {
         let track = build_profiled_track(heading, &steps, Profile::Quintic);
         let chains = chains(follower_chain(advance_k, smooth_time));
-        let one_at_a_time = project_streamed(&track, &chains, &[1], RawAhead::Whole);
-        let batched = project_streamed(&track, &chains, &batch_sizes, RawAhead::Whole);
+        let one_at_a_time = project_streamed(&track, &chains, &[1]);
+        let batched = project_streamed(&track, &chains, &batch_sizes);
         assert_same_bits(&batched, &one_at_a_time)?;
     }
 

@@ -1770,16 +1770,22 @@ impl RatioSmoothing {
                 .is_some()
     }
 
-    /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`].
+    /// `(max |r̃|, max |r̃'|)` over `[lo, hi]`, see [`RatioSmoothing`]: from
+    /// the spans the windows over the stretch average, `s ± h(s)` growing
+    /// along the path, and those either side of every step whose own window
+    /// reaches into it. A span only touching that reach is read nowhere on
+    /// the stretch, so nothing laid past what the stretch reads decides the
+    /// bound.
     pub(super) fn ratio_bounds(&self, spans: &[RatioSpan], lo: f64, hi: f64) -> (f64, f64) {
-        let (widest, curvature) = self.width.bounds(lo, hi);
-        let (reach_lo, reach_hi) = (
-            lo - widest - SPAN_LOOKUP_SLACK_MM,
-            hi + widest + SPAN_LOOKUP_SLACK_MM,
-        );
-        let ridden = spans
-            .iter()
-            .filter(|span| span.s1 >= reach_lo && span.s0 <= reach_hi);
+        let (_, curvature) = self.width.bounds(lo, hi);
+        let reaching: Vec<(Seam, f64)> = self.laid.steps_reaching(&self.width, (lo, hi)).collect();
+        let (reach_lo, reach_hi) = (lo - self.reach_back(lo), hi + self.reach_back(hi));
+        let ridden = spans.iter().filter(|span| {
+            (span.s1 > reach_lo && span.s0 < reach_hi)
+                || reaching
+                    .iter()
+                    .any(|(seam, _)| span.s1 == seam.s || span.s0 == seam.s)
+        });
         let (low, high, slope) = ridden.fold(
             (f64::INFINITY, f64::NEG_INFINITY, 0.0_f64),
             |(low, high, slope), span| {
@@ -1798,39 +1804,14 @@ impl RatioSmoothing {
             return (0.0, 0.0);
         }
         let stretch = (1.0 + WIDTH_SLOPE_BOUND) * (1.0 + WIDTH_SLOPE_BOUND);
-        let steps = self
-            .laid
-            .seams_near(reach_lo, reach_hi)
+        let steps = reaching
             .iter()
-            .map(|seam| {
-                let narrowest = self.narrowest_window_over(seam.s);
-                if narrowest > 0.0 {
-                    KERNEL_PEAK * seam.step.abs() / narrowest
-                } else {
-                    0.0
-                }
-            })
+            .map(|(seam, h)| KERNEL_PEAK * seam.step.abs() / h)
             .sum::<f64>();
         (
             low.abs().max(high.abs()),
             stretch * (slope + steps) + KERNEL_ABS_MOMENT * curvature * (high - low),
         )
-    }
-
-    /// A lower bound of `h(s)` wherever `seam` is inside the window at `s`:
-    /// `h(s) > h(seam)/(1 + λ)` by the width's slope bound, and `h(s)`
-    /// exceeds the distance to the seam, so a seam past the nodes is no
-    /// nearer than the last of them.
-    fn narrowest_window_over(&self, seam: f64) -> f64 {
-        let nodes = &self.width.nodes;
-        let (first, last) = (nodes[0].s, nodes[nodes.len() - 1].s);
-        if seam < first {
-            first - seam
-        } else if seam > last {
-            seam - last
-        } else {
-            self.width.width(seam) / (1.0 + WIDTH_SLOPE_BOUND)
-        }
     }
 
     /// Where over `[lo, hi]` the smoothed ratio's curvature, or the
