@@ -1,0 +1,29 @@
+{
+  "trees": {
+    "rust": "95332ef39fc5096b8196f434d628249b82116ef5",
+    "tools/bench/configs": "0cbfa471aa297375dd6ff8f64f2636be23d6af7b",
+    "tools/sim/gcode": "896c5c8218fc4e7d64fe15b6c568236e00a2e491"
+  },
+  "measured_at": "2026-11-06T19:01:55+00:00",
+  "worst_x": {
+    "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": [
+      4.3,
+      4.34
+    ],
+    "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": [
+      5.1,
+      5.09
+    ],
+    "tools/bench/configs/trident_kernel.cfg": [
+      1.86,
+      1.85
+    ]
+  },
+  "pinned_cores": "0,1,2",
+  "pinned_cores_worst_x": {
+    "tools/bench/configs/trident_kernel.cfg": [
+      2.34,
+      2.35
+    ]
+  }
+}
