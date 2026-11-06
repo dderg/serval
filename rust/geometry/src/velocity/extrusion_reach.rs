@@ -4,9 +4,15 @@ use crate::Move;
 use crate::frontend::{ExtruderCaps, LeaderSpillId, SettleDemand};
 use crate::path::CurvatureProfile;
 
-use super::extruder_caps::extruder_capped;
+use super::disk;
+use super::extruder_caps::{DemandReach, extruder_accel_cap};
 use super::z_caps::z_capped;
 use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
+
+/// The relative margin a move's reachable speed keeps over the envelope it
+/// is read off, so a plan that reaches the envelope to the last rounding
+/// never rides the ceiling it becomes.
+const REACHABLE_SLACK: f64 = 1e-9;
 
 /// The largest extrusion ratio `m` lays along the path on `axis`: 0 for
 /// travel, retraction (a negative ratio) and an extrude-only move, whose
@@ -23,31 +29,225 @@ pub(super) fn extruding_ratio(m: &Move, axis: usize) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// The most acceleration `m` can be planned at from its own caps alone:
-/// its limit, held by the z cap ([`super::z_caps::z_capped`]) and by the
-/// extruder caps on its own extrusion ratio and axes
-/// ([`super::extruder_caps::extruder_capped`]), which the ratio and axes
-/// within its reach only tighten.
-fn realizable_accel(m: &Move) -> f64 {
+/// What `segment`'s own extruder demand meets: its own ratio and axes,
+/// which the ratio and axes within its reach only add to.
+fn own_reach(m: &Move, segment: &crate::path::Segment, caps: &ExtruderCaps) -> DemandReach {
+    DemandReach {
+        ratio: extruding_ratio(m, caps.axis_index),
+        ratio_step: 0.0,
+        axes: moves_on(segment),
+    }
+}
+
+/// The most acceleration the planner can plan `m` at, at any speed: its
+/// limit, held by the extruder's acceleration cap on its own extrusion
+/// ratio and axes at rest, which every speed, and the ratio and axes within
+/// its reach, only tighten.
+fn reaching_accel(m: &Move) -> f64 {
+    let accel = m.limits.accel_mm_s2;
+    let (Some(segment), Some(caps)) = (&m.segment.spatial, m.limits.extruder) else {
+        return accel;
+    };
+    let (_, kappa_peak) = segment.kappa_peak();
+    extruder_accel_cap(
+        segment,
+        &caps,
+        own_reach(m, segment, &caps),
+        kappa_peak,
+        (0.0, accel),
+    )
+}
+
+/// The most acceleration `m` can be planned at from its own caps alone,
+/// with the leaders crossing it at no more than `reachable_mm_s`: its
+/// limit, held by the z cap ([`super::z_caps::z_capped`]) and by the
+/// extruder's acceleration cap on its own extrusion ratio and axes
+/// ([`super::extruder_caps::extruder_accel_cap`]), which the ratio and axes
+/// within its reach only tighten, as the extruder's velocity cap only
+/// trades the budget down.
+fn realizable_accel(m: &Move, reachable_mm_s: f64) -> f64 {
     let Some(segment) = &m.segment.spatial else {
         return m.limits.accel_mm_s2;
     };
     let (_, kappa_peak) = segment.kappa_peak();
     let path_ceiling = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
-    let z_held = z_capped(segment, &m.limits, kappa_peak, path_ceiling);
-    let (_, accel) = m.limits.extruder.map_or(z_held, |caps| {
-        let own = ExtrusionBudget {
-            ratio_in_reach: extruding_ratio(m, caps.axis_index),
-            ratio_step_in_reach: 0.0,
-            axes_in_reach: moves_on(segment),
-            rest_holds_s: [0.0; 2],
-            rest_room_mm: f64::INFINITY,
-            fastest_ceiling_mm_s: f64::INFINITY,
-            strongest_accel_mm_s2: 0.0,
+    let (z_ceiling, z_accel) = z_capped(segment, &m.limits, kappa_peak, path_ceiling);
+    let Some(caps) = m.limits.extruder else {
+        return z_accel;
+    };
+    extruder_accel_cap(
+        segment,
+        &caps,
+        own_reach(m, segment, &caps),
+        kappa_peak,
+        (z_ceiling.min(reachable_mm_s), z_accel),
+    )
+}
+
+/// What holds the leaders at a seam: the feed ceilings either side, and
+/// the disk of the sharper curvature there, `√(A/κ)` under a budget `A`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeamLimit {
+    pub ceiling_mm_s: f64,
+    pub kappa: f64,
+}
+
+impl SeamLimit {
+    fn ceiling(ceiling_mm_s: f64) -> Self {
+        Self {
+            ceiling_mm_s,
+            kappa: 0.0,
+        }
+    }
+
+    /// The speed limit under a budget `accel` on both sides.
+    pub fn at(&self, accel: f64) -> f64 {
+        self.ceiling_mm_s.min(disk::limit_speed(self.kappa, accel))
+    }
+}
+
+/// The fastest the leaders can cross a seam: at most its speed limit
+/// `w`, and at most `√(wᵢ² + 2·Σ Aₘ·Lₘ)` from any other seam `i` with the
+/// moves between at their acceleration limits. Kept with the limit of the
+/// seam that binds and the path from it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SeamReach {
+    speed_mm_s: f64,
+    limit: SeamLimit,
+    run_mm: f64,
+}
+
+impl SeamReach {
+    fn at(speed_mm_s: f64, limit: SeamLimit) -> Self {
+        Self {
+            speed_mm_s,
+            limit,
+            run_mm: 0.0,
+        }
+    }
+
+    fn rest() -> Self {
+        Self::at(0.0, SeamLimit::ceiling(0.0))
+    }
+
+    /// This seam's reach carried `length` along the path, accelerating at
+    /// `accel`.
+    fn across(self, length: f64, accel: f64) -> Self {
+        Self {
+            speed_mm_s: (self.speed_mm_s * self.speed_mm_s + 2.0 * accel * length).sqrt(),
+            run_mm: self.run_mm + length,
+            ..self
+        }
+    }
+
+    fn slower(self, other: Self) -> Self {
+        if other.speed_mm_s < self.speed_mm_s {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+/// One side of a seam as the move there limits it: the fastest the move
+/// lets the leaders cross the seam at the acceleration it can take, its
+/// feed ceiling and the curvature it meets the seam on, and the reach of
+/// the seams behind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SeamSide {
+    speed_mm_s: f64,
+    limit: SeamLimit,
+    forward: SeamReach,
+}
+
+impl SeamSide {
+    /// The start of a stream the leaders enter at `entry_mm_s`.
+    fn start(entry_mm_s: f64) -> Self {
+        let limit = SeamLimit::ceiling(entry_mm_s);
+        Self {
+            speed_mm_s: entry_mm_s,
+            limit,
+            forward: SeamReach::at(entry_mm_s, limit),
+        }
+    }
+
+    /// A move's side of a seam where it meets the seam on curvature
+    /// `kappa` under `ceiling`, accelerating at up to `accel`.
+    fn of(ceiling: f64, kappa: f64, accel: f64) -> Self {
+        let limit = SeamLimit {
+            ceiling_mm_s: ceiling,
+            kappa: kappa.abs(),
         };
-        extruder_capped(segment, &caps, &own, kappa_peak, z_held)
-    });
-    accel
+        Self {
+            speed_mm_s: limit.at(accel),
+            limit,
+            forward: SeamReach::rest(),
+        }
+    }
+
+    /// The seam where `self` meets `other`: the slower of their speeds,
+    /// the lower ceiling and the sharper curvature.
+    fn meeting(&self, other: &Self) -> (f64, SeamLimit) {
+        (
+            self.speed_mm_s.min(other.speed_mm_s),
+            SeamLimit {
+                ceiling_mm_s: self.limit.ceiling_mm_s.min(other.limit.ceiling_mm_s),
+                kappa: self.limit.kappa.max(other.limit.kappa),
+            },
+        )
+    }
+}
+
+/// The fastest the leaders can cross a move on the planned path,
+/// `peak_mm_s`, from the moves' feed ceilings, the disk limits at the seams
+/// and the rests, the leaders accelerating no faster than the extruder's
+/// acceleration cap on a move's own ratio lets its limit
+/// ([`reaching_accel`]): whatever acceleration and seam caps the planner
+/// derives, its plan of the move stays at or under it. The seams that
+/// bound it either side hold the leaders under `entry` and `exit`,
+/// `run_mm` apart along the path, the move among the moves between.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReachableSpeed {
+    pub peak_mm_s: f64,
+    pub entry: SeamLimit,
+    pub exit: SeamLimit,
+    pub run_mm: f64,
+}
+
+impl ReachableSpeed {
+    /// A move `length` long whose entry seam the leaders reach from behind
+    /// at `behind` and whose exit seam they reach from ahead at `ahead`,
+    /// under `ceiling` and accelerating at up to `accel`.
+    fn across(behind: SeamReach, ahead: SeamReach, ceiling: f64, accel: f64, length: f64) -> Self {
+        let peak = peak_between(behind.speed_mm_s, ahead.speed_mm_s, accel, length);
+        Self {
+            peak_mm_s: (peak * (1.0 + REACHABLE_SLACK)).min(ceiling),
+            entry: behind.limit,
+            exit: ahead.limit,
+            run_mm: behind.run_mm + ahead.run_mm + length,
+        }
+    }
+
+    /// The fastest the run peaks at with every move on it planned at a
+    /// budget `accel`.
+    pub fn run_peak(&self, accel: f64) -> f64 {
+        peak_between(
+            self.entry.at(accel),
+            self.exit.at(accel),
+            accel,
+            self.run_mm,
+        )
+    }
+}
+
+/// The fastest a path `length` long is crossed from `entry` to `exit`
+/// accelerating at up to `accel`.
+fn peak_between(entry: f64, exit: f64, accel: f64, length: f64) -> f64 {
+    let climb = 2.0 * accel * length;
+    (0.5 * (entry * entry + exit * exit + climb))
+        .min(entry * entry + climb)
+        .min(exit * exit + climb)
+        .sqrt()
 }
 
 /// What the extruder's demand while the leaders cross one move can draw on.
@@ -81,33 +281,59 @@ impl Reach {
 }
 
 /// One move as the reach reads it: where it lies along the stream's path,
-/// the fastest the leaders can cross it, the least time they take and the
-/// acceleration they may take it at, the spatial axes it moves on, what it
-/// extrudes, the reach of the extruder it is budgeted for, the extruder's
-/// caps, and where the leaders last rest before it. An extrude-only move
-/// is a rest of the leaders, and so is the stream's start.
+/// its feed ceiling, the acceleration it may take and the most the planner
+/// can plan it at ([`reaching_accel`]), the limit of the seam it starts
+/// at and the reach of the seams behind there, an extrude-only move's
+/// least time, the spatial axes it moves on, what it extrudes, the reach
+/// of the extruder it is budgeted for, the extruder's caps, where the
+/// leaders last rest before it, and once the moves after it bound how fast
+/// the leaders can cross it, that speed and what follows from it. An
+/// extrude-only move is a rest of the leaders, and so is the stream's
+/// start.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Mark {
     start_mm: f64,
     end_mm: f64,
     ceiling_mm_s: f64,
-    least_time_s: f64,
     accel_mm_s2: f64,
-    realizable_accel_mm_s2: f64,
+    reaching_accel_mm_s2: f64,
+    seam: SeamReach,
+    forward: SeamReach,
+    rest_time_s: f64,
     rest: bool,
     moves_on: [bool; 3],
     extruding: Option<(usize, f64)>,
     reach: Option<Reach>,
     extruder: Option<ExtruderCaps>,
     rest_behind_mm: f64,
+    settled: Option<Settled>,
+}
+
+/// What a mark's reachable speed settles: the speed, the least time the
+/// leaders take over the move, and the largest acceleration the move can
+/// be planned at ([`realizable_accel`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Settled {
+    reachable: ReachableSpeed,
+    least_time_s: f64,
+    realizable_accel_mm_s2: f64,
 }
 
 impl Mark {
+    fn length_mm(&self) -> f64 {
+        self.end_mm - self.start_mm
+    }
+
     fn ratio_on(&self, axis: usize) -> f64 {
         match self.extruding {
             Some((on, ratio)) if on == axis => ratio,
             _ => 0.0,
         }
+    }
+
+    fn settled(&self) -> Settled {
+        self.settled
+            .expect("a scan reads only marks whose reachable speed settled")
     }
 
     /// Its edge facing away from the move a scan starts at.
@@ -132,12 +358,13 @@ fn least_rest_to_rest_time(length: f64, speed: f64, accel: f64) -> f64 {
 }
 
 /// What the marks dropped from the history leave behind: where the last
-/// of them ends, their fastest ceiling, their largest acceleration and the
-/// largest they can realize, and the span of their ratios per axis.
+/// of them ends, the fastest the leaders reach on them, their largest
+/// acceleration and the largest they can realize, and the span of their
+/// ratios per axis.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Dropped {
     end_mm: f64,
-    ceiling_mm_s: f64,
+    reachable_mm_s: f64,
     accel_mm_s2: f64,
     realizable_accel_mm_s2: f64,
     ratios: Vec<(usize, RatioSpan)>,
@@ -145,10 +372,13 @@ struct Dropped {
 
 impl Dropped {
     fn absorb(&mut self, mark: &Mark) {
+        let settled = mark.settled();
         self.end_mm = mark.end_mm;
-        self.ceiling_mm_s = self.ceiling_mm_s.max(mark.ceiling_mm_s);
+        self.reachable_mm_s = self.reachable_mm_s.max(settled.reachable.peak_mm_s);
         self.accel_mm_s2 = self.accel_mm_s2.max(mark.accel_mm_s2);
-        self.realizable_accel_mm_s2 = self.realizable_accel_mm_s2.max(mark.realizable_accel_mm_s2);
+        self.realizable_accel_mm_s2 = self
+            .realizable_accel_mm_s2
+            .max(settled.realizable_accel_mm_s2);
         let Some((axis, ratio)) = mark.extruding else {
             return;
         };
@@ -274,10 +504,12 @@ struct Marks {
     extrude_only: ExtrudeOnly,
     last_rest_mm: f64,
     rests_mm: VecDeque<f64>,
+    tail: SeamSide,
+    settled_count: usize,
 }
 
 impl Marks {
-    fn new(extrude_only: ExtrudeOnly) -> Self {
+    fn new(extrude_only: ExtrudeOnly, entry_mm_s: f64) -> Self {
         Self {
             marks: VecDeque::new(),
             path_end_mm: 0.0,
@@ -285,26 +517,38 @@ impl Marks {
             extrude_only,
             last_rest_mm: 0.0,
             rests_mm: VecDeque::new(),
+            tail: SeamSide::start(entry_mm_s),
+            settled_count: 0,
         }
     }
 
     fn push(&mut self, m: &Move) {
         let start_mm = self.path_end_mm;
         let speed = m.feedrate_mm_s.min(m.limits.max_velocity_mm_s);
-        let (length, ceiling_mm_s, least_time_s) = match &m.segment.spatial {
-            Some(segment) => {
-                let length = segment.s_len();
-                (length, speed, length / speed)
-            }
-            None => (
-                0.0,
-                0.0,
-                least_rest_to_rest_time(
-                    m.segment.virtual_path_mm.unwrap_or(0.0),
-                    speed.min(self.extrude_only.velocity_mm_s),
-                    m.limits.accel_mm_s2.min(self.extrude_only.accel_mm_s2),
+        let accel = m.limits.accel_mm_s2;
+        let (length, ceiling_mm_s, (entry_kappa, exit_kappa), rest_time_s) =
+            match &m.segment.spatial {
+                Some(segment) => (segment.s_len(), speed, segment.kappa_endpoints(), 0.0),
+                None => (
+                    0.0,
+                    0.0,
+                    (0.0, 0.0),
+                    least_rest_to_rest_time(
+                        m.segment.virtual_path_mm.unwrap_or(0.0),
+                        speed.min(self.extrude_only.velocity_mm_s),
+                        accel.min(self.extrude_only.accel_mm_s2),
+                    ),
                 ),
-            ),
+            };
+        let reaching = reaching_accel(m);
+        let (entry_speed, entry_limit) =
+            self.tail
+                .meeting(&SeamSide::of(ceiling_mm_s, entry_kappa, reaching));
+        let seam = SeamReach::at(entry_speed, entry_limit);
+        let forward = self.tail.forward.slower(seam);
+        self.tail = SeamSide {
+            forward: forward.across(length, reaching),
+            ..SeamSide::of(ceiling_mm_s, exit_kappa, reaching)
         };
         self.path_end_mm += length;
         let rest = m.segment.spatial.is_none();
@@ -312,9 +556,11 @@ impl Marks {
             start_mm,
             end_mm: self.path_end_mm,
             ceiling_mm_s,
-            least_time_s,
-            accel_mm_s2: m.limits.accel_mm_s2,
-            realizable_accel_mm_s2: realizable_accel(m),
+            accel_mm_s2: accel,
+            reaching_accel_mm_s2: reaching,
+            seam,
+            forward,
+            rest_time_s,
             rest,
             moves_on: m.segment.spatial.as_ref().map_or([false; 3], moves_on),
             extruding: m
@@ -328,10 +574,86 @@ impl Marks {
                 .map(|caps| Reach::of(&caps)),
             extruder: m.limits.extruder,
             rest_behind_mm: self.last_rest_mm,
+            settled: None,
         });
         if rest {
             self.last_rest_mm = self.path_end_mm;
             self.rests_mm.push_back(self.path_end_mm);
+        }
+    }
+
+    /// The seam entering `marks[seam]`, its limit alone, the end of the
+    /// stream's a rest once it is closed; `None` past the moves known.
+    fn seam_at(&self, seam: usize, closed: bool) -> Option<SeamReach> {
+        match self.marks.get(seam) {
+            Some(mark) => Some(mark.seam),
+            None if closed => Some(SeamReach::rest()),
+            None => None,
+        }
+    }
+
+    /// The reach from ahead of the seam leaving `marks[index]`: its own
+    /// limit, and the limit of every seam ahead carried back to it, up to
+    /// where the climb back alone is as fast as the slowest so far. `None`
+    /// while moves still to come could lower it.
+    fn backward_at_exit(&self, index: usize, closed: bool) -> Option<SeamReach> {
+        if self.marks[index].rest {
+            return Some(SeamReach::rest());
+        }
+        let mut slowest = self.seam_at(index + 1, closed)?;
+        let mut back = SeamReach::rest();
+        for ahead in index + 1..self.marks.len() {
+            let mark = &self.marks[ahead];
+            back = back.across(mark.length_mm(), mark.reaching_accel_mm_s2);
+            if back.speed_mm_s >= slowest.speed_mm_s {
+                return Some(slowest);
+            }
+            let seam = self.seam_at(ahead + 1, closed)?;
+            slowest = slowest.slower(SeamReach {
+                speed_mm_s: libm::hypot(seam.speed_mm_s, back.speed_mm_s),
+                limit: seam.limit,
+                run_mm: back.run_mm,
+            });
+        }
+        Some(slowest)
+    }
+
+    /// Settles the reachable speed of every mark whose exit seam the moves
+    /// known bound, in order; `moves[index - first]` is `marks[index]`'s
+    /// move.
+    fn settle<M: std::ops::Index<usize, Output = Move> + ?Sized>(
+        &mut self,
+        closed: bool,
+        moves: &M,
+        first: usize,
+    ) {
+        while self.settled_count < self.marks.len() {
+            let index = self.settled_count;
+            let Some(ahead) = self.backward_at_exit(index, closed) else {
+                return;
+            };
+            let mark = self.marks[index];
+            let length = mark.length_mm();
+            let reachable = ReachableSpeed::across(
+                mark.forward,
+                ahead,
+                mark.ceiling_mm_s,
+                mark.reaching_accel_mm_s2,
+                length,
+            );
+            self.marks[index].settled = Some(Settled {
+                reachable,
+                least_time_s: if mark.rest {
+                    mark.rest_time_s
+                } else {
+                    length / reachable.peak_mm_s
+                },
+                realizable_accel_mm_s2: realizable_accel(
+                    &moves[index - first],
+                    reachable.peak_mm_s,
+                ),
+            });
+            self.settled_count += 1;
         }
     }
 
@@ -363,8 +685,9 @@ impl Marks {
             if elapsed > window_s {
                 return Some(folded);
             }
+            let settled = other.settled?;
             folded = absorb(folded, other);
-            elapsed += other.least_time_s;
+            elapsed += settled.least_time_s;
         }
         if elapsed > window_s {
             return Some(folded);
@@ -376,8 +699,8 @@ impl Marks {
         }
     }
 
-    /// The fastest ceiling on one side of `marks[index]` the leaders can
-    /// reach within `window_s`, `None` while moves still to come could.
+    /// The fastest the leaders reach on one side of `marks[index]` within
+    /// `window_s`, `None` while moves still to come could raise it.
     fn fastest_beside(
         &self,
         index: usize,
@@ -390,8 +713,8 @@ impl Marks {
             window_s,
             closed,
             0.0,
-            |fastest: f64, other| fastest.max(other.ceiling_mm_s),
-            |fastest, dropped| fastest.max(dropped.ceiling_mm_s),
+            |fastest: f64, other| fastest.max(other.settled().reachable.peak_mm_s),
+            |fastest, dropped| fastest.max(dropped.reachable_mm_s),
         )
     }
 
@@ -407,7 +730,7 @@ impl Marks {
             window_s,
             closed,
             0.0,
-            |strongest: f64, other| strongest.max(other.realizable_accel_mm_s2),
+            |strongest: f64, other| strongest.max(other.settled().realizable_accel_mm_s2),
             |strongest, dropped| strongest.max(dropped.realizable_accel_mm_s2),
         )
     }
@@ -472,8 +795,9 @@ impl Marks {
                     return Some(span);
                 }
                 span = span.with(other.ratio_on(reach.axis));
+                let settled = other.settled?;
                 let spill_left_s = reach.spill_s - elapsed;
-                elapsed += other.least_time_s;
+                elapsed += settled.least_time_s;
                 spill_edge = if elapsed <= reach.spill_s {
                     SpillEdge {
                         mm: other.far_edge_mm(ahead),
@@ -481,7 +805,7 @@ impl Marks {
                     }
                 } else {
                     in_spill = false;
-                    let spilled_mm = spill_left_s * other.ceiling_mm_s;
+                    let spilled_mm = spill_left_s * settled.reachable.peak_mm_s;
                     SpillEdge {
                         mm: other.near_edge_mm(ahead) + toward * spilled_mm,
                         behind_rest: other.rest,
@@ -513,12 +837,11 @@ impl Marks {
         }
     }
 
-    /// The fastest planned ceiling the leaders reach within the speed
-    /// window of `marks[index]`, `None` while moves still to come could
-    /// raise it.
+    /// The fastest the leaders reach within the speed window of
+    /// `marks[index]`, `None` while moves still to come could raise it.
     fn fastest_in_reach(&self, index: usize, reach: Reach, closed: bool) -> Option<f64> {
         let window_s = reach.speed_window_s();
-        let mut fastest = self.marks[index].ceiling_mm_s;
+        let mut fastest = self.marks[index].settled().reachable.peak_mm_s;
         for ahead in [false, true] {
             fastest = fastest.max(self.fastest_beside(index, ahead, window_s, closed)?);
         }
@@ -532,15 +855,15 @@ impl Marks {
     /// come could raise it.
     fn strongest_in_reach(&self, index: usize, reach: Reach, closed: bool) -> Option<f64> {
         let window_s = reach.speed_window_s();
-        let mut strongest = self.marks[index].realizable_accel_mm_s2;
+        let mut strongest = self.marks[index].settled().realizable_accel_mm_s2;
         for ahead in [false, true] {
             strongest = strongest.max(self.strongest_beside(index, ahead, window_s, closed)?);
         }
         Some(strongest)
     }
 
-    /// The ratios the demand of `marks[index]`, `reach` around it with
-    /// ceilings up to `fastest`, meets.
+    /// The ratios the demand of `marks[index]`, `reach` around it with the
+    /// leaders up to `fastest`, meets.
     fn ratio_in_reach(
         &self,
         index: usize,
@@ -558,8 +881,8 @@ impl Marks {
     /// rest behind or ahead of it — an extrude-only move or an end of the
     /// stream — where it is near enough to narrow the ratio ramp of a step
     /// there ([`rest_room_reach_mm`] of the fastest the shaped leaders cross
-    /// it, the planned ceilings around it up to `fastest`), infinite where
-    /// none is. `None` while moves still to come could bring one near.
+    /// it, the leaders around it up to `fastest`), infinite where none is.
+    /// `None` while moves still to come could bring one near.
     fn rest_room(&self, index: usize, reach: Reach, fastest: f64, closed: bool) -> Option<f64> {
         let mark = self.marks[index];
         let narrows_within = rest_room_reach_mm(reach.leader_spill.spill().mass * fastest);
@@ -615,7 +938,7 @@ impl Marks {
                 });
                 ShapedScan {
                     motion: ShapedMotion::wider(scan.motion, found),
-                    elapsed_s: scan.elapsed_s + other.least_time_s,
+                    elapsed_s: scan.elapsed_s + other.settled().least_time_s,
                     rested: false,
                 }
             },
@@ -697,7 +1020,7 @@ impl Marks {
             })
         });
         if let [Some(before), Some(after)] = motion {
-            let run_s: f64 = (first..=last).map(|at| self.marks[at].least_time_s).sum();
+            let run_s: f64 = (first..=last).map(|at| self.marks[at].rest_time_s).sum();
             let reaches = [settle.sides[0].reach_s, settle.sides[1].reach_s];
             let leads = [before.lead_s, after.lead_s];
             let short =
@@ -715,6 +1038,7 @@ impl Marks {
     }
 
     fn budget(&self, index: usize, closed: bool) -> Option<ExtrusionBudget> {
+        let reachable = self.marks[index].settled?.reachable;
         let extruding = match self.marks[index].reach {
             Some(reach) => {
                 let fastest = self.fastest_in_reach(index, reach, closed)?;
@@ -723,7 +1047,7 @@ impl Marks {
                     ratio_in_reach: ratios.largest,
                     ratio_step_in_reach: ratios.step(),
                     rest_room_mm: self.rest_room(index, reach, fastest, closed)?,
-                    fastest_ceiling_mm_s: fastest,
+                    fastest_reachable_mm_s: fastest,
                     strongest_accel_mm_s2: self.strongest_in_reach(index, reach, closed)?,
                 }
             }
@@ -735,8 +1059,9 @@ impl Marks {
             axes_in_reach: self.axes_in_reach(index, closed)?,
             rest_holds_s: self.rest_holds(index, closed)?,
             rest_room_mm: extruding.rest_room_mm,
-            fastest_ceiling_mm_s: extruding.fastest_ceiling_mm_s,
+            fastest_reachable_mm_s: extruding.fastest_reachable_mm_s,
             strongest_accel_mm_s2: extruding.strongest_accel_mm_s2,
+            reachable,
         })
     }
 
@@ -746,6 +1071,7 @@ impl Marks {
             self.rests_mm.pop_front();
         }
         self.dropped.absorb(&mark);
+        self.settled_count -= 1;
     }
 }
 
@@ -757,12 +1083,12 @@ impl Marks {
 /// there passes through, for an extrude-only move how long it holds the
 /// toolhead still before and after its own motion, so the extruder never
 /// adds the leaders' spill to it, the path from its start to the leaders'
-/// nearest rest where that narrows the ratio ramp of a step there, and the
-/// fastest planned ceiling within the leaders' reach of it, which bounds
-/// the shaped speed at its joins (infinite on a move no extruder budget
-/// reaches), and the largest acceleration a move within that reach may
-/// take, which a ratio ramp at its joins rides (0 on a move no extruder
-/// budget reaches).
+/// nearest rest where that narrows the ratio ramp of a step there, the
+/// fastest the leaders reach within their reach of it, which bounds the
+/// shaped speed at its joins (infinite on a move no extruder budget
+/// reaches), the largest acceleration a move within that reach may take,
+/// which a ratio ramp at its joins rides (0 on a move no extruder budget
+/// reaches), and the fastest the leaders can cross it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtrusionBudget {
     pub ratio_in_reach: f64,
@@ -770,8 +1096,9 @@ pub struct ExtrusionBudget {
     pub axes_in_reach: [bool; 3],
     pub rest_holds_s: [f64; 2],
     pub rest_room_mm: f64,
-    pub fastest_ceiling_mm_s: f64,
+    pub fastest_reachable_mm_s: f64,
     pub strongest_accel_mm_s2: f64,
+    pub reachable: ReachableSpeed,
 }
 
 /// The part of an [`ExtrusionBudget`] a move's extruder reach gives it.
@@ -779,7 +1106,7 @@ struct ExtrudingReach {
     ratio_in_reach: f64,
     ratio_step_in_reach: f64,
     rest_room_mm: f64,
-    fastest_ceiling_mm_s: f64,
+    fastest_reachable_mm_s: f64,
     strongest_accel_mm_s2: f64,
 }
 
@@ -788,7 +1115,7 @@ impl ExtrudingReach {
         ratio_in_reach: 0.0,
         ratio_step_in_reach: 0.0,
         rest_room_mm: f64::INFINITY,
-        fastest_ceiling_mm_s: f64::INFINITY,
+        fastest_reachable_mm_s: f64::INFINITY,
         strongest_accel_mm_s2: 0.0,
     };
 }
@@ -812,10 +1139,13 @@ impl ExtrusionReach {
     /// under these caps.
     pub fn new(max_extrude_only_velocity_mm_s: f64, max_extrude_only_accel_mm_s2: f64) -> Self {
         Self {
-            marks: Marks::new(ExtrudeOnly {
-                velocity_mm_s: max_extrude_only_velocity_mm_s,
-                accel_mm_s2: max_extrude_only_accel_mm_s2,
-            }),
+            marks: Marks::new(
+                ExtrudeOnly {
+                    velocity_mm_s: max_extrude_only_velocity_mm_s,
+                    accel_mm_s2: max_extrude_only_accel_mm_s2,
+                },
+                0.0,
+            ),
             pending: VecDeque::new(),
             closed: false,
             history_mm: 0.0,
@@ -851,8 +1181,9 @@ impl ExtrusionReach {
         if self.pending.is_empty() {
             return None;
         }
-        let index = self.marks.marks.len() - self.pending.len();
-        let budget = self.marks.budget(index, self.closed)?;
+        let first = self.marks.marks.len() - self.pending.len();
+        self.marks.settle(self.closed, &self.pending, first);
+        let budget = self.marks.budget(first, self.closed)?;
         let m = self.pending.pop_front().expect("a waiting move");
         self.forget_beyond_history();
         Some((m, budget))
@@ -889,20 +1220,25 @@ impl ExtrusionReach {
     }
 }
 
-/// [`ExtrusionReach`] over a whole stream at once, nothing before or after
-/// it.
+/// [`ExtrusionReach`] over a whole stream at once, the leaders entering it
+/// at `entry_mm_s` and resting after it, nothing else before or after it.
 pub fn extrusion_budgets(
     moves: &[Move],
+    entry_mm_s: f64,
     max_extrude_only_velocity_mm_s: f64,
     max_extrude_only_accel_mm_s2: f64,
 ) -> Vec<ExtrusionBudget> {
-    let mut marks = Marks::new(ExtrudeOnly {
-        velocity_mm_s: max_extrude_only_velocity_mm_s,
-        accel_mm_s2: max_extrude_only_accel_mm_s2,
-    });
+    let mut marks = Marks::new(
+        ExtrudeOnly {
+            velocity_mm_s: max_extrude_only_velocity_mm_s,
+            accel_mm_s2: max_extrude_only_accel_mm_s2,
+        },
+        entry_mm_s,
+    );
     for m in moves {
         marks.push(m);
     }
+    marks.settle(true, moves, 0);
     (0..moves.len())
         .map(|index| {
             marks

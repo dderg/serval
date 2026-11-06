@@ -154,7 +154,7 @@ fn arb_stream() -> impl Strategy<Value = Stream> {
                             )
                     })
                     .collect();
-                let budgets = extrusion_budgets(&moves, EXTRUDE_ONLY_V, EXTRUDE_ONLY_A);
+                let budgets = extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY_V, EXTRUDE_ONLY_A);
                 let window = plan_velocity_stops_select_prefix(
                     &moves,
                     &stop_before,

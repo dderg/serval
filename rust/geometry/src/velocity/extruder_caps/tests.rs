@@ -3,7 +3,8 @@ use crate::fitter::{CornerFitConfig, fit_corners};
 use crate::frontend::{LeaderSpillId, MoveContext, RestSettleId, VelocityLimits, line_move};
 use crate::path::{Arc, Line};
 use crate::segment::SourceRange;
-use crate::velocity::{plan_velocity_warm_start, warm_start_params};
+use crate::velocity::SeamLimit;
+use crate::velocity::{ReachableSpeed, plan_velocity_warm_start, warm_start_params};
 
 const RATIO: f64 = 0.03125;
 const X_GAIN: f64 = 1000.0;
@@ -41,8 +42,25 @@ fn around(ratio_in_reach: f64, axes_in_reach: [bool; 3]) -> ExtrusionBudget {
         axes_in_reach,
         rest_holds_s: [0.0; 2],
         rest_room_mm: f64::INFINITY,
-        fastest_ceiling_mm_s: f64::INFINITY,
+        fastest_reachable_mm_s: f64::INFINITY,
         strongest_accel_mm_s2: 0.0,
+        reachable: between_rests(50.0),
+    }
+}
+
+/// A move `length` long between rests.
+fn between_rests(length: f64) -> ReachableSpeed {
+    ReachableSpeed {
+        peak_mm_s: f64::INFINITY,
+        entry: SeamLimit {
+            ceiling_mm_s: 0.0,
+            kappa: 0.0,
+        },
+        exit: SeamLimit {
+            ceiling_mm_s: 0.0,
+            kappa: 0.0,
+        },
+        run_mm: length,
     }
 }
 

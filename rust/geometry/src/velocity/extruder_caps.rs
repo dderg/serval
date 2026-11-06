@@ -3,7 +3,7 @@ use crate::frontend::ExtruderCaps;
 use std::sync::Arc;
 
 use crate::frontend::LeaderSpill;
-use crate::path::{CurvatureProfile, Segment};
+use crate::path::Segment;
 use crate::ratio_ramp::{RatioStep, StepCrossing, longest_ramp_time, ramp_accel_at_rest_per_accel};
 
 use super::rate_cap::LinearRate;
@@ -67,10 +67,6 @@ struct Demand {
 }
 
 impl Demand {
-    fn velocity(&self, v: f64, accel: f64) -> f64 {
-        self.ratio * (v + self.slope * accel)
-    }
-
     fn velocity_rate(&self) -> LinearRate {
         LinearRate {
             per_velocity: self.ratio,
@@ -110,10 +106,11 @@ impl Demand {
 /// The speed ceiling and acceleration budget under which `segment`, with
 /// `budget` what its extruder demand can meet around it (see
 /// [`super::extrusion_reach::ExtrusionReach`]), asks the extruder for no more than
-/// its caps. The velocity steps an unshaped leader makes cap the budget
-/// first, then the acceleration cap takes the largest budget whose demand
-/// fits; when the velocity cap still binds, the ceiling or the budget gives
-/// way, whichever lets a profile from rest cross the segment sooner.
+/// its caps, the ceiling held to the fastest the plan can reach there. The
+/// velocity steps an unshaped leader makes cap the budget first, then the
+/// acceleration cap takes the largest budget whose demand fits at that
+/// ceiling ([`extruder_accel_cap`]); when the velocity cap still binds,
+/// the ceiling and the budget trade ([`LinearRate::capped`]).
 pub(super) fn extruder_capped(
     segment: &Segment,
     caps: &ExtruderCaps,
@@ -121,41 +118,91 @@ pub(super) fn extruder_capped(
     kappa_peak: f64,
     (ceiling, accel): (f64, f64),
 ) -> (f64, f64) {
-    let ratio_in_reach = budget.ratio_in_reach;
+    let reached = ceiling.min(budget.reachable.peak_mm_s);
+    let (demand, accel) = accel_fitted(
+        segment,
+        caps,
+        DemandReach::of(budget),
+        kappa_peak,
+        (reached, accel),
+    );
+    if demand.ratio == 0.0 {
+        return (reached, accel);
+    }
+    demand
+        .velocity_rate()
+        .capped(caps.max_velocity_mm_s, &budget.reachable, (ceiling, accel))
+}
+
+/// What a segment's extruder demand meets around it: the largest
+/// extrusion ratio, the largest step of it, and the spatial axes the path
+/// moves on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct DemandReach {
+    pub(super) ratio: f64,
+    pub(super) ratio_step: f64,
+    pub(super) axes: [bool; 3],
+}
+
+impl DemandReach {
+    fn of(budget: &ExtrusionBudget) -> Self {
+        Self {
+            ratio: budget.ratio_in_reach,
+            ratio_step: budget.ratio_step_in_reach,
+            axes: budget.axes_in_reach,
+        }
+    }
+}
+
+/// The largest budget up to `accel` under which `segment`, its demand
+/// meeting `reach`, asks the extruder's acceleration for no more than its
+/// cap at speeds up to `ceiling`, and whose advance velocity steps stay
+/// within the extruder's instantaneous corner velocity: the most the
+/// extruder lets the segment's plan take, which its velocity cap only
+/// trades down ([`extruder_capped`]).
+pub(super) fn extruder_accel_cap(
+    segment: &Segment,
+    caps: &ExtruderCaps,
+    reach: DemandReach,
+    kappa_peak: f64,
+    (ceiling, accel): (f64, f64),
+) -> f64 {
+    accel_fitted(segment, caps, reach, kappa_peak, (ceiling, accel)).1
+}
+
+fn accel_fitted(
+    segment: &Segment,
+    caps: &ExtruderCaps,
+    reach: DemandReach,
+    kappa_peak: f64,
+    (ceiling, accel): (f64, f64),
+) -> (Demand, f64) {
     let unshaped_plane_sq: f64 = (0..SPATIAL_AXES)
         .filter(|&axis| caps.unshaped_leaders[axis])
         .map(|axis| segment.lean_on(axis).plane.powi(2))
         .sum();
     let step_ramp_per_accel = if caps.plans_isolated_switches() {
-        ramp_accel_at_rest_per_accel(caps.advance_slope_s, budget.ratio_step_in_reach)
+        ramp_accel_at_rest_per_accel(caps.advance_slope_s, reach.ratio_step)
     } else {
         0.0
     };
     let demand = Demand {
-        ratio: budgeted_ratio(ratio_in_reach),
+        ratio: budgeted_ratio(reach.ratio),
         slope: caps.advance_slope_s,
         curvature: caps.advance_curvature_s2_per_mm,
-        path_gain: caps.planned_path_jerk_gain(budget.axes_in_reach),
+        path_gain: caps.planned_path_jerk_gain(reach.axes),
         own_gain: caps.own_jerk_per_accel_hz,
         kappa_peak,
         unshaped_share: unshaped_plane_sq.sqrt().min(1.0),
-        ratio_in_reach: ratio_in_reach.max(0.0),
+        ratio_in_reach: reach.ratio.max(0.0),
         step_ramp_per_accel,
     };
     let accel = accel.min(demand.velocity_step_accel_cap(caps.instantaneous_corner_velocity_mm_s));
     if demand.ratio == 0.0 {
-        return (ceiling, accel);
+        return (demand, accel);
     }
     let accel = largest_fitting_accel(&demand, ceiling, accel, caps.max_accel_mm_s2);
-    if demand.velocity(ceiling, accel) <= caps.max_velocity_mm_s {
-        return (ceiling, accel);
-    }
-    demand.velocity_rate().capped(
-        caps.max_velocity_mm_s,
-        segment.s_len(),
-        kappa_peak,
-        (ceiling, accel),
-    )
+    (demand, accel)
 }
 
 /// The extruder motor's velocity, `r·v + k·r·A`, at the ratio a segment
@@ -240,13 +287,14 @@ fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
 /// budget's reach can realize.
 ///
 /// The planned speeds within the leaders' reach of the join stay under the
-/// fastest ceiling either budget gives and within `A` of the join's, so the
-/// leaders' [`crate::LeaderSpill`] bounds their shaped speed at the join and
-/// half the ramp either side of it, where the planned speed is at most `A`
-/// times that faster, and their own advanced flow there ([`StepFlow`]); the
-/// shaped speed and the own flow fall continuously as the join slows.
-/// Infinite where the ratio does not move, no path carries it, or the
-/// leaders cross it within the limits at the fastest ceiling.
+/// fastest the leaders can reach there by either budget
+/// ([`super::extrusion_reach::ReachableSpeed`]) and within `A` of the
+/// join's, so the leaders' [`crate::LeaderSpill`] bounds their shaped speed
+/// at the join and half the ramp either side of it, where the planned speed
+/// is at most `A` times that faster, and their own advanced flow there
+/// ([`StepFlow`]); the shaped speed and the own flow fall continuously as
+/// the join slows. Infinite where the ratio does not move, no path carries
+/// it, or the leaders cross it within the limits at the fastest they reach.
 pub(super) fn ratio_step_ceiling(
     up: &crate::Move,
     dn: &crate::Move,
@@ -266,8 +314,8 @@ pub(super) fn ratio_step_ceiling(
         return f64::INFINITY;
     }
     let fastest = up_budget
-        .fastest_ceiling_mm_s
-        .min(dn_budget.fastest_ceiling_mm_s);
+        .fastest_reachable_mm_s
+        .min(dn_budget.fastest_reachable_mm_s);
     assert!(
         fastest.is_finite(),
         "the join into line {} extrudes with no extruder budget reaching it",
