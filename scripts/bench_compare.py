@@ -33,6 +33,7 @@ BINARIES = BENCH_DIR / "bin"
 CONFIGS = {
     "fast": "tools/bench/configs/fast.cfg",
     "printer": "tools/bench/printer.cfg",
+    "p4_ramp": "tools/bench/configs/profiles/p4_high_accel_ramp.cfg",
 }
 DEFAULT_GCODE = "tools/sim/gcode/voron_dense_top_layers.gcode"
 SUMMARY = re.compile(r"wall_secs=(?P<wall>[\d.]+) overall_x=(?P<x>[\d.]+)")
