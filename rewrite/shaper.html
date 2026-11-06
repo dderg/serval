@@ -2309,9 +2309,9 @@ toward a slow corner 14.8 mm on, and a ratio step the leaders crossed
 0.19 mm past the prime took the extruder to 1.2× <code>max_accel</code>.</p>
 <p>The cap searches the planned speed <code>v₀</code> at the join, not the shaped one.
 The planned speeds within the leaders' kernel reach of the join stay under
-the fastest ceiling <code>C</code> within the move's reach
-(<code>ExtrusionBudget::fastest_ceiling_mm_s</code>) and within <code>A</code> per second of
-<code>v₀</code>, so a kernel <code>w</code> shapes them into a speed of at most
+the fastest speed <code>C</code> the leaders can reach within the move's reach
+(<code>ExtrusionBudget::fastest_reachable_mm_s</code>, see below) and within <code>A</code> per
+second of <code>v₀</code>, so a kernel <code>w</code> shapes them into a speed of at most
 <code>∫|w(u)|·min(C, v₀ + A·|u|) du = mass·C − A·Φ((C − v₀)/A)</code>
 (<code>geometry::LeaderSpill</code>, which tabulates <code>Φ(x) = ∫|w|·(x − |u|)⁺</code> and its
 slope over 16 cells of the kernels' reach). It reaches <code>mass·C</code> as <code>v₀</code>
@@ -2324,6 +2324,21 @@ planned <code>v + k·a ≤ min(Q, v₀ + k·A + A·|u|)</code>, with <code>Q</co
 own flow never reaches <code>V_e</code> from the step's independent worst case of
 speed and budget, the way a noise step of <code>Δr ≤ 3e-5</code> once forced a stop
 at every such join of the Trident first layers.</p>
+<p>A move's reachable speed <code>U</code> (<code>ExtrusionBudget::reachable</code>) is the fastest
+the planner can cross it. It is the lesser of the move's feed ceiling and
+the envelope of the seam limits (the feed ceilings, the disks at the seams'
+curvature, the rests, the stream's ends) carried forward from behind and
+backward from ahead. Each move contributes the acceleration its extruder's
+acceleration cap leaves it on its own ratio at rest. <code>ExtrusionReach</code>
+computes <code>U</code> in the stream stage, so it is stable under windows and replan
+spans. The step cap, the ramp window (<code>0.5·C·τ_max</code>) and the rest room read
+the fastest <code>U</code> in reach. Each move's ceiling is held to <code>U</code>, which loses
+the plan nothing. Where <code>r_b·(v + k·A) ≤ V_e</code> still binds, the ceiling and
+the budget trade on that line: the pair taken is the one that crosses the
+run between the seams bounding <code>U</code> soonest, never a ceiling the run cannot
+reach (<code>LinearRate::capped</code>). The step-capacity cap trades the same way.
+A looser <code>max_velocity</code> therefore no longer drops the budget for a ceiling
+the plan never reaches.</p>
 <p>Without a follower kernel the acceleration the ramp adds is read at the
 ramp's edges, half the longest ramp either side of the join: the smoothed
 ratio's curvature steps there and the advance turns it into <code>k·r̃″·v³</code>, and
