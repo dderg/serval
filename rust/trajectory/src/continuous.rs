@@ -61,6 +61,7 @@ pub struct AnalyticMoveSpan {
     pub t_end: f64,
     pub axis_start_positions: Arc<[f64]>,
     pub surface: SurfaceMode,
+    clock_rate: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -290,6 +291,7 @@ impl AnalyticMoveSpan {
                 });
             }
         }
+        let clock_rate = phases[phases.len() - 1].end_time() / duration;
         Ok(Self {
             source,
             phases,
@@ -298,7 +300,53 @@ impl AnalyticMoveSpan {
             t_end,
             axis_start_positions,
             surface,
+            clock_rate,
         })
+    }
+
+    /// The rate the phases' clock runs at against stream time. The phases
+    /// last their own summed durations; the span holds `[t_start, t_end]`,
+    /// that sum rounded onto the stream clock. Read at the stream's rate the
+    /// phases would end an ulp-scale stretch before `t_end` and stand still
+    /// across it, or be cut short of their end at it: either way the span's
+    /// position leaves its velocity behind next to the seam with the next
+    /// span. Stretched by this rate they end exactly at `t_end`.
+    pub fn clock_rate(&self) -> f64 {
+        self.clock_rate
+    }
+
+    /// The phase time at stream time `t`, unclamped.
+    pub fn phase_time(&self, t: f64) -> f64 {
+        (t - self.t_start) * self.clock_rate
+    }
+
+    /// The stream time at phase time `local`.
+    pub fn stream_time(&self, local: f64) -> f64 {
+        self.t_start + local / self.clock_rate
+    }
+
+    fn phase_time_within(&self, t: f64) -> f64 {
+        self.phase_time(t)
+            .clamp(0.0, self.phases[self.phases.len() - 1].end_time())
+    }
+
+    /// The first stream time whose phase time is past `local`, so a seam
+    /// computed in phase time never lands on the phase it leaves once
+    /// rounded onto the stream clock.
+    fn boundary_time(&self, local: f64) -> f64 {
+        let mut boundary = self.stream_time(local);
+        loop {
+            let previous = next_toward(boundary, f64::NEG_INFINITY);
+            if self.phase_time(previous) > local {
+                boundary = previous;
+            } else {
+                break;
+            }
+        }
+        while self.phase_time(boundary) <= local {
+            boundary = next_toward(boundary, f64::INFINITY);
+        }
+        boundary
     }
 
     pub fn has_variable_surface(&self) -> bool {
@@ -312,7 +360,7 @@ impl AnalyticMoveSpan {
         self.phases
             .iter()
             .take(self.phases.len().saturating_sub(1))
-            .map(|phase| analytic_phase_boundary(self.t_start, phase.end_time()))
+            .map(|phase| self.boundary_time(phase.end_time()))
     }
 
     /// Each velocity phase with the absolute times the evaluator reads it
@@ -338,9 +386,10 @@ impl AnalyticMoveSpan {
     /// it.
     pub fn cap_contact_times(&self) -> impl Iterator<Item = f64> + '_ {
         self.phases.iter().flat_map(|phase| {
-            phase.cap_contact_times().into_iter().map(|local| {
-                analytic_phase_boundary(self.t_start, local).clamp(self.t_start, self.t_end)
-            })
+            phase
+                .cap_contact_times()
+                .into_iter()
+                .map(|local| self.boundary_time(local).clamp(self.t_start, self.t_end))
         })
     }
 
@@ -362,7 +411,7 @@ impl AnalyticMoveSpan {
                 let phase = self.phases.iter().find(|phase| {
                     transition.s >= phase.s0 && transition.s <= phase.end_distance()
                 })?;
-                Some(self.t_start + phase.time_at_distance(transition.s)?)
+                Some(self.stream_time(phase.time_at_distance(transition.s)?))
             })
             .collect()
     }
@@ -455,7 +504,7 @@ impl AnalyticMoveSpan {
     }
 
     fn tangential_state(&self, t: f64) -> (f64, f64, f64, f64) {
-        let local_t = (t - self.t_start).clamp(0.0, self.t_end - self.t_start);
+        let local_t = self.phase_time_within(t);
         let segment = active_phase(&self.phases, local_t);
         let (phase_s, velocity, acceleration) = segment.state_at(local_t);
         let jerk = match segment.law {
@@ -473,11 +522,12 @@ impl AnalyticMoveSpan {
                 }
             }
         };
+        let rate = self.clock_rate;
         (
             phase_s - self.source_distance_origin,
-            velocity,
-            acceleration,
-            jerk,
+            velocity * rate,
+            acceleration * rate * rate,
+            jerk * rate * rate * rate,
         )
     }
 
@@ -1340,25 +1390,6 @@ impl ClockedMotorSpan {
             .collect()
     }
 }
-/// The first time strictly after `span_start + local_boundary` in absolute
-/// time, so a seam computed in span-local time never lands on the phase it
-/// leaves once rounded into the absolute frame.
-pub fn analytic_phase_boundary(span_start: f64, local_boundary: f64) -> f64 {
-    let mut boundary = span_start + local_boundary;
-    loop {
-        let previous = next_toward(boundary, f64::NEG_INFINITY);
-        if previous - span_start > local_boundary {
-            boundary = previous;
-        } else {
-            break;
-        }
-    }
-    while boundary - span_start <= local_boundary {
-        boundary = next_toward(boundary, f64::INFINITY);
-    }
-    boundary
-}
-
 pub fn next_toward(value: f64, toward: f64) -> f64 {
     if value == toward {
         return value;
@@ -1576,10 +1607,13 @@ fn analytic_group_pva(
             acceleration: 0.0,
         });
     }
-    let local_t = checked_clamped_time(t, span.t_start, span.t_end)
-        .map_err(|error| (error, source_axis))?
-        - span.t_start;
-    let (phase_s, velocity, acceleration) = active_phase(&span.phases, local_t).state_at(local_t);
+    let local_t = span.phase_time_within(
+        checked_clamped_time(t, span.t_start, span.t_end).map_err(|error| (error, source_axis))?,
+    );
+    let (phase_s, phase_velocity, phase_acceleration) =
+        active_phase(&span.phases, local_t).state_at(local_t);
+    let rate = span.clock_rate;
+    let (velocity, acceleration) = (phase_velocity * rate, phase_acceleration * rate * rate);
     let s = phase_s - span.source_distance_origin;
     let length = span.source.segment.s_len();
     let mut spatial = [0.0; 3];
@@ -2360,8 +2394,8 @@ where
     if matches!(&span.surface, SurfaceMode::Variable(_)) {
         return Err(ContinuousError::VariableSurfaceBeforeDispatch);
     }
-    let local0 = checked_clamped_time(t0, span.t_start, span.t_end)? - span.t_start;
-    let local1 = checked_clamped_time(t1, span.t_start, span.t_end)? - span.t_start;
+    let local0 = span.phase_time_within(checked_clamped_time(t0, span.t_start, span.t_end)?);
+    let local1 = span.phase_time_within(checked_clamped_time(t1, span.t_start, span.t_end)?);
     if local1 < local0 {
         return Err(ContinuousError::InvalidSpan {
             reason: "bounds interval is reversed",
@@ -2414,7 +2448,13 @@ where
     if q_min == 0.0 && q_max == 0.0 && q_prime_abs == 0.0 {
         return Ok(zero_bounds());
     }
-    let (v_min, v_max, a_abs) = scalar_phase_bounds(&span.phases, local0, local1);
+    let (phase_v_min, phase_v_max, phase_a_abs) = scalar_phase_bounds(&span.phases, local0, local1);
+    let rate = span.clock_rate;
+    let (v_min, v_max, a_abs) = (
+        phase_v_min * rate,
+        phase_v_max * rate,
+        phase_a_abs * rate * rate,
+    );
     let products = [v_min * q_min, v_min * q_max, v_max * q_min, v_max * q_max];
     let velocity_min = products.into_iter().fold(f64::INFINITY, f64::min);
     let velocity_max = products.into_iter().fold(f64::NEG_INFINITY, f64::max);
