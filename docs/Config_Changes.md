@@ -75,7 +75,7 @@ machines it fell below 3× realtime on a single core. Configs that set
 either option keep it, and setting both is still an error. To keep
 the old corners, set `square_corner_velocity: 5` explicitly. The
 measurements behind the value are in the
-[motion config reference](Config_Reference_Motion.md#why-the-corner-budget-defaults-to-004-mm).
+[motion config reference](Config_Reference_Motion.md#corner-budget-on-the-shaped-path).
 
 20260729: CAN bus micro-controllers are supported again on this fork.
 `[mcu] canbus_uuid` is accepted instead of `serial`, alongside a new
