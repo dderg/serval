@@ -2,10 +2,11 @@
 // linux-process MCU, so a live test can home a stepper without hardware.
 //
 // /dev/gpiochip<KV2_GPIO_SIM_CHIP> exists only in memory. Its line
-// KV2_GPIO_SIM_STEP counts a step on every level change (the linux MCU
-// steps on both edges), KV2_GPIO_SIM_DIR gives the direction (high is
-// positive), and input line KV2_GPIO_SIM_ENDSTOP reads 1 once the stepper
-// is KV2_GPIO_SIM_TRIP_STEPS (signed) or further from where it started.
+// KV2_GPIO_SIM_STEP counts a step on every rising edge (the stepper is
+// configured with step pulses), KV2_GPIO_SIM_DIR gives the direction (high
+// is positive), and input line KV2_GPIO_SIM_ENDSTOP reads 1 once the
+// stepper is KV2_GPIO_SIM_TRIP_STEPS (signed) or further from where it
+// started.
 // Every other path and descriptor goes to libc.
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -117,7 +118,8 @@ static void
 set_level(enum role role, int level)
 {
     if (role == STEP && level != step_level) {
-        position += dir_level ? 1 : -1;
+        if (level)
+            position += dir_level ? 1 : -1;
         step_level = level;
     } else if (role == DIR) {
         dir_level = level;
