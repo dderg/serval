@@ -7,7 +7,7 @@ use proptest::test_runner::FileFailurePersistence;
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::{
-    FollowerState, OdometerLeaves, SpanSide, Table as SpanTable, shaped_leader_arc_length,
+    FollowerState, OdometerLeaves, SpanSide, Table as SpanTable, shaped_leader_odometer,
 };
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
@@ -770,8 +770,6 @@ fn moving_leg<'a>(
     start_s: f64,
 ) -> RampLeg<'a> {
     RampLeg {
-        shaped,
-        leaders: &[0, 1],
         shaped_leaders,
         odometer,
         support: (shaped.t_start, shaped.t_end),
@@ -783,7 +781,7 @@ fn moving_leg<'a>(
 /// The odometer ingest sums the arc of the leaders `shaped_leaders` read
 /// off `shaped` with.
 fn odometer(shaped: &ContinuousSegment, shaped_leaders: &ShapedLeaders) -> OdometerLeaves {
-    shaped_leader_arc_length(shaped, &[0, 1], shaped_leaders).1
+    shaped_leader_odometer(shaped, &[0, 1], shaped_leaders)
 }
 
 /// The width field's time samples from `t0` on, as `(s − s0, t − t0)`.
@@ -869,8 +867,6 @@ fn a_rest_valley_covers_the_ratio_step_its_leg_lays_short_of_the_rest() {
     let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
     let shaped_odometer = odometer(&shaped, &shaped_leaders);
     let leg = RampLeg {
-        shaped: &shaped,
-        leaders: &[0, 1],
         shaped_leaders: &shaped_leaders,
         odometer: &shaped_odometer,
         support: (shaped.t_start, shaped.t_end),
@@ -971,8 +967,6 @@ fn the_width_rests_on_the_ratio_step_a_resting_leg_lays_beside_the_rest() {
         let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
         let shaped_odometer = odometer(&shaped, &shaped_leaders);
         let leg = RampLeg {
-            shaped: &shaped,
-            leaders: &[0, 1],
             shaped_leaders: &shaped_leaders,
             odometer: &shaped_odometer,
             support: (shaped.t_start, shaped.t_end),
@@ -1889,6 +1883,49 @@ fn a_crawl_right_before_a_legs_end_is_found_whichever_seam_is_slower() {
         assert!(
             (crossing.speed - CRAWL_LEG_SIDEWAYS_MM_S).abs() < 1e-6,
             "the crawl at the reversal at t={reversal_t} crosses as {crossing:?}"
+        );
+    }
+}
+
+#[test]
+fn a_legs_path_and_width_samples_read_the_odometer_its_table_was_laid_from() {
+    let (shaped, _) = reversing_just_before_its_end(3.0, 0.0);
+    let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+    let shaped_odometer = shaped_leader_odometer(&shaped, &[0, 1], &shaped_leaders);
+    let start_s = 2821.5;
+    let table_end = start_s + shaped_odometer.total();
+    let leg = moving_leg(&shaped, (&shaped_leaders, &shaped_odometer), start_s);
+    let path = super::LegPath::of(&shaped_leaders, &leg);
+    let (t0, t1) = (shaped.t_start, shaped.t_end);
+    assert_eq!(
+        start_s + path.covered(t1),
+        table_end,
+        "the leg's path ends where its table does"
+    );
+    for k in 1..64 {
+        let t = t0 + (t1 - t0) * f64::from(k) / 64.0;
+        assert_eq!(
+            path.covered(t),
+            shaped_odometer.covered_until(t),
+            "the leg's path at t={t} is not the odometer's"
+        );
+    }
+    let mut field = WidthField::default();
+    field.extend(&shaped_leaders, &leg, table_end);
+    let samples: Vec<(f64, f64)> = field
+        .candidates
+        .iter()
+        .filter_map(|candidate| match candidate {
+            super::Candidate::Time(sample) => Some((sample.s, sample.t)),
+            _ => None,
+        })
+        .collect();
+    assert!(samples.len() > 1, "the leg samples the width");
+    for (s, t) in samples {
+        assert_eq!(
+            s,
+            (start_s + shaped_odometer.covered_until(t)).min(table_end),
+            "the width sample at t={t} is not on the odometer's path"
         );
     }
 }

@@ -532,6 +532,11 @@ rounding makes.
 - The velocity change the singular term makes across the sliver,
   `2·G·J·√τ`, must stay within the allowance. A larger one is refused
   before the fit with `PostProcessError::UnshapedLeaderOnsetVelocityStep`.
+- A sliver ends or opens a segment's fit where a cap's departure lies on
+  the segment's seam. What that fit's velocity sits off the signal's there
+  (`RampedSeam::onset_offset`) is part of the seam's velocity step: a
+  kernel-free emission carries it as a C0 corner, as it carries the
+  advance's own step, and welds only the residual beyond both.
 
 ### The ratio ramp in enclosures
 

@@ -5,11 +5,10 @@ use geometry::{
     RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
     TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around, valley_reach,
 };
-use trajectory::ContinuousSegment;
 
 use super::{
     FloorLeaders, LeaderReads, OdometerLeaves, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM,
-    ShapedLeaders, Table, axis_grid, integrate,
+    ShapedLeaders, Table,
 };
 
 mod crawl_sides;
@@ -121,8 +120,6 @@ const REST_REFINEMENTS: usize = 64;
 /// instant of it (the odometer ingest summed its arc with), and whether its
 /// raw leaders rest along it (an extrude-only move or a dwell).
 pub(super) struct RampLeg<'a> {
-    pub(super) shaped: &'a ContinuousSegment,
-    pub(super) leaders: &'a [usize],
     pub(super) shaped_leaders: &'a ShapedLeaders<'a>,
     pub(super) odometer: &'a OdometerLeaves,
     pub(super) support: (f64, f64),
@@ -1269,7 +1266,7 @@ impl WidthField {
     /// off an exact zero (1e-14 mm/s, 1e-9 mm/s²). Ticks in a time gap
     /// before `leg`, legal only at rest, sample its start.
     fn extend(&mut self, leaders: &ShapedLeaders, leg: &RampLeg, table_end: f64) {
-        let grid = axis_grid(leg.shaped, leg.leaders);
+        let grid = &leg.odometer.grid;
         let (t0, t1) = (grid[0], grid[grid.len() - 1]);
         let opens_from_standstill = leaders.speed(t0) <= REST_SPEED_MM_S
             && leaders.accel_norm(t0) <= REST_SPEED_MM_S / NODE_SPACING_S;
@@ -1283,23 +1280,13 @@ impl WidthField {
         if self.nodes.is_empty() && self.candidates.is_empty() {
             self.place_rest(leg.start_s);
         }
-        let speed = |t: f64| leaders.speed(t);
-        let (mut knot, mut at, mut covered) = (1, t0, 0.0);
         loop {
             let t = ticks.time(ticks.next);
             if t >= t1 {
                 break;
             }
-            if t > t0 {
-                while knot < grid.len() - 1 && grid[knot] < t {
-                    covered += integrate(&speed, at, grid[knot]);
-                    at = grid[knot];
-                    knot += 1;
-                }
-                covered += integrate(&speed, at, t);
-                at = t;
-            }
-            self.place_sample((leg.start_s + covered).min(table_end), t.max(t0));
+            let s = leg.start_s + leg.odometer.covered_until(t);
+            self.place_sample(s.min(table_end), t.max(t0));
             ticks.next += 1;
         }
         self.grid = Some(ticks);
@@ -3306,24 +3293,22 @@ impl RestSide {
 /// [`REST_TARGET_MM`], the width field's rest, between two width nodes.
 const REST_SPEED_MM_S: f64 = REST_TARGET_MM / NODE_SPACING_S;
 
-/// The path the leaders of a leg cover from its start, by time. The
-/// integral over each whole knot interval is taken once and the running
-/// sum kept, so a covered path sums the same terms in the same order as
-/// summing every interval afresh.
+/// The path the leaders of a leg cover from its start, by time, read off
+/// the odometer whose arc its table laid.
 struct LegPath<'l, 'a> {
     leaders: &'l ShapedLeaders<'a>,
-    grid: Vec<f64>,
+    odometer: &'l OdometerLeaves,
+    grid: &'l [f64],
     start_s: f64,
-    whole: std::cell::RefCell<Vec<f64>>,
 }
 
 impl<'l, 'a> LegPath<'l, 'a> {
-    fn of(leaders: &'l ShapedLeaders<'a>, leg: &RampLeg) -> Self {
+    fn of(leaders: &'l ShapedLeaders<'a>, leg: &RampLeg<'l>) -> Self {
         Self {
             leaders,
-            grid: axis_grid(leg.shaped, leg.leaders),
+            odometer: leg.odometer,
+            grid: &leg.odometer.grid,
             start_s: leg.start_s,
-            whole: std::cell::RefCell::new(vec![std::iter::empty::<f64>().sum()]),
         }
     }
 
@@ -3331,28 +3316,8 @@ impl<'l, 'a> LegPath<'l, 'a> {
         self.leaders.speed(t)
     }
 
-    /// The path covered by `t`: every knot interval ending by it whole,
-    /// and the part of the next one up to it.
     fn covered(&self, t: f64) -> f64 {
-        let grid = &self.grid;
-        let mut whole_intervals = grid[1..].partition_point(|&end| end <= t);
-        while whole_intervals > 0 && grid[whole_intervals - 1] >= t {
-            whole_intervals -= 1;
-        }
-        let mut whole = self.whole.borrow_mut();
-        while whole.len() <= whole_intervals {
-            let index = whole.len() - 1;
-            let sum =
-                whole[index] + integrate(&|time| self.speed(time), grid[index], grid[index + 1]);
-            whole.push(sum);
-        }
-        let through_whole = whole[whole_intervals];
-        match grid.get(whole_intervals + 1) {
-            Some(_) if grid[whole_intervals] < t => {
-                through_whole + integrate(&|time| self.speed(time), grid[whole_intervals], t)
-            }
-            _ => through_whole,
-        }
+        self.odometer.covered_until(t)
     }
 
     /// When the leaders reach path `s`: the leg's start for a seam laid

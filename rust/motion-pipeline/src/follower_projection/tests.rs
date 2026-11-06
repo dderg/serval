@@ -7,7 +7,7 @@ use trajectory::{CompiledChain, ContinuousAxis, ContinuousSegment, PostProcessor
 
 use crate::lowering::AccelBudget;
 
-use super::{FollowerSignal, FollowerState, LeaderReads, ShapedLeaders, integrate};
+use super::{FollowerSignal, FollowerState, LeaderReads, ShapedLeaders};
 use crate::shaper::TrackSignal;
 
 impl<'a> FollowerSignal<'a> {
@@ -34,8 +34,24 @@ impl<'a> FollowerSignal<'a> {
 
 fn leader_reads(shaped: &ContinuousSegment, leaders: &[usize]) -> LeaderReads {
     let shaped_leaders = ShapedLeaders::of(shaped, leaders);
-    let (_, odometer) = super::shaped_leader_arc_length(shaped, leaders, &shaped_leaders);
+    let odometer = super::shaped_leader_odometer(shaped, leaders, &shaped_leaders);
     shaped_leaders.into_reads(odometer)
+}
+
+fn integrate(f: &impl Fn(f64) -> f64, a: f64, b: f64) -> f64 {
+    let mut total = 0.0;
+    super::adaptive_gauss_kronrod(
+        &|a, b, tol, last_chance| {
+            let (kronrod, gauss) =
+                super::kronrod_and_gauss(&super::kronrod_samples(f, a, b), 0.5 * (b - a));
+            (last_chance || (kronrod - gauss).abs() <= tol).then_some(kronrod)
+        },
+        (a, b),
+        super::INTEGRAL_TOL_MM,
+        super::INTEGRAL_MAX_DEPTH,
+        &mut |_, value| total += value,
+    );
+    total
 }
 
 fn jerk_at(sig: &FollowerSignal, t: f64) -> f64 {
@@ -784,6 +800,134 @@ fn a_rounding_residual_welds_over_a_sliver_segment() {
     .expect("a one-ulp residual welds over any window");
     let pieces = weld.apply(pieces);
     assert_eq!(274.421_090_221_287 + pieces[0].coeffs[0], emitted.0);
+}
+
+fn neptune_onset_seam(
+    advanced_velocity: f64,
+    leader_speed: f64,
+    onset_offset: f64,
+) -> super::SeamInput {
+    super::SeamInput {
+        velocity: 1.348_009_019_554_786_7,
+        ratio: 0.033_652_767_374_986_24,
+        leader_speed,
+        s: 1_915.428_758_410_382,
+        ratio_slope: -1.957_686_811_472_855_7e-6,
+        ramped: Some(super::RampedSeam {
+            read_velocity: 1.348_009_019_554_786_7,
+            read_slope: -1.957_686_811_472_855_7e-6,
+            advanced_velocity,
+            onset_offset,
+        }),
+    }
+}
+
+#[test]
+fn a_seam_carries_the_velocity_a_fit_leaves_inside_an_onset_sliver() {
+    let (start, end) = (50.437_853_880_006_64, 50.453_007_785_015_86);
+    let emitted = (53.969_973_570_288_55, 1.062_546_059_212_073);
+    let left_advanced_velocity = 1.347_914_777_662_893_7;
+    let left_end = neptune_onset_seam(
+        left_advanced_velocity,
+        40.056_409_166_419_65,
+        emitted.1 - left_advanced_velocity,
+    );
+    let right_start = neptune_onset_seam(1.347_914_793_084_869_6, 40.056_409_166_923_82, 0.0);
+    let fitted_start_velocity = 1.347_915_6;
+    let pieces = vec![BezierPiece {
+        u_start: start,
+        u_end: end,
+        coeffs: vec![0.0, fitted_start_velocity, 0.5 * 143.0],
+    }];
+    let carried = left_end.emitted_velocity_step(&right_start);
+    let window = super::WeldWindow {
+        axis: 3,
+        start,
+        end,
+        tol: crate::lowering::FitTol::absolute(1.682_658_071_466_943_3e-4, 50.0),
+    };
+    let weld = super::SeamWeld::spanning(window, emitted, carried, emitted.0, &pieces)
+        .unwrap_or_else(|refused| {
+            panic!("the seam welds the fit's onset velocity instead of carrying it: {refused}")
+        });
+    let welded = weld.apply(pieces);
+    assert!(
+        (welded[0].coeffs[1] - (emitted.1 + carried)).abs() <= 1e-12,
+        "the welded track opens at {} mm/s, not the emitted {} mm/s and the carried step {carried}",
+        welded[0].coeffs[1],
+        emitted.1
+    );
+    assert!(
+        (carried - (left_advanced_velocity - emitted.1)).abs() <= 1e-6,
+        "the seam carries {carried} mm/s, not what the fit left inside the sliver"
+    );
+}
+
+#[test]
+fn a_fit_holds_its_velocity_offset_at_an_end_inside_an_onset_sliver() {
+    let square = [
+        [0.0, 0.0],
+        [10.0, 0.0],
+        [10.0, 10.0],
+        [0.0, 10.0],
+        [0.0, 0.0],
+    ];
+    let stage = trajectory::ChainStage::DerivativeGains { k1: 0.01, k2: 0.0 };
+    let fit_tol = crate::lowering::FitTol::absolute(0.005, 50.0);
+    let mut ends_inside = 0usize;
+    for segment in unshaped_segments(&square, 200.0) {
+        let state = extruding_on(&segment);
+        let source = super::FollowerSource {
+            shaped: &segment,
+            raw: &segment,
+            axis: 3,
+            leaders: &[0, 1],
+            reads: &leader_reads(&segment, &[0, 1]),
+            state: &state,
+            s_start: 0.0,
+            s_length: super::leader_arc_length(&segment, &[0, 1]),
+        };
+        let fitted = super::fit_source_projection(source, fit_tol, Some(kernel_advance(&stage)))
+            .expect("the square fits under its onsets' exemption");
+        let pieces = super::extract_bezier_pieces(&fitted.track);
+        let (t_start, t_end) = (pieces[0].u_start, pieces[pieces.len() - 1].u_end);
+        let sig = resting_follower(&segment, &state);
+        let slivers = super::AdvancedFollowerSignal::new(
+            &sig,
+            kernel_advance(&stage),
+            &[],
+            super::follower_fit_tol(fit_tol, 0.5 * fitted.tol_scale),
+        )
+        .onset_slivers(t_start, t_end)
+        .expect("analytic leaders have formulas");
+        for (seam, t, fitted_velocity) in [
+            (
+                fitted.input_start,
+                t_start,
+                super::piece_run_start_pv(&pieces).1,
+            ),
+            (fitted.input_end, t_end, super::piece_run_end_pv(&pieces).1),
+        ] {
+            let ramped = seam.ramped.expect("an advanced seam reads its advance");
+            let inside = slivers
+                .iter()
+                .any(|sliver| sliver.from <= t && t <= sliver.to);
+            let expected = if inside {
+                fitted_velocity - ramped.advanced_velocity
+            } else {
+                0.0
+            };
+            assert_eq!(
+                ramped.onset_offset, expected,
+                "the seam at t={t} holds the wrong onset offset"
+            );
+            ends_inside += usize::from(inside);
+        }
+    }
+    assert!(
+        ends_inside > 0,
+        "no segment of the square ends inside an onset sliver"
+    );
 }
 
 fn leader_segment(
