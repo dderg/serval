@@ -325,6 +325,23 @@ impl Marks {
         )
     }
 
+    fn strongest_beside(
+        &self,
+        index: usize,
+        ahead: bool,
+        window_s: f64,
+        closed: bool,
+    ) -> Option<f64> {
+        self.fold_beside(
+            (index, ahead),
+            window_s,
+            closed,
+            0.0,
+            |strongest: f64, other| strongest.max(other.accel_mm_s2),
+            |strongest, dropped| strongest.max(dropped.accel_mm_s2),
+        )
+    }
+
     /// The spatial axes the path moves on within the leaders' spill of
     /// `marks[index]`, up to the first rest either side, which the rest
     /// holds keep the shaped path still across: the shaped path there moves
@@ -427,6 +444,19 @@ impl Marks {
             fastest = fastest.max(self.fastest_beside(index, ahead, window_s, closed)?);
         }
         Some(fastest)
+    }
+
+    /// The largest acceleration a move within the speed window of
+    /// `marks[index]` may take, its own included: what the toolhead may do
+    /// over the reach of a ratio ramp at its joins, however a short move
+    /// beside it is slowed. `None` while moves still to come could raise it.
+    fn strongest_in_reach(&self, index: usize, reach: Reach, closed: bool) -> Option<f64> {
+        let window_s = reach.speed_window_s();
+        let mut strongest = self.marks[index].accel_mm_s2;
+        for ahead in [false, true] {
+            strongest = strongest.max(self.strongest_beside(index, ahead, window_s, closed)?);
+        }
+        Some(strongest)
     }
 
     /// The largest ratio the demand of `marks[index]`, `reach` around it
@@ -614,6 +644,7 @@ impl Marks {
                     ratio_in_reach: self.ratio_in_reach(index, reach, fastest, closed)?,
                     rest_room_mm: self.rest_room(index, reach, fastest, closed)?,
                     fastest_ceiling_mm_s: fastest,
+                    strongest_accel_mm_s2: self.strongest_in_reach(index, reach, closed)?,
                 }
             }
             None => ExtrudingReach::NONE,
@@ -624,6 +655,7 @@ impl Marks {
             rest_holds_s: self.rest_holds(index, closed)?,
             rest_room_mm: extruding.rest_room_mm,
             fastest_ceiling_mm_s: extruding.fastest_ceiling_mm_s,
+            strongest_accel_mm_s2: extruding.strongest_accel_mm_s2,
         })
     }
 
@@ -645,7 +677,9 @@ impl Marks {
 /// to the leaders' nearest rest where that narrows the ratio ramp of a step
 /// there, and the fastest planned ceiling within the leaders' reach of it,
 /// which bounds the shaped speed at its joins (infinite on a move no
-/// extruder budget reaches).
+/// extruder budget reaches), and the largest acceleration a move within
+/// that reach may take, which a ratio ramp at its joins rides (0 on a move
+/// no extruder budget reaches).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtrusionBudget {
     pub ratio_in_reach: f64,
@@ -653,6 +687,7 @@ pub struct ExtrusionBudget {
     pub rest_holds_s: [f64; 2],
     pub rest_room_mm: f64,
     pub fastest_ceiling_mm_s: f64,
+    pub strongest_accel_mm_s2: f64,
 }
 
 /// The part of an [`ExtrusionBudget`] a move's extruder reach gives it.
@@ -660,6 +695,7 @@ struct ExtrudingReach {
     ratio_in_reach: f64,
     rest_room_mm: f64,
     fastest_ceiling_mm_s: f64,
+    strongest_accel_mm_s2: f64,
 }
 
 impl ExtrudingReach {
@@ -667,6 +703,7 @@ impl ExtrudingReach {
         ratio_in_reach: 0.0,
         rest_room_mm: f64::INFINITY,
         fastest_ceiling_mm_s: f64::INFINITY,
+        strongest_accel_mm_s2: 0.0,
     };
 }
 

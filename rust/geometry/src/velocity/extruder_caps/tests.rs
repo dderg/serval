@@ -40,6 +40,7 @@ fn around(ratio_in_reach: f64, axes_in_reach: [bool; 3]) -> ExtrusionBudget {
         rest_holds_s: [0.0; 2],
         rest_room_mm: f64::INFINITY,
         fastest_ceiling_mm_s: f64::INFINITY,
+        strongest_accel_mm_s2: 0.0,
     }
 }
 
