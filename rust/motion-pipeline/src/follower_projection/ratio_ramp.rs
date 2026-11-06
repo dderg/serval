@@ -1529,10 +1529,11 @@ impl RatioSmoothing {
     /// A valley at `turn`, unless the last one laid already holds the
     /// weight flat at zero there ([`AdvanceValley::holds_zero_at`]): a crawl
     /// at a seam is the slowest point of the leg before or after it too,
-    /// read a hair inside that leg. Laid twice, the advance would read the
-    /// product of two weights there and rebuild its lead steeper than
-    /// either; neighbours still overlap where their crawls lie closer than
-    /// their reach.
+    /// read a hair inside that leg. A crawl whose sides would overlap the
+    /// last crawl valley's widens it instead: the advance releases its lead
+    /// once and rebuilds it once across both, holding the weight at zero
+    /// between them, where two valleys would multiply their weights and
+    /// rebuild it steeper than either. Laid crawl valleys never overlap.
     fn lay_valley(&mut self, turn: f64, reach: f64, floor: f64) {
         if self
             .valleys
@@ -1551,13 +1552,51 @@ impl RatioSmoothing {
                  {laid:?} already holds the weight at zero, behind the last one laid"
             );
         }
-        self.valleys.push(AdvanceValley {
-            start: turn,
-            end: turn,
-            before: reach.min(self.back_reach_limit(turn)),
-            after: reach,
-            floor,
-        });
+        let before = reach.min(self.back_reach_limit(turn));
+        let overlapped = self
+            .valleys
+            .iter_mut()
+            .rev()
+            .find(|valley| valley.kind == ValleyKind::Crawl)
+            .filter(|last| turn - before < last.reach_end());
+        match overlapped {
+            Some(last) => {
+                assert!(
+                    turn > last.end,
+                    "follower projection: the crawl at s={turn} lies behind the end of the last \
+                     crawl valley {last:?}"
+                );
+                last.end = turn;
+                last.after = last.after.max(reach);
+                last.floor = last.floor.max(floor);
+            }
+            None => self.valleys.push(AdvanceValley {
+                start: turn,
+                end: turn,
+                before,
+                after: reach,
+                floor,
+                kind: ValleyKind::Crawl,
+            }),
+        }
+        self.assert_crawl_valleys_apart();
+    }
+
+    fn assert_crawl_valleys_apart(&self) {
+        let mut crawls = self
+            .valleys
+            .iter()
+            .filter(|valley| valley.kind == ValleyKind::Crawl);
+        let Some(mut previous) = crawls.next() else {
+            return;
+        };
+        for valley in crawls {
+            assert!(
+                previous.reach_end() <= valley.reach_start(),
+                "follower projection: the crawl valleys {previous:?} and {valley:?} overlap"
+            );
+            previous = valley;
+        }
     }
 
     /// Records the seams of both tables' spans not yet examined, and
@@ -2051,6 +2090,7 @@ impl RatioSmoothing {
                 before,
                 after: 0.0,
                 floor: 0.0,
+                kind: ValleyKind::Rest,
             });
         }
         self.open_rest = Some(OpenRest {
@@ -2138,6 +2178,15 @@ struct AdvanceValley {
     before: f64,
     after: f64,
     floor: f64,
+    kind: ValleyKind,
+}
+
+/// Whether a valley releases the lead around a turnaround or crawl, or a
+/// rest (see [`AdvanceValley`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValleyKind {
+    Crawl,
+    Rest,
 }
 
 impl AdvanceValley {
