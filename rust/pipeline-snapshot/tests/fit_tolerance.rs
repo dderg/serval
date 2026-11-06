@@ -228,7 +228,12 @@ fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bowden_corn
 
 #[test]
 fn every_fit_piece_of_the_corner_flow_cases_holds_the_fit_tolerance_on_the_bench_configs() {
-    assert_every_accepted_fit_piece_holds(corpus::corner_flow_cases(&corpus::SIM_CONFIGS));
+    assert_every_accepted_fit_piece_holds(
+        corpus::corner_flow_cases(&corpus::SIM_CONFIGS)
+            .into_iter()
+            .chain(corpus::corner_flow_run_cases(&corpus::SIM_CONFIGS))
+            .collect(),
+    );
 }
 
 /// [`corpus::FIRST_LAYERS_FROM_74_S`] on the Trident kernel chain.
@@ -240,13 +245,15 @@ fn every_fit_piece_of_the_late_first_layers_holds_the_fit_tolerance_on_the_tride
     ));
 }
 
-/// The stretches of the sim prints in [`corpus::PROFILE_SLICES`] and the
-/// corner_flow cases on the machine profile `config`.
+/// The stretches of the sim prints in [`corpus::PROFILE_SLICES`], the
+/// corner_flow cases and the corner_flow file run whole on the machine
+/// profile `config`.
 fn profile_gate_cases(config: &str) -> Vec<(String, String, PathBuf)> {
     corpus::PROFILE_SLICES
         .iter()
         .flat_map(|slice| corpus::print_slice_cases(slice, &[config]))
         .chain(corpus::corner_flow_cases(&[config]))
+        .chain(corpus::corner_flow_run_cases(&[config]))
         .collect()
 }
 

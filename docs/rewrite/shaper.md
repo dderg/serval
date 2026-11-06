@@ -302,12 +302,15 @@ That is within the position contract every other point of the path keeps.
 The settle is bounded from the leaders' kernel tails alone: a planned
 path that comes to rest under tangential acceleration `A` covers at most
 `A·s²/2` in its last `s` seconds, whatever its turns, so `h` after the
-stop the shaped path stands within `A·∫_{u>h}|w(u)|·(u − h)²/2 du`. The
-holds on either side of a run of extrude-only moves still sum, with the
-run, to at least the kernels' reach on both sides, so the spill past the
-stop never meets the reach ahead of the start and the ratio budgets
-around the rest stay what they read. `retract_placement` in the fit audit
-holds every retract and prime inside the toolhead's stop.
+stop the shaped path stands within `A·∫_{u>h}|w(u)|·(u − h)²/2 du`. Only
+the leaders a kernel shapes settle: moves on unshaped leaders alone, a z
+hop on a bench config, spill nothing, and the time they put between the
+rest and the nearest shaped motion counts toward the settle. The holds,
+those times and the run still sum to at least the kernels' reach on both
+sides, so the spill past the stop never meets the reach ahead of the start
+and the ratio budgets around the rest stay what they read.
+`retract_placement` in the fit audit holds every retract and prime inside
+the toolhead's stop.
 
 The ratio is not projected raw. Every follower smooths `r(s)` along the path
 (`follower_projection/ratio_ramp.rs`) with the kernel `¾(1 − x²)` of

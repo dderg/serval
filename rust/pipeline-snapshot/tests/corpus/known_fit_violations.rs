@@ -36,7 +36,23 @@ pub struct KnownFitViolations {
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownFitViolations] = &[];
+pub const KNOWN: &[KnownFitViolations] = &[
+    // TODO(bound-ext, #787): the analytic source steps in position at its phase seams.
+    KnownFitViolations {
+        case: "corner_flow_cases/tools/bench/configs/trident_kernel.cfg",
+        fit: "materialize_source",
+        class: FitViolationClass::FloorEdgeBreak,
+        count: 13,
+        worst: 160.77,
+    },
+    KnownFitViolations {
+        case: "corner_flow_cases/tools/bench/configs/profiles/p4_high_accel_kernel.cfg",
+        fit: "materialize_source",
+        class: FitViolationClass::FloorEdgeBreak,
+        count: 3,
+        worst: 74.9,
+    },
+];
 
 /// Where the open violations of the case named `case` depart from what
 /// [`KNOWN`] pins for it, as one failure line.

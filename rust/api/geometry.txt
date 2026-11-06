@@ -772,6 +772,7 @@ pub geometry::velocity::VelocityError::OverCommitted::line_no: u32
 impl core::error::Error for geometry::velocity::VelocityError
 impl core::fmt::Display for geometry::velocity::VelocityError
 pub fn geometry::velocity::VelocityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct geometry::velocity::BrakeMove
 pub struct geometry::velocity::ExtrusionBudget
 pub geometry::velocity::ExtrusionBudget::axes_in_reach: [bool; 3]
 pub geometry::velocity::ExtrusionBudget::fastest_ceiling_mm_s: f64
@@ -864,12 +865,13 @@ pub trait geometry::velocity::FanOut
 pub fn geometry::velocity::FanOut::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
-pub fn geometry::velocity::brake_horizon(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], &[f64], &[f64], geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<core::option::Option<usize>, geometry::velocity::VelocityError>
+pub fn geometry::velocity::brake_horizon(&[geometry::velocity::BrakeMove], impl core::iter::traits::double_ended::DoubleEndedIterator<Item = f64> + core::iter::traits::exact_size::ExactSizeIterator, f64) -> core::result::Result<core::option::Option<usize>, geometry::velocity::VelocityError>
+pub fn geometry::velocity::brake_move(&geometry::frontend::Move, &geometry::ExtrusionBudget, bool, core::option::Option<(&geometry::frontend::Move, &geometry::ExtrusionBudget, &geometry::velocity::BrakeMove)>, f64, geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::BrakeMove, geometry::velocity::VelocityError>
 pub fn geometry::velocity::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
 pub fn geometry::velocity::plan_velocity_stops(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::velocity::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::velocity::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams<'_>, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
-pub fn geometry::velocity::replan_span(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], &[f64], geometry::velocity::VelocityPlanParams<'_>, f64) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub fn geometry::velocity::replan_span(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], &[f64], &[f64], geometry::velocity::VelocityPlanParams<'_>, f64) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub enum geometry::CornerBudget
 pub geometry::CornerBudget::OverFloor(f64)
 pub geometry::CornerBudget::ScvEquivalent(f64)
@@ -1009,6 +1011,7 @@ pub geometry::VelocityError::OverCommitted::line_no: u32
 impl core::error::Error for geometry::velocity::VelocityError
 impl core::fmt::Display for geometry::velocity::VelocityError
 pub fn geometry::velocity::VelocityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct geometry::BrakeMove
 pub struct geometry::CornerFitConfig
 pub geometry::CornerFitConfig::extrusion_ramp_rel_tol: f64
 pub geometry::CornerFitConfig::ramp_accel_budget_mm_s2: f64
@@ -1347,13 +1350,14 @@ pub fn geometry::FanOut::lead_and_follow(&self, usize, impl core::ops::function:
 impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub fn geometry::axis_set([bool; 3]) -> usize
-pub fn geometry::brake_horizon(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], &[f64], &[f64], geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<core::option::Option<usize>, geometry::velocity::VelocityError>
+pub fn geometry::brake_horizon(&[geometry::velocity::BrakeMove], impl core::iter::traits::double_ended::DoubleEndedIterator<Item = f64> + core::iter::traits::exact_size::ExactSizeIterator, f64) -> core::result::Result<core::option::Option<usize>, geometry::velocity::VelocityError>
+pub fn geometry::brake_move(&geometry::frontend::Move, &geometry::ExtrusionBudget, bool, core::option::Option<(&geometry::frontend::Move, &geometry::ExtrusionBudget, &geometry::velocity::BrakeMove)>, f64, geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::BrakeMove, geometry::velocity::VelocityError>
 pub fn geometry::corner_deviation_from_scv(f64, f64) -> f64
 pub fn geometry::extrusion_budgets(&[geometry::frontend::Move], f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
 pub fn geometry::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
 pub fn geometry::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::plan_velocity_stops_select_prefix<F, W>(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], geometry::velocity::VelocityPlanParams<'_>, &W, F) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError> where F: core::ops::function::FnOnce(usize) -> usize, W: geometry::velocity::FanOut
-pub fn geometry::replan_span(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], &[f64], geometry::velocity::VelocityPlanParams<'_>, f64) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
+pub fn geometry::replan_span(&[geometry::frontend::Move], &[bool], &[geometry::ExtrusionBudget], &[f64], &[f64], geometry::velocity::VelocityPlanParams<'_>, f64) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::rest_room_reach_mm(f64) -> f64
 pub fn geometry::scv_from_corner_deviation(f64, f64) -> f64
 pub fn geometry::seam_requires_stop(&geometry::frontend::Move, &geometry::frontend::Move, geometry::CornerFitConfig) -> bool
