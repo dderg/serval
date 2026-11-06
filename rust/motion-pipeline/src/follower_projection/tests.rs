@@ -811,7 +811,7 @@ fn neptune_onset_seam(
         velocity: 1.348_009_019_554_786_7,
         ratio: 0.033_652_767_374_986_24,
         leader_speed,
-        s: 1915.428_758_410_382,
+        s: 1_915.428_758_410_382,
         ratio_slope: -1.957_686_811_472_855_7e-6,
         ramped: Some(super::RampedSeam {
             read_velocity: 1.348_009_019_554_786_7,
