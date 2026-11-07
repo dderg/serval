@@ -4,7 +4,7 @@ This procedure checks the offline findings of FINDINGS.md, "Owner operating poin
 
 1. **Executed acceleration overshoots at corners.** At scv 50, smooth_mzv turns each corner velocity step into an acceleration burst. On the owner corpus the executed peak is 1.62× max_accel on X and 1.22× on Y. It is 1.15× at scv 20 and 1.02× at scv 5. With the burst bounded at 1.03 × max_accel it is 1.012× (FINDINGS.md's corner_deviation row, run while that bound was the default; it is now `max_corner_accel: 51500`). The bound is opt-in now. The default floor mode no longer limits the burst, and its corpus peak is about 1.48× X / 1.24× Y.
 2. **Ringing of the tuned mode does not grow with scv.** For an oscillator at the shaper frequency (ζ 0.05), the residual is 8–10 µm from scv 5 to 80. Untuned higher modes do grow: at 2.5× f the residual is 13 µm at scv 5, 21 µm at scv 50 and 15 µm with the bounded corner_deviation. At 4× f it is 1.7 → 3.5 µm.
-3. **The bounded corner_deviation is about 3% slower than scv 50** (+3.3% corpus time, FINDINGS.md). The unbounded floor default has no corpus figure yet; the printer_test spans below compare it file by file.
+3. **The bounded corner_deviation is about 5.4% slower than scv 50** (owner corpus 105.8 s against 100.4 s). The unbounded floor default is +0.7% (101.1 s); the printer_test spans below compare them file by file.
 
 The cap mode is removed from `[corner_deviation]`: on fuzzed corner clusters it rounded corners 5–17% beyond its deviation limit. Besides scv, the protocol therefore runs floor (the default, unbounded burst) and bounded (max_corner_accel 51500).
 
@@ -17,7 +17,7 @@ The hardware answers what the harness cannot. Does the toolhead see the burst? D
 - every corner is followed by a constant-velocity window of at least 5 periods of 0.8 × 130 Hz;
 - each file aligns unambiguously against its own plan;
 - `stress_scv50` reaches at least 1.6× max_accel;
-- `corners_bounded` and `stress_bounded` stay at or below max_corner_accel × (1 + ACCEL_MARGIN), i.e. 1.0815× max_accel per axis.
+- `corners_bounded` and `stress_bounded` stay at or below max_corner_accel, i.e. 1.03× max_accel per axis.
 
 | file | setting | motion | measured span |
 |---|---|---|---|
@@ -27,8 +27,8 @@ The hardware answers what the harness cannot. Does the toolhead see the burst? D
 | `printer_test/corners_floor.gcode` | `[corner_deviation]` (unbounded default) | travel only, Z 10 | 11.07 s |
 | `printer_test/corners_bounded.gcode` | `[corner_deviation]` max_corner_accel 51500 | travel only, Z 10 | 11.21 s |
 | `printer_test/stress_scv50.gcode` | scv 50 | **extrudes** reference marks; stress travel at Z 10 | 46.19 s |
-| `printer_test/stress_floor.gcode` | `[corner_deviation]` (unbounded default) | **extrudes** reference marks; stress travel at Z 10 | 47.71 s |
-| `printer_test/stress_bounded.gcode` | `[corner_deviation]` max_corner_accel 51500 | **extrudes** reference marks; stress travel at Z 10 | 51.68 s |
+| `printer_test/stress_floor.gcode` | `[corner_deviation]` (unbounded default) | **extrudes** reference marks; stress travel at Z 10 | 49.75 s |
+| `printer_test/stress_bounded.gcode` | `[corner_deviation]` max_corner_accel 51500 | **extrudes** reference marks; stress travel at Z 10 | 52.87 s |
 
 Every file starts with `; motion_eval` headers:
 - `start`;
@@ -78,17 +78,17 @@ The stress blocks, with the executed peak of each block on its own (generator ou
 
 | block | geometry | scv 50: X / Y / motor a / motor b | floor (unbounded): X / Y / motor a / motor b | bounded: X / Y / motor a / motor b |
 |---|---|---|---|---|
-| zigzag_x | 20 × 6 mm lines along X, 0.1 mm jogs, 200 mm/s | 1.498 / 0.466 / 1.710 / 1.710 | 1.492 / 0.465 / 1.705 / 1.697 | 0.826 / 0.285 / 1.105 / 1.105 |
-| zigzag_y | 20 × 12 mm lines along Y, 1 mm jogs, 400 mm/s | 1.063 / 1.245 / 1.610 / 1.611 | 1.091 / 1.240 / 1.609 / 1.609 | 0.791 / 1.002 / 1.113 / 1.113 |
-| zigzag_diag_a | 6 mm lines along +45°, 0.1 mm jogs, 400 mm/s | 1.448 / 1.183 / **2.224** / 0.981 | 1.437 / 0.761 / 1.948 / 0.931 | 0.953 / 0.761 / 1.468 / 0.585 |
-| zigzag_diag_b | the same along −45° | 1.448 / 1.183 / 0.981 / **2.223** | 1.437 / 0.761 / 0.931 / 1.948 | 0.953 / 0.761 / 0.585 / 1.468 |
-| circle | r 2.5 mm, 0.7 mm chords (22-gon), 400 mm/s, 3 turns | **2.164** / 1.309 / 2.227 / **2.301** | **2.232** / 0.992 / 2.306 / **2.474** | 0.513 / 0.441 / 0.579 / 0.677 |
+| zigzag_x | 20 × 6 mm lines along X, 0.1 mm jogs, 200 mm/s | 1.498 / 0.466 / 1.710 / 1.710 | 0.822 / 0.284 / 1.106 / 1.106 | 0.822 / 0.284 / 1.106 / 1.106 |
+| zigzag_y | 20 × 12 mm lines along Y, 1 mm jogs, 400 mm/s | 1.063 / 1.245 / 1.610 / 1.611 | 1.091 / 1.240 / 1.609 / 1.609 | 0.788 / 1.002 / 1.112 / 1.112 |
+| zigzag_diag_a | 6 mm lines along +45°, 0.1 mm jogs, 400 mm/s | 1.448 / 1.183 / **2.224** / 0.981 | 0.707 / 0.761 / 1.468 / 0.422 | 0.707 / 0.761 / 1.468 / 0.422 |
+| zigzag_diag_b | the same along −45° | 1.448 / 1.183 / 0.981 / **2.223** | 0.707 / 0.761 / 0.422 / 1.468 | 0.707 / 0.761 / 0.422 / 1.468 |
+| circle | r 2.5 mm, 0.7 mm chords (22-gon), 400 mm/s, 3 turns | **2.164** / 1.309 / 2.227 / **2.301** | **2.232** / 0.992 / 2.306 / **2.474** | 0.674 / 0.477 / 0.634 / 0.785 |
 | reverse_x, reverse_y | 12 mm out and back, 400 mm/s | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
 
 **Whole file:**
 - `stress_scv50` reaches an executed peak of 2.164× max_accel on X (108 000 mm/s²), 1.309× on Y, and 2.23× / 2.30× on the corexy motors.
-- `stress_floor` (unbounded) reaches 2.233× on X, 1.240× on Y, and 2.31× / 2.47× on the motors.
-- `stress_bounded` stays at 1.005× X, 1.002× Y and 1.468× per motor.
+- `stress_floor` (unbounded) reaches 2.232× on X, 1.240× on Y, and 2.31× / 2.47× on the motors.
+- `stress_bounded` stays at 1.005× X, 1.003× Y and 1.468× per motor.
 
 The jog length and speeds come from a sweep over line length (3–20 mm), jog (0.02–3 mm), speed (100–800 mm/s) and circle radius / chord. Each value is the one that maximised the executed peak.
 
@@ -97,7 +97,7 @@ A note on FINDINGS.md: 90° corners alone peak at 1.42× (corners_turn90) to 1.5
 - That is under the centripetal limit (v²/r = 0.95× max_accel), but every chord also accelerates and decelerates at max_accel, and each junction is a 94 mm/s step.
 - smooth_mzv's peaked kernel does not average these steps out, so the executed acceleration reaches 2.16×.
 
-Unbounded floor mode drives the same circle at least as hard (2.23× X). The bounded run slows it until it peaks at 0.51×; this is where the bounded setting loses most of its time, and where scv 50 and the unbounded floor ask most of the motors.
+Unbounded floor mode drives the same circle at least as hard (2.23× X). The bounded run slows it until it peaks at 0.67×; this is where the bounded setting loses most of its time, and where scv 50 and the unbounded floor ask most of the motors.
 
 ## Prerequisites
 
@@ -192,7 +192,7 @@ The same synthetic toolhead, run through four corner files, shows what a confirm
 | corners_scv5 | 1234.567895 | 1.00 / 1.00 | 1.00 / 0.32 | 3.4 / 9.0 / 9.2 | 180 (117/9) | 4.7 / 7.6 / 7.6 | 325 (120/6) | 0.79 / 1.12 / 1.22 (1.01) | 0.80 / 1.33 / 1.33 (1.00) |
 | corners_scv50 | 1234.567895 | 1.00 / 1.00 | 1.00 / 0.31 | 3.8 / 8.2 / 9.8 | 180 (116/10) | 6.2 / 15.0 / 15.0 | 325 (114/12) | 0.81 / 1.32 / 1.32 (1.42) | 0.95 / 1.58 / 1.59 (1.07) |
 | corners_floor | 1234.567895 | 1.00 / 1.00 | 1.00 / 0.31 | 3.9 / 12.1 / 12.4 | 180 (121/5) | 5.6 / 11.3 / 11.9 | 325 (114/12) | 0.87 / 1.53 / 1.54 (1.78) | 0.91 / 1.57 / 1.58 (1.05) |
-| corners_bounded | 1234.567895 | 1.00 / 1.00 | 1.00 / 0.32 | 3.4 / 9.1 / 9.2 | 180 (117/9) | 3.8 / 8.4 / 8.4 | 325 (120/6) | 0.79 / 1.12 / 1.23 (1.01) | 0.79 / 1.32 / 1.33 (1.00) |
+| corners_bounded | 1234.567895 | 1.00 / 1.00 | 1.00 / 0.32 | 3.4 / 9.1 / 9.2 | 180 (117/9) | 3.8 / 8.4 / 8.4 | 325 (120/6) | 0.79 / 1.13 / 1.23 (1.01) | 0.79 / 1.33 / 1.33 (1.00) |
 
 What these rows show:
 - The near-tuned X mode rings about the same at scv 5, scv 50 and bounded. The unbounded floor's larger 45° steps raise its X p99 (12.1 against 8–9 µm).
@@ -215,10 +215,10 @@ Finding 3, the time cost, is the planner's own arithmetic, and the hardware cann
 | setting | corners | stress |
 |---|---|---|
 | scv 50 | 11.04 s | 46.19 s |
-| floor (unbounded) | 11.07 s (+0.3%) | 47.71 s (+3.3%) |
-| bounded | 11.21 s (+1.5%) | 51.68 s (+11.9%) |
+| floor (unbounded) | 11.07 s (+0.3%) | 49.75 s (+7.7%) |
+| bounded | 11.21 s (+1.5%) | 52.87 s (+14.5%) |
 
-The bounded stress gap is larger than the corpus's +3.3% because the stress is all small circles and dense zigzags. That is where the bound slows the motion most.
+The stress gaps are larger than the corpus's (+0.7% floor, +5.4% bounded) because the stress is all small circles and dense zigzags. That is where the bound slows the motion most, and where floor mode stops the sharp turns next to the 0.1 mm jogs.
 
 The fit/fallback counts show how much of the record contained a measurable ring. If most windows fall back, ringing after corners is below the noise floor at every setting. That is also a confirmation of finding 2, at the floor's resolution.
 
@@ -256,14 +256,14 @@ Reading:
 - Start at lower acceleration. Before printing the file, run `SET_VELOCITY_LIMIT ACCEL=20000`, then 30000, 40000 and finally 50000 (pass the same `--accel` to accel_residual). The file does not change ACCEL.
 - The burst is set by the junction speeds, not by accel, so the ratio to max_accel rises as accel falls. The absolute peak, which is what the motors must deliver, mostly falls with accel, though not on every axis (scv 50 Y at 20 000 is above 30 000). Offline, per stress file:
 
-  | ACCEL | scv 50: X / Y / motor mm/s² | floor (unbounded): X / Y / motor mm/s² |
-  |---|---|---|
-  | 20 000 | 39 900 / 49 300 / 56 100 | 38 100 / 24 800 / 41 800 |
-  | 30 000 | 64 000 / 43 800 / 81 700 | 49 200 / 37 200 / 64 600 |
-  | 40 000 | 103 400 / 62 400 / 109 400 | 69 400 / 49 600 / 85 600 |
-  | 50 000 | 108 200 / 65 500 / 115 100 | 111 600 / 62 000 / 123 700 |
+  | ACCEL | scv 50: X / Y / motor mm/s² | floor (unbounded): X / Y / motor mm/s² | bounded: X / Y / motor mm/s² |
+  |---|---|---|---|
+  | 20 000 | 43 800 / 49 400 / 56 200 | 38 200 / 24 800 / 41 800 | 39 000 / 24 800 / 42 400 |
+  | 30 000 | 64 000 / 45 000 / 81 700 | 49 300 / 37 200 / 64 600 | 44 500 / 37 200 / 58 000 |
+  | 40 000 | 103 400 / 62 500 / 109 400 | 69 400 / 49 600 / 85 600 | 47 900 / 44 300 / 63 600 |
+  | 50 000 | 108 200 / 65 500 / 115 100 | 111 600 / 62 000 / 123 700 | 50 300 / 50 100 / 73 400 |
 
-  max_corner_accel is an absolute value: at ACCEL 50 000, stress_bounded stays within 51 500 × 1.05 = 54 075 mm/s² per axis.
+  max_corner_accel is an absolute bound: at every ACCEL, stress_bounded stays within 51 500 mm/s² per axis.
 - Run stress_bounded first, then stress_floor and stress_scv50. Stay at the printer.
   - Grinding, a sudden bang, or the toolhead visibly jumping is a skipped step. Stop with `M112` (emergency stop).
   - Then re-home before anything else: the position is lost.

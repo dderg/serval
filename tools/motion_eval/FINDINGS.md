@@ -27,44 +27,50 @@
    within the shaper floor for that corner (`|σ²·a|/2` with that corner's
    per-axis accelerations): a corner never rounds more than a stop there
    already can. Acceleration is never lowered. Corpus time against the
-   default (scv 5, mcr 0.5): −7.4% (bench mzv), −3.8% (bench smooth_mzv),
-   −6.1% (fast mzv), −4.6% (fast smooth_mzv). Dense geometry gains most:
-   circles −31 to −43%, voron top layers −23 to −49%, zigzag infill −1 to
-   −17%. It rounds more than the default in most cases (the default's
-   worst corner is below the floor), up to the floor and never above it.
-4. **At equal worst-case or equal p99 deviation it is not slower except in
-   three places.** With `max_deviation` lowering junction speeds only, and
-   the fastest of floor and caps 0.05–0.25 chosen per case:
-   - equal max: corpus −4.5 / −2.6 / −3.6 / −2.9%. Slower: arcs on bench
-     (+2.5% mzv, +2.6% smooth_mzv; the default rounds those arcs 0.21 mm,
-     more than their floor of 0.16–0.17 mm, which the cap cannot exceed),
-     fast smooth_mzv zigzag infill (+0.6%), isolated 135/170° corners
-     +0.1% at most (cap granularity).
-   - equal p99: corpus −5.1 / −3.5 / −1.3 / −2.7%. Slower, besides the arcs:
-     fast mzv voron top layers (+1.8%), bench smooth_mzv zigzag (+0.7%),
-     fast smooth_mzv zigzag (+0.6%). In these, stop corners already sit at
-     the default's p99; once the neighbouring junctions are faster, the
-     moves into those stops decelerate over the whole kernel and reach
-     their full floor, so a cap has to slow everything else.
-
-   One cap for the whole corpus (max ≤ default in every case) is 0.07 mm:
-   −0.8 / −0.3 / −1.9 / −1.7%.
+   default (scv 5, mcr 0.5): −7.3 / −7.2% (bench mzv / smooth_mzv), −6.0 /
+   −5.7% (fast mzv / smooth_mzv). Dense geometry gains most: circles −35 to
+   −43%, voron top layers −34 to −49%, zigzag infill −7.5 to −17% (fast
+   smooth_mzv's 2 mm zigzag reverses next to moves shorter than the
+   kernel's reach and now stops there, conclusion 4). It rounds more than
+   the default in most cases (the default's worst corner is below the
+   floor), up to the floor and never above it.
+4. **There is no deviation cap below the floor any more.** `max_deviation`
+   lowered junction speeds so corners round at most that much, judged as
+   isolated corners. The random fuzz found caps exceeded by 5–17% (seeds
+   421, 1306, 2682, 4438): corners closer together than the kernel's reach,
+   with a leg that accelerates and decelerates between them, round beyond
+   any isolated corner, and a look-back over the cluster did not bound the
+   accel-bump case. Its corpus gain at equal worst-case deviation had been
+   ≤ 2–5%. The mode is removed (5e22ba62f). The same physics broke the floor
+   on a targeted cluster fuzz (up to 1.106×): a junction next to a move
+   shorter than its speed × kernel reach now stops when it turns more than
+   60° (a stop has no velocity step and rounds within the floor). On the
+   owner corpus that adds 6 stops and +0.01% time. Clusters of smaller
+   turns still reach 1.063× the floor on the cluster fuzz (seeds 319, 577);
+   that is the stated FLOOR_MARGIN of 10%, fuzz-enforced.
 5. **Side effects.** mzv passes larger velocity steps: up to 47 mm/s in
    floor mode (fast, 45° corners) against 3.7 mm/s at the default. That is
    harmless for the tuned mode but a risk for torque and off-frequency
-   modes; only hardware can tell. With smoothers the executed peak
-   acceleration stays within 3.3% above max_accel (the default reaches
-   3.3% too); the limiter's stated allowance is 5%.
-6. **Planner CPU.** On the densest case (arcs, ~1 450 moves per second of
-   print) the limiter costs 3.2–3.7 µs per move on this host: 0.5% of one
-   core, about 1.3% of a Pi 5 core at an assumed 2.5× slowdown. Lookahead
-   per move goes from 3.8–4.3 µs (scv 5) to 6.5–6.9 µs.
+   modes; only hardware can tell. With smoothers the corner bursts are not
+   limited by default (as with scv): the executed peak reaches 1.29×
+   max_accel (bench 90° corners; the default scv 5 reaches 1.03×), within
+   the worst the planner admits (`corner_accel_x/y`) in every run (at most
+   66% of it). `max_corner_accel` bounds the burst instead (5% stated
+   allowance).
+6. **Planner CPU.** The per-junction limit is C
+   (`chelper/corner_deviation.c`): 0.43 µs per junction against 2.56 µs in
+   Python, 0.38 / 0.40 µs after the cluster rules (unbounded / bounded;
+   microbenchmark, owner smoothers). In this sweep (parallel jobs on a
+   loaded box) the limiter's share of lookahead on the densest case (arcs,
+   ~1 450 moves per second of print) is 0.9–2.7 µs per move including the
+   harness's timing wrapper; see "Production readiness" for klippy CPU on
+   one core.
 
 ## Setup
 
 - **Harness**: unmodified klippy in batch mode. The executed motion is a model
   of `kin_shaper.c`, and every decoded MCU step is checked against it; in all
-  1476 runs the worst step used 99.7% of its allowed error. Corner deviation
+  972 runs the worst step used 99.6% of its allowed error. Corner deviation
   is measured per vertex as the larger of two distances: from the shaped path
   to the commanded legs, and from the vertex to the shaped path.
 - **bench** (`configs/bench.cfg`): corexy, 10 000 mm/s², 500 mm/s, mzv at
@@ -85,7 +91,7 @@
   - scv 1–35
   - mcr 0 / 0.25 / 0.5
   - shaper family mzv and smooth_mzv, at the config's frequencies
-  - `[corner_deviation]` floor mode and caps 0.05–0.25 mm, at mcr 0.5
+  - `[corner_deviation]` floor mode, at mcr 0.5
 
 ## Shaper floor: a stop at a 90°/170° corner (scv 1)
 
@@ -144,97 +150,94 @@ Per case, scv 1 → 5 → 20 (mcr 0.5):
 | fast | voron_top_layers | 9.36 → 6.53 → 3.58 | 0.018 → 0.034 → 0.198 | 0.121 → 0.138 → 0.256 |
 | fast | circles | 5.92 → 4.31 → 2.86 | 0.017 → 0.025 → 0.066 | 0.137 → 0.149 → 0.211 |
 
-## `[corner_deviation]`: floor mode and floor+cap against the default
+## `[corner_deviation]`: floor mode against the default
 
 `klippy/extras/corner_deviation.py`, hooked into `Move.calc_junction` through
 `ToolHead.set_junction_limiter`, replaces the SCV junction term. Floor runs
-have the section with no option; cap runs add `max_deviation`. All at
-mcr 0.5, against the default scv 5, mcr 0.5. "Equal max" and "equal p99" take
-the fastest of floor and every cap whose corner max (or p99) is within the
-default's in that case.
+have the section with no option, at mcr 0.5, against the default scv 5,
+mcr 0.5.
 
-| config | shaper | default s | floor s | vs default | per case, equal max | vs default | per case, equal p99 | vs default | one cap, equal max | s | vs default |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| bench | mzv | 119.3 | 110.5 | −7.4% | 113.9 | −4.5% | 113.2 | −5.1% | 0.07 | 118.4 | −0.8% |
-| bench | smooth_mzv | 119.3 | 114.7 | −3.8% | 116.2 | −2.6% | 115.1 | −3.5% | 0.07 | 119.0 | −0.3% |
-| fast | mzv | 108.6 | 102.0 | −6.1% | 104.8 | −3.6% | 107.2 | −1.3% | 0.07 | 106.6 | −1.9% |
-| fast | smooth_mzv | 108.6 | 103.7 | −4.6% | 105.4 | −2.9% | 105.7 | −2.7% | 0.07 | 106.8 | −1.7% |
+| config | shaper | default s | floor s | vs default | cases where floor max ≤ default |
+|---|---|---|---|---|---|
+| bench | mzv | 119.3 | 110.6 | −7.3% | 1 of 9 |
+| bench | smooth_mzv | 119.3 | 110.7 | −7.2% | 1 of 9 |
+| fast | mzv | 108.6 | 102.1 | −6.0% | 1 of 9 |
+| fast | smooth_mzv | 108.6 | 102.4 | −5.7% | 1 of 9 |
 
-| config | shaper | case | default s (max / p99 mm) | floor s (max / p99 mm) | floor vs default | equal max | vs default | equal p99 | vs default |
-|---|---|---|---|---|---|---|---|---|---|
-| bench | mzv | arcs | 0.91 (0.208 / 0.208) | 0.93 (0.163 / 0.163) | +2.5% | floor: 0.93 s | +2.5% | floor: 0.93 s | +2.5% |
-| bench | mzv | circles | 5.37 (0.152 / 0.129) | 3.06 (0.246 / 0.222) | −43.1% | cap 0.14: 3.18 s | −40.8% | cap 0.12: 3.28 s | −39.0% |
-| bench | mzv | corners_turn135 | 5.84 (0.189 / 0.184) | 5.82 (0.224 / 0.224) | −0.4% | cap 0.18: 5.84 s | +0.0% | cap 0.18: 5.84 s | +0.0% |
-| bench | mzv | corners_turn170 | 5.38 (0.167 / 0.167) | 5.37 (0.249 / 0.248) | −0.3% | cap 0.16: 5.38 s | +0.1% | cap 0.16: 5.38 s | +0.1% |
-| bench | mzv | corners_turn45 | 6.68 (0.183 / 0.180) | 6.54 (0.220 / 0.220) | −2.1% | cap 0.18: 6.58 s | −1.5% | cap 0.18: 6.58 s | −1.5% |
-| bench | mzv | corners_turn90 | 6.35 (0.201 / 0.194) | 6.26 (0.245 / 0.245) | −1.5% | cap 0.2: 6.31 s | −0.7% | cap 0.2: 6.31 s | −0.7% |
-| bench | mzv | voron_first_layer_perimeters | 74.69 (0.201 / 0.190) | 72.25 (0.238 / 0.229) | −3.3% | cap 0.2: 72.54 s | −2.9% | cap 0.18: 72.91 s | −2.4% |
-| bench | mzv | voron_top_layers | 8.72 (0.135 / 0.123) | 5.70 (0.233 / 0.173) | −34.6% | cap 0.07: 7.79 s | −10.7% | cap 0.11: 6.59 s | −24.5% |
-| bench | mzv | zigzag_infill | 5.35 (0.149 / 0.137) | 4.56 (0.193 / 0.193) | −14.8% | cap 0.16: 5.33 s | −0.3% | cap 0.16: 5.33 s | −0.3% |
-| bench | smooth_mzv | arcs | 0.91 (0.215 / 0.215) | 0.93 (0.169 / 0.169) | +2.6% | floor: 0.93 s | +2.6% | floor: 0.93 s | +2.6% |
-| bench | smooth_mzv | circles | 5.37 (0.156 / 0.133) | 3.72 (0.162 / 0.151) | −30.8% | cap 0.15: 3.72 s | −30.7% | cap 0.14: 3.73 s | −30.6% |
-| bench | smooth_mzv | corners_turn135 | 5.84 (0.196 / 0.191) | 5.84 (0.213 / 0.205) | −0.0% | cap 0.18: 5.85 s | +0.1% | cap 0.18: 5.85 s | +0.1% |
-| bench | smooth_mzv | corners_turn170 | 5.38 (0.174 / 0.174) | 5.38 (0.173 / 0.172) | +0.0% | cap 0.18: 5.38 s | +0.0% | cap 0.18: 5.38 s | +0.0% |
-| bench | smooth_mzv | corners_turn45 | 6.68 (0.190 / 0.187) | 6.66 (0.206 / 0.199) | −0.2% | cap 0.2: 6.66 s | −0.2% | cap 0.2: 6.66 s | −0.2% |
-| bench | smooth_mzv | corners_turn90 | 6.35 (0.209 / 0.201) | 6.35 (0.209 / 0.202) | −0.1% | cap 0.2: 6.35 s | −0.1% | cap 0.2: 6.35 s | −0.1% |
-| bench | smooth_mzv | voron_first_layer_perimeters | 74.69 (0.206 / 0.195) | 73.87 (0.223 / 0.199) | −1.1% | cap 0.2: 73.95 s | −1.0% | cap 0.2: 73.95 s | −1.0% |
-| bench | smooth_mzv | voron_top_layers | 8.72 (0.136 / 0.128) | 6.70 (0.168 / 0.167) | −23.1% | cap 0.07: 8.05 s | −7.7% | cap 0.13: 6.89 s | −21.0% |
-| bench | smooth_mzv | zigzag_infill | 5.35 (0.152 / 0.141) | 5.28 (0.154 / 0.145) | −1.3% | cap 0.2: 5.28 s | −1.3% | cap 0.16: 5.38 s | +0.7% |
-| fast | mzv | arcs | 0.88 (0.093 / 0.093) | 0.88 (0.093 / 0.093) | +0.0% | cap 0.1: 0.88 s | +0.0% | cap 0.1: 0.88 s | +0.0% |
-| fast | mzv | circles | 4.31 (0.192 / 0.145) | 2.82 (0.258 / 0.228) | −34.6% | cap 0.18: 2.85 s | −33.9% | cap 0.05: 3.64 s | −15.5% |
-| fast | mzv | corners_turn135 | 5.56 (0.238 / 0.238) | 5.54 (0.296 / 0.296) | −0.3% | cap 0.22: 5.56 s | +0.1% | cap 0.22: 5.56 s | +0.1% |
-| fast | mzv | corners_turn170 | 5.09 (0.252 / 0.252) | 5.08 (0.258 / 0.257) | −0.1% | cap 0.25: 5.08 s | −0.1% | cap 0.25: 5.08 s | −0.1% |
-| fast | mzv | corners_turn45 | 6.41 (0.250 / 0.248) | 6.33 (0.301 / 0.301) | −1.3% | cap 0.22: 6.35 s | −0.9% | cap 0.22: 6.35 s | −0.9% |
-| fast | mzv | corners_turn90 | 6.07 (0.238 / 0.237) | 6.01 (0.341 / 0.341) | −1.0% | cap 0.22: 6.06 s | −0.2% | cap 0.22: 6.06 s | −0.2% |
-| fast | mzv | voron_first_layer_perimeters | 70.51 (0.234 / 0.204) | 69.33 (0.240 / 0.239) | −1.7% | cap 0.25: 69.49 s | −1.4% | cap 0.22: 69.73 s | −1.1% |
-| fast | mzv | voron_top_layers | 6.53 (0.164 / 0.133) | 3.35 (0.316 / 0.249) | −48.7% | cap 0.07: 5.23 s | −19.9% | cap 0.05: 6.65 s | +1.8% |
-| fast | mzv | zigzag_infill | 3.27 (0.167 / 0.164) | 2.71 (0.271 / 0.271) | −17.3% | cap 0.2: 3.26 s | −0.4% | cap 0.2: 3.26 s | −0.4% |
-| fast | smooth_mzv | arcs | 0.88 (0.096 / 0.096) | 0.88 (0.096 / 0.096) | +0.0% | cap 0.1: 0.88 s | +0.0% | cap 0.1: 0.88 s | +0.0% |
-| fast | smooth_mzv | circles | 4.31 (0.198 / 0.149) | 2.92 (0.221 / 0.193) | −32.2% | cap 0.2: 2.93 s | −32.1% | cap 0.07: 3.21 s | −25.5% |
-| fast | smooth_mzv | corners_turn135 | 5.56 (0.247 / 0.247) | 5.55 (0.260 / 0.260) | −0.1% | cap 0.25: 5.56 s | −0.0% | cap 0.25: 5.56 s | −0.0% |
-| fast | smooth_mzv | corners_turn170 | 5.09 (0.261 / 0.261) | 5.08 (0.260 / 0.260) | −0.0% | floor: 5.08 s | −0.0% | floor: 5.08 s | −0.0% |
-| fast | smooth_mzv | corners_turn45 | 6.41 (0.259 / 0.257) | 6.39 (0.287 / 0.281) | −0.4% | cap 0.16: 6.39 s | −0.4% | cap 0.16: 6.39 s | −0.4% |
-| fast | smooth_mzv | corners_turn90 | 6.07 (0.247 / 0.245) | 6.06 (0.260 / 0.257) | −0.2% | cap 0.25: 6.06 s | −0.2% | cap 0.25: 6.06 s | −0.2% |
-| fast | smooth_mzv | voron_first_layer_perimeters | 70.51 (0.238 / 0.207) | 69.78 (0.240 / 0.217) | −1.0% | cap 0.25: 69.87 s | −0.9% | cap 0.25: 69.87 s | −0.9% |
-| fast | smooth_mzv | voron_top_layers | 6.53 (0.166 / 0.138) | 3.82 (0.234 / 0.234) | −41.5% | cap 0.07: 5.37 s | −17.8% | cap 0.07: 5.37 s | −17.8% |
-| fast | smooth_mzv | zigzag_infill | 3.27 (0.170 / 0.168) | 3.17 (0.182 / 0.182) | −3.2% | cap 0.2: 3.29 s | +0.6% | cap 0.2: 3.29 s | +0.6% |
+| config | shaper | case | default s (max / p99 mm) | floor s (max / p99 mm) | floor vs default | max step mm/s default / floor | peak accel default / floor |
+|---|---|---|---|---|---|---|---|
+| bench | mzv | arcs | 0.91 (0.208 / 0.208) | 0.93 (0.162 / 0.162) | +2.6% | 2.9 / 2.9 | 8972 / 8968 |
+| bench | mzv | circles | 5.37 (0.152 / 0.129) | 3.06 (0.246 / 0.222) | −43.0% | 3.7 / 13.6 | 10000 / 10000 |
+| bench | mzv | corners_turn135 | 5.84 (0.189 / 0.184) | 5.82 (0.224 / 0.224) | −0.4% | 2.4 / 10.7 | 10000 / 10000 |
+| bench | mzv | corners_turn170 | 5.38 (0.167 / 0.167) | 5.37 (0.249 / 0.248) | −0.3% | 2.2 / 13.4 | 10000 / 10000 |
+| bench | mzv | corners_turn45 | 6.68 (0.183 / 0.180) | 6.54 (0.220 / 0.220) | −2.1% | 3.2 / 20.4 | 10000 / 10000 |
+| bench | mzv | corners_turn90 | 6.35 (0.201 / 0.194) | 6.26 (0.245 / 0.245) | −1.5% | 2.0 / 13.2 | 10000 / 10000 |
+| bench | mzv | voron_first_layer_perimeters | 74.69 (0.201 / 0.190) | 72.27 (0.238 / 0.229) | −3.2% | 3.7 / 25.0 | 9969 / 9334 |
+| bench | mzv | voron_top_layers | 8.72 (0.135 / 0.123) | 5.77 (0.184 / 0.174) | −33.8% | 3.7 / 12.2 | 10000 / 10000 |
+| bench | mzv | zigzag_infill | 5.35 (0.149 / 0.137) | 4.56 (0.193 / 0.193) | −14.8% | 3.6 / 13.2 | 10000 / 10000 |
+| bench | smooth_mzv | arcs | 0.91 (0.215 / 0.215) | 0.93 (0.167 / 0.167) | +2.6% | 0.0 / 0.0 | 9119 / 7627 |
+| bench | smooth_mzv | circles | 5.37 (0.156 / 0.133) | 3.07 (0.255 / 0.216) | −42.9% | 0.0 / 0.0 | 10225 / 12836 |
+| bench | smooth_mzv | corners_turn135 | 5.84 (0.196 / 0.191) | 5.82 (0.232 / 0.232) | −0.4% | 0.0 / 0.0 | 10331 / 11699 |
+| bench | smooth_mzv | corners_turn170 | 5.38 (0.174 / 0.174) | 5.37 (0.258 / 0.257) | −0.3% | 0.0 / 0.0 | 10240 / 12404 |
+| bench | smooth_mzv | corners_turn45 | 6.68 (0.190 / 0.187) | 6.54 (0.228 / 0.228) | −2.1% | 0.0 / 0.0 | 10203 / 11969 |
+| bench | smooth_mzv | corners_turn90 | 6.35 (0.209 / 0.201) | 6.26 (0.254 / 0.254) | −1.5% | 0.0 / 0.0 | 10217 / 12929 |
+| bench | smooth_mzv | voron_first_layer_perimeters | 74.69 (0.206 / 0.195) | 72.34 (0.244 / 0.233) | −3.1% | 0.0 / 0.0 | 8064 / 11190 |
+| bench | smooth_mzv | voron_top_layers | 8.72 (0.136 / 0.128) | 5.77 (0.178 / 0.177) | −33.8% | 0.0 / 0.0 | 10138 / 10408 |
+| bench | smooth_mzv | zigzag_infill | 5.35 (0.152 / 0.141) | 4.57 (0.202 / 0.202) | −14.6% | 0.0 / 0.0 | 10209 / 12572 |
+| fast | mzv | arcs | 0.88 (0.093 / 0.093) | 0.88 (0.093 / 0.093) | +0.0% | 3.1 / 3.1 | 12224 / 12224 |
+| fast | mzv | circles | 4.31 (0.192 / 0.145) | 2.82 (0.258 / 0.227) | −34.5% | 3.7 / 20.3 | 29718 / 23179 |
+| fast | mzv | corners_turn135 | 5.56 (0.238 / 0.238) | 5.54 (0.296 / 0.296) | −0.3% | 2.4 / 16.9 | 28002 / 28002 |
+| fast | mzv | corners_turn170 | 5.09 (0.252 / 0.252) | 5.08 (0.258 / 0.257) | −0.1% | 2.2 / 14.3 | 29896 / 29896 |
+| fast | mzv | corners_turn45 | 6.41 (0.250 / 0.248) | 6.33 (0.301 / 0.301) | −1.3% | 3.2 / 46.6 | 29481 / 29481 |
+| fast | mzv | corners_turn90 | 6.07 (0.238 / 0.237) | 6.01 (0.341 / 0.341) | −1.0% | 2.0 / 28.3 | 28002 / 28002 |
+| fast | mzv | voron_first_layer_perimeters | 70.51 (0.234 / 0.204) | 69.34 (0.240 / 0.239) | −1.7% | 3.7 / 37.0 | 27651 / 23097 |
+| fast | mzv | voron_top_layers | 6.53 (0.164 / 0.133) | 3.36 (0.252 / 0.249) | −48.5% | 3.7 / 21.2 | 30000 / 30000 |
+| fast | mzv | zigzag_infill | 3.27 (0.167 / 0.164) | 2.71 (0.271 / 0.271) | −17.3% | 3.6 / 28.3 | 23179 / 30000 |
+| fast | smooth_mzv | arcs | 0.88 (0.096 / 0.096) | 0.88 (0.096 / 0.096) | +0.0% | 0.0 / 0.0 | 12657 / 12657 |
+| fast | smooth_mzv | circles | 4.31 (0.198 / 0.149) | 2.82 (0.267 / 0.227) | −34.5% | 0.0 / 0.0 | 17220 / 23717 |
+| fast | smooth_mzv | corners_turn135 | 5.56 (0.247 / 0.247) | 5.54 (0.307 / 0.307) | −0.3% | 0.0 / 0.0 | 28342 / 31247 |
+| fast | smooth_mzv | corners_turn170 | 5.09 (0.261 / 0.261) | 5.08 (0.268 / 0.266) | −0.1% | 0.0 / 0.0 | 30077 / 30029 |
+| fast | smooth_mzv | corners_turn45 | 6.41 (0.259 / 0.257) | 6.33 (0.310 / 0.310) | −1.3% | 0.0 / 0.0 | 29667 / 29815 |
+| fast | smooth_mzv | corners_turn90 | 6.07 (0.247 / 0.245) | 6.01 (0.353 / 0.353) | −1.0% | 0.0 / 0.0 | 28342 / 32058 |
+| fast | smooth_mzv | voron_first_layer_perimeters | 70.51 (0.238 / 0.207) | 69.36 (0.247 / 0.246) | −1.6% | 0.0 / 0.0 | 16146 / 20740 |
+| fast | smooth_mzv | voron_top_layers | 6.53 (0.166 / 0.138) | 3.36 (0.256 / 0.253) | −48.5% | 0.0 / 0.0 | 30125 / 30338 |
+| fast | smooth_mzv | zigzag_infill | 3.27 (0.170 / 0.168) | 3.03 (0.235 / 0.233) | −7.5% | 0.0 / 0.0 | 24361 / 30803 |
 
-### Physical invariants (540 floor and floor+cap runs, all cases)
+### Physical invariants (36 floor-mode runs, all cases)
 
 | invariant | result |
 |---|---|
 | corner max ≤ shaper floor at max_accel, `max_accel·hypot(σx², σy²)/2` | all runs; worst 96.6% of it |
 | acceleration never lowered: trapq move accels identical to the default run | all runs |
-| smoother executed peak accel ≤ (1 + 5%)·max_accel | all 270 smoother runs; worst +3.3% (default: +3.3%) |
+| smoother executed peak accel ≤ what the planner admits (`corner_accel_x/y`) | all 18 smoother runs; worst 66% of it (peak 1.29× max_accel, bench 90° corners; the default reaches 1.03×) |
 | no limiter registered: trapq identical to the upstream toolhead | 9 cases × 2 configs, `tests/test_junction_hook.py` |
 
 `tests/test_corner_deviation.py` asserts the first three on the 90/170°
 corner, zigzag, circle and top-layer cases, both configs and shaper families,
-in floor mode and with a cap of 0.1 mm.
+in floor mode and with `max_corner_accel` 1.03·max_accel, and the smoother
+peak within that bound·(1 + 5%) and within `corner_accel_x/y`.
 
 ### Planner CPU (densest case, median of its runs during the sweep)
 
-| config | densest case | moves/s of print | lookahead µs/move, scv 5 | with limiter | of which limiter | % of one core here | % of a Pi 5 core (2.5× slower) |
-|---|---|---|---|---|---|---|---|
-| bench | arcs | 1449 | 3.8 | 6.9 | 3.7 | 0.54% | 1.3% |
-| fast | arcs | 1485 | 4.3 | 6.5 | 3.2 | 0.48% | 1.2% |
+| config | densest case | moves/s of print | lookahead µs/move, scv 5 | with limiter | of which limiter |
+|---|---|---|---|---|---|
+| bench | arcs | 1449 | 8.0 | 15.3 | 2.7 |
+| fast | arcs | 1485 | 7.0 | 12.9 | 0.9 |
 
-The previous, hard-budget limiter added 18 µs per move. The floor mode reads
-one precomputed table cell per junction: the cell's speed at the floor is
-stored, and only a cap needs a binary search.
+Measured with parallel sweep jobs on a loaded box, so the columns are noisy;
+the limiter column is the C call plus the harness's timing wrapper.
 
 ### Pareto front, voron_top_layers, bench mzv
 
-Default: scv 5, mcr 0.5 → 8.72 s, max 0.135. Floor mode: 5.70 s, max 0.233.
+Default: scv 5, mcr 0.5 → 8.72 s, max 0.135. Floor mode: 5.77 s, max 0.184.
 
 | setting | s | p99 mm | max mm | max step mm/s |
 |---|---|---|---|---|
 | scv 1, mcr 0.5 | 14.83 | 0.102 | 0.122 | 0.7 |
-| floor+cap 0.05 | 9.74 | 0.105 | 0.123 | 4.2 |
-| floor+cap 0.07 | 7.79 | 0.110 | 0.126 | 7.0 |
-| floor+cap 0.1 | 6.77 | 0.110 | 0.141 | 8.8 |
-| floor+cap 0.14 | 6.15 | 0.144 | 0.145 | 10.4 |
-| floor+cap 0.2 | 5.72 | 0.173 | 0.186 | 12.4 |
+| scv 3, mcr 0.5 | 10.92 | 0.111 | 0.127 | 2.2 |
+| scv 5, mcr 0.5 | 8.72 | 0.123 | 0.135 | 3.7 |
+| scv 8, mcr 0.5 | 6.93 | 0.164 | 0.164 | 5.9 |
+| floor, mcr 0.5 | 5.77 | 0.174 | 0.184 | 12.2 |
 | scv 20, mcr 0.5 | 5.54 | 0.218 | 0.219 | 12.8 |
 | scv 35, mcr 0.25 | 5.43 | 0.221 | 0.245 | 17.5 |
 
@@ -243,11 +246,17 @@ Default: scv 5, mcr 0.5 → 8.72 s, max 0.135. Floor mode: 5.70 s, max 0.233.
 - Everything here is offline: geometric deviation of the commanded stepper
   motion. Frame dynamics, ringing, extrusion and pressure advance are not
   modelled. The velocity steps are only a proxy for ringing.
-- The corner table assumes full-length legs at full acceleration through the
-  kernel. Corners between short moves round less than that, so near a stop
-  the cap is conservative (zigzag infill).
-- The smoother acceleration limit sums only steps of a curve continuing like
-  the current junction; it is approximate, hence the stated 5% allowance.
+- The corner table assumes full-length legs at constant acceleration
+  through the kernel. A short move that accelerates and decelerates
+  between two corners breaks that; such junctions stop when they turn more
+  than 60° (conclusion 4), and smaller turns in such clusters can round up
+  to the stated 10% (FLOOR_MARGIN) above the floor.
+- With `max_corner_accel`, the burst bound is the largest Σ dv·|density|
+  over the step placements the plan allows plus the legs at full
+  acceleration: a true bound, at a small time cost on dense curves.
+  Without it, the burst is bounded only by what the table admits
+  (`corner_accel_x/y`, isolated corners and curves plus a stated 25% for
+  clusters).
 - Rest stops still round at the floor. Like SCV, the limiter does not change
   that, and it never lowers acceleration to do so.
 
@@ -261,12 +270,34 @@ Default: scv 5, mcr 0.5 → 8.72 s, max 0.135. Floor mode: 5.70 s, max 0.233.
 - Batch mode (`-o`) can exit with output still queued in the serial queue,
   silently truncating the stream under load. `capture.py` drains the queue
   before disconnect.
+- `SET_INPUT_SHAPER` right after motion, to a shaper whose generation window
+  is longer than the current one, shut the printer down ("stepcompress:
+  Invalid sequence"): the new shaper's position at the last flushed step
+  still averaged the last moves. Found by the fuzz (seed 1044, default
+  planner), reproduced on upstream; Klipper master af81d23fe has the same
+  code. Fixed in 44cd81786 (the old shapers generate the stationary tail
+  for the window growth first), `tests/test_shaper_switch.py`.
+- At print start the toolhead stays in Priming until 2 s of moves are
+  queued, planned in one gcode callback (2630 moves, 23 ms of CPU on this
+  box for arcs). With klippy at a 12% CPU quota that callback is ~290 ms
+  late and the MCU shut down with "Timer too close" at print start (with
+  the Python corner_deviation, 5d53e78f8 and its threaded build; the C
+  limiter passed its one run, the default always);
+  BUFFER_TIME_START 0.5 instead of 0.25 s made it pass, so the 0.25 s start
+  buffer is what the burst outruns (the exact late command was not traced).
+  Left as is; corner_deviation's share of that callback is 0.43 µs per
+  move.
+- Live klippy flushes the lookahead with a 2 s window while priming and
+  0.25 s after, batch mode at other moves; with minimum_cruise_ratio > 0
+  the cruise speed of a move near a flush differs (bench: 0.085 mm/s on
+  voron top layers ×15, upstream and kv2 alike). The fuzz's lazy-flush check
+  expects identical trapqs only where the default planner's is identical.
 
 ## Reproduce
 
 ```
 python3 ~/Developer/serval/scripts/slots.py run -- \
-    uv run python -m tools.motion_eval.sweep --jobs 12   # 1476 runs, ~6 min
+    uv run python -m tools.motion_eval.sweep --jobs 12   # 972 runs, ~6 min
 # tables: tools/motion_eval/.build/sweep/tables.md (all sweeps, all fronts)
 ```
 
@@ -282,11 +313,13 @@ scv 50 with shaping off for reference. Results are in `.build/owner_point/`.
 1. **smooth_mzv absorbs SCV's velocity steps as far as ringing of the tuned
    mode goes. It does not absorb them in acceleration.** The smoother turns
    each step Δv into a burst Δv·w(t) over its 4.8 ms (X) / 7.4 ms (Y)
-   window. A 90° corner at scv 50 commands a 50 mm/s per-axis step. The
-   executed peak acceleration then reaches 1.62× max_accel on X (81 000
-   mm/s²) and 1.22× on Y; the p99 over corners is 1.54×. At scv 20 the peak
-   is 1.15×, at scv 5 1.02×. Peak jerk is 280 km/s³ at scv 50 against
-   78 km/s³ at scv 5.
+   window. A 90° corner at scv 50 commands a 50 mm/s per-axis step; 90°
+   corners alone peak at 1.42–1.50× max_accel. The corpus peak, 1.62× on X
+   (81 000 mm/s²) and 1.22× on Y, comes from a polyline arc of radius
+   ≈ 2.5 mm in voron top layers, where every chord is a junction step and
+   also accelerates (PRINTER_TEST.md's stress circle reaches 2.16×). The
+   p99 over corners is 1.54×. At scv 20 the peak is 1.15×, at scv 5 1.02×.
+   Peak jerk is 280 km/s³ at scv 50 against 78 km/s³ at scv 5.
 2. **Ringing does not grow with scv near the tuned frequency.** Residual
    vibration after corners, for a damped oscillator at the shaper frequency
    (worst axis):
@@ -310,12 +343,39 @@ scv 50 with shaping off for reference. Results are in `.build/owner_point/`.
    torque limit, scv 50 asks for 81 000 at corners, with skipped steps or
    layer shifts as the failure mode. Only hardware can say how much
    headroom there is.
-5. **`[corner_deviation]` floor mode is 2.1% slower than scv 50 here.** It
-   is faster than scv 5 and 10 but 1.0% slower than scv 20. It holds the
-   executed peak within its stated allowance (1.03×). Its residuals at
-   ζ 0.05 are within 5% of scv 5's up to 1.0× f, lower at 1.1–1.2× f, and
-   16% higher at 2.5× f (15 against 13 µm; scv 50: 21 µm). The time it gives
-   up against scv 50 is the price of not bursting above max_accel at corners.
+5. **What `[corner_deviation]` cost here was the corner-burst bound, not
+   the floor.** Variants on the corpus against scv 50 (100.4 s):
+
+   | setting | corpus s | vs scv 50 | voron top / circles / zigzag s | peak / max_accel X / Y | corner dev p99 / max mm (max / floor) | residual ζ 0.05 at 1.0× / 2.5× f µm |
+   |---|---|---|---|---|---|---|
+   | scv 50 | 100.4 | 0 | 2.73 / 2.80 / 2.44 | 1.616 / 1.222 | 0.139 / 0.146 (1.17) | 10.5 / 20.9 |
+   | burst bounded (`max_corner_accel: 51500`; the default before, single-junction bound, not a true bound) | 103.7 | +3.2% | 4.56 / 3.07 / 2.74 | 1.012 / 1.004 | 0.103 / 0.111 (0.89) | 8.3 / 14.0 |
+   | burst bounded now, `max_corner_accel: 51500` | 105.8 | +5.4% | 6.09 / 3.42 / 2.75 | 1.012 / 1.000 | 0.103 / 0.111 (0.89) | 11.8 / 16.2 |
+   | burst bounded now, `max_corner_accel: 65000` | 102.2 | +1.8% | 3.88 / 2.89 / 2.63 | 1.208 / 1.060 | 0.114 / 0.120 (0.96) | 8.5 / 14.4 |
+   | burst bounded now, `max_corner_accel: 81000` (scv 50's own peak) | 101.5 | +1.1% | 3.42 / 2.83 / 2.50 | 1.483 / 1.203 | 0.123 / 0.123 (0.98) | 10.3 / 12.9 |
+   | burst unbounded (the default now) | 101.1 | +0.7% | 3.08 / 2.81 / 2.43 | 1.483 / 1.239 | 0.123 / 0.123 (0.98) | 11.7 / 12.9 |
+   | unbounded, cap 0.146 replacing the floor (experiment) | 100.2 | −0.2% | 2.72 / 2.80 / 2.35 | 2.477 / 1.302 | 0.146 / 0.146 (1.17) | 15.4 / 18.7 |
+
+   The bound cost 2.6 of the 3.2 points; the floor the remaining 0.6
+   (voron top layers 3.08 against 2.73 s). The cap row needed a build in
+   which a cap replaces the floor: 0.8% faster than the default, at 2.48×
+   max_accel on X (corners_turn170); not proposed, and cap mode is gone
+   (conclusion 4 above). The burst is now opt-in (`max_corner_accel`), and
+   its bound is a true upper bound on clustered corners too (the
+   single-junction bound let clusters reach 1.10× it): the executed burst
+   is the legs' acceleration plus Σ dv·|density| of the steps within the
+   kernel's support, maximized over every placement the plan allows (the
+   steps' gaps are at least the moves' shortest traversal times). A first
+   version counting every step at peak density cost 108.9 s at 51 500 and
+   104.6 s at 81 000; the shaped one 105.8 / 101.5 s. What remains is the
+   legs' term, taken at full acceleration together with the steps' peak.
+   Unbounded, the planner admits at most 144 300 mm/s² on X and 99 400 on
+   Y at 50 000 (`corner_accel_x/y`: the isolated corner and curve bound
+   from the table, 115 500 / 79 500, plus the 25% stated for clusters;
+   measured 97 700 on the worst cell, a 14.9° turn at 713 mm/s), and
+   `CORNER_DEVIATION_REPORT MOTOR_ACCEL=50000` recommends max_accel
+   17 321, at which that corner measures 33 800 and voron top layers 36 100
+   (`tests/test_corner_accel.py`).
 6. **max_velocity 500 / 800 / 1200 changes nothing.** Only voron top
    layers' travel moves exceed 500 mm/s in this corpus, which moves totals
    by about 7 ms, and the relative numbers are identical. The corpus prints
@@ -341,7 +401,9 @@ so jerk jumps there but stays bounded: Δv·max|w′| = 50 mm/s × 3.64e6 /s² =
 | scv 35 | 100.7 | +0.3% | 1.447 / 1.136 | 1.420 | 247 / 98 | 0.132 / 0.135 | 1.08 |
 | scv 50 | 100.4 | +0.0% | 1.616 / 1.222 | 1.535 | 280 / 127 | 0.139 / 0.146 | 1.17 |
 | scv 80 | 100.1 | −0.3% | 1.719 / 1.379 | 1.719 | 423 / 185 | 0.164 / 0.164 | 1.31 |
-| corner_deviation | 102.6 | +2.1% | 1.033 / 1.013 | 1.033 | 179 / 69 | 0.106 / 0.114 | 0.91 |
+| corner_deviation | 101.1 | +0.7% | 1.483 / 1.239 | 1.483 | 398 / 99 | 0.123 / 0.123 | 0.98 |
+| corner_deviation, max_corner_accel 51 500 | 105.8 | +5.4% | 1.012 / 1.000 | 1.012 | 120 / 59 | 0.103 / 0.111 | 0.89 |
+| corner_deviation, max_corner_accel 81 000 | 101.5 | +1.1% | 1.483 / 1.203 | 1.483 | 312 / 99 | 0.123 / 0.123 | 0.98 |
 | scv 50, no shaping | 100.4 | +0.0% | 1.000 / 1.000 (plus Δv impulses) | 1.000 | (impulses) | 0.001 / 0.001 | — |
 
 Shaper floor σ²·max_accel/2: X 0.053 mm, Y 0.125 mm. "max / floor" divides
@@ -357,28 +419,30 @@ Oscillator at ratio × the axis' shaper frequency (X 200, Y 130 Hz).
 | scv 20 | 0.05 | 64.6 | 23.2 | 7.9 | 13.1 | 15.7 | 12.6 | 1.8 |
 | scv 50 | 0.05 | 55.2 | 30.9 | 10.5 | 15.9 | 17.5 | 20.9 | 3.5 |
 | scv 80 | 0.05 | 60.7 | 33.3 | 10.3 | 23.1 | 20.6 | 23.9 | 4.4 |
-| corner_deviation | 0.05 | 81.6 | 23.6 | 8.4 | 10.7 | 18.5 | 15.3 | 1.7 |
+| corner_deviation | 0.05 | 54.2 | 27.6 | 11.7 | 16.3 | 17.0 | 12.9 | 2.3 |
+| corner_deviation, bounded 51 500 | 0.05 | 71.2 | 27.3 | 11.8 | 21.4 | 18.3 | 16.2 | 1.7 |
 | scv 50, no shaping | 0.05 | 277.2 | 304.8 | 226.6 | 198.8 | 152.3 | 55.3 | 33.5 |
 | scv 5 | 0.1 | 39.6 | 15.4 | 0.55 | 7.5 | 9.3 | 7.0 | 1.1 |
 | scv 20 | 0.1 | 38.4 | 15.1 | 0.49 | 8.5 | 10.6 | 8.1 | 1.1 |
 | scv 50 | 0.1 | 39.5 | 15.8 | 0.51 | 8.9 | 12.8 | 13.3 | 2.2 |
 | scv 80 | 0.1 | 40.7 | 16.1 | 0.57 | 8.9 | 13.0 | 16.3 | 3.0 |
-| corner_deviation | 0.1 | 40.3 | 13.8 | 0.45 | 6.6 | 8.4 | 8.2 | 1.1 |
+| corner_deviation | 0.1 | 40.0 | 15.7 | 0.52 | 8.9 | 11.1 | 8.6 | 1.6 |
+| corner_deviation, bounded 51 500 | 0.1 | 40.1 | 15.7 | 0.54 | 9.1 | 9.4 | 8.3 | 1.1 |
 | scv 50, no shaping | 0.1 | 240.8 | 230.9 | 197.0 | 155.1 | 135.6 | 47.4 | 27.6 |
 
 ## Per case: print time s (peak accel / max_accel)
 
-| case | scv 5 | scv 20 | scv 50 | scv 80 | corner_deviation |
-|---|---|---|---|---|---|
-| arcs | 0.88 (0.44) | 0.88 (0.44) | 0.88 (0.44) | 0.88 (0.44) | 0.88 (0.44) |
-| circles | 3.78 (0.84) | 2.83 (0.94) | 2.80 (1.07) | 2.80 (1.07) | 2.96 (0.85) |
-| corners_turn45 | 6.36 (1.02) | 6.34 (1.07) | 6.31 (1.25) | 6.30 (1.44) | 6.35 (1.01) |
-| corners_turn90 | 6.02 (1.02) | 6.00 (1.13) | 5.99 (1.42) | 5.97 (1.72) | 6.01 (1.03) |
-| corners_turn135 | 5.50 (1.02) | 5.49 (1.15) | 5.48 (1.42) | 5.47 (1.69) | 5.50 (1.03) |
-| corners_turn170 | 5.03 (1.02) | 5.02 (1.09) | 5.02 (1.20) | 5.01 (1.33) | 5.03 (1.03) |
-| voron_first_layer_perimeters | 69.63 (0.76) | 69.16 (0.76) | 68.79 (1.14) | 68.65 (1.51) | 69.40 (0.76) |
-| voron_top_layers | 5.68 (1.01) | 3.18 (1.07) | 2.73 (1.62) | 2.73 (1.62) | 3.75 (1.02) |
-| zigzag_infill | 2.73 (1.01) | 2.63 (1.13) | 2.44 (1.42) | 2.29 (1.72) | 2.70 (1.03) |
+| case | scv 5 | scv 20 | scv 50 | scv 80 | corner_deviation | bounded 51 500 |
+|---|---|---|---|---|---|---|
+| arcs | 0.88 (0.44) | 0.88 (0.44) | 0.88 (0.44) | 0.88 (0.44) | 0.88 (0.44) | 1.09 (0.57) |
+| circles | 3.78 (0.84) | 2.83 (0.94) | 2.80 (1.07) | 2.80 (1.07) | 2.81 (1.07) | 3.42 (0.83) |
+| corners_turn45 | 6.36 (1.02) | 6.34 (1.07) | 6.31 (1.25) | 6.30 (1.44) | 6.32 (1.10) | 6.36 (1.00) |
+| corners_turn90 | 6.02 (1.02) | 6.00 (1.13) | 5.99 (1.42) | 5.97 (1.72) | 5.99 (1.48) | 6.02 (1.01) |
+| corners_turn135 | 5.50 (1.02) | 5.49 (1.15) | 5.48 (1.42) | 5.47 (1.69) | 5.49 (1.23) | 5.50 (1.01) |
+| corners_turn170 | 5.03 (1.02) | 5.02 (1.09) | 5.02 (1.20) | 5.01 (1.33) | 5.02 (1.16) | 5.03 (1.00) |
+| voron_first_layer_perimeters | 69.63 (0.76) | 69.16 (0.76) | 68.79 (1.14) | 68.65 (1.51) | 69.06 (1.29) | 69.53 (0.76) |
+| voron_top_layers | 5.68 (1.01) | 3.18 (1.07) | 2.73 (1.62) | 2.73 (1.62) | 3.08 (1.47) | 6.09 (1.00) |
+| zigzag_infill | 2.73 (1.01) | 2.63 (1.13) | 2.44 (1.42) | 2.29 (1.72) | 2.43 (1.48) | 2.75 (1.01) |
 
 ## Caveats for this point
 
