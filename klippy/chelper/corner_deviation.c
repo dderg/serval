@@ -10,14 +10,13 @@
 #pragma GCC optimize ("fp-contract=off")
 
 struct cd_limiter {
-    int n_alpha, n_theta, n_w, jump_points;
+    int n_alpha, n_theta, n_w;
     double alpha_step, theta_step;
     double *w, *g, *floor, *w_floor;
-    double variance, window, max_deviation;
-    int has_cap, smoothing;
+    double variance, window, max_deviation, max_corner_accel;
+    int has_cap, has_corner_bound;
     double density_peak[2];
-    double *jump_cells[2];
-    double step_allowance, min_direction_change, min_xy_share;
+    double min_direction_change, min_xy_share;
     uint64_t limited, stopped_by_cap, step_limited, xy_stops;
 };
 
@@ -61,21 +60,10 @@ curve_speed(const struct cd_limiter *l, double prev_length
 }
 
 static double
-jump_room(const struct cd_limiter *l, int axis, double up, double um)
+corner_bound(struct cd_limiter *l, const double up[2], const double um[2]
+             , const double du[2], double prev_d, double move_d, double accel
+             , double speed)
 {
-    double scale = .5 * (l->jump_points - 1);
-    int last = l->jump_points - 2;
-    int i = clamped_index((up + 1.) * scale, last);
-    int j = clamped_index((um + 1.) * scale, last);
-    return l->jump_cells[axis][i * (l->jump_points - 1) + j];
-}
-
-static double
-step_bound(struct cd_limiter *l, const double up[2], const double um[2]
-           , const double du[2], double prev_d, double move_d, double accel
-           , double max_accel, double speed)
-{
-    double allowed = (1. + l->step_allowance) * max_accel;
     double rate = 1. / (move_d < prev_d ? move_d : prev_d);
     double bound = speed;
     int axis;
@@ -84,18 +72,15 @@ step_bound(struct cd_limiter *l, const double up[2], const double um[2]
         if (!density_peak || !du[axis])
             continue;
         double linear = du[axis] * density_peak;
-        double own = jump_room(l, axis, up[axis], um[axis]) * max_accel / linear;
         double share = fabs(um[axis]) > fabs(up[axis])
                        ? fabs(um[axis]) : fabs(up[axis]);
-        double curve_room = allowed - accel * share;
-        if (curve_room <= 0.) {
+        double room = l->max_corner_accel - accel * share;
+        if (room <= 0.) {
             bound = 0.;
             continue;
         }
-        double curve = 2. * curve_room / (linear + sqrt(
-            linear * linear + 4. * du[axis] * rate * curve_room));
-        if (own < bound)
-            bound = own;
+        double curve = 2. * room / (linear + sqrt(
+            linear * linear + 4. * du[axis] * rate * room));
         if (curve < bound)
             bound = curve;
     }
@@ -107,8 +92,7 @@ step_bound(struct cd_limiter *l, const double up[2], const double um[2]
 double __visible
 cd_junction_v2(struct cd_limiter *l, double upx, double upy
                , double umx, double umy, double prev_d, double move_d
-               , double prev_accel, double move_accel, double max_accel
-               , double cap_v2)
+               , double prev_accel, double move_accel, double cap_v2)
 {
     double dux = fabs(umx - upx), duy = fabs(umy - upy);
     if (hypot(dux, duy) < l->min_direction_change)
@@ -158,10 +142,9 @@ cd_junction_v2(struct cd_limiter *l, double upx, double upy
                 speed = curve;
         }
     }
-    if (l->smoothing) {
+    if (l->has_corner_bound) {
         double up[2] = {upx, upy}, um[2] = {umx, umy}, du[2] = {dux, duy};
-        speed = step_bound(l, up, um, du, prev_d, move_d, accel, max_accel
-                           , speed);
+        speed = corner_bound(l, up, um, du, prev_d, move_d, accel, speed);
     }
     double v2 = speed * speed;
     if (cap_v2 <= v2)

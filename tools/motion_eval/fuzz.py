@@ -18,7 +18,9 @@ flushes, and checks:
   it; with a cap, at most cap * (1 + CAP_MARGIN) unless a corner within
   reach stopped;
 - the trapq accels and the final step positions equal the default run's;
-- executed peak acceleration <= max_accel * (1 + ACCEL_MARGIN);
+- executed peak acceleration per axis <= what the limiter admits
+  (CornerAccel.worst: unbounded in floor mode, max_corner_accel in the
+  cap run) * (1 + ACCEL_MARGIN);
 - lazy flushes at random moves leave the trapq and the junction limits
   identical; forced flushes (M400) leave every junction limit not at a
   flush identical and every move at most as fast.
@@ -31,6 +33,7 @@ import concurrent.futures
 import dataclasses
 import json
 import math
+import os
 import pathlib
 import random
 import re
@@ -63,6 +66,8 @@ CAP_MM = (0.02, 0.3)
 EXTRUDE_PER_MM = 0.033
 DT = 25e-6
 FLOAT_TOLERANCE = 1e-9
+CORNER_ACCEL_RATIO = 1.03
+TABLE_CACHE_DIR = os.path.expanduser(corner_deviation.TABLE_CACHE_DIR)
 
 
 @dataclasses.dataclass
@@ -316,10 +321,23 @@ def _config(case, tmpdir, section):
     return path
 
 
+def _config_max_accel(case):
+    base = dict((n, p) for n, p, _ in CONFIGS)[case.config]
+    (value,) = re.findall(r"^max_accel:\s*(\S+)", base.read_text(), re.M)
+    return float(value)
+
+
+def _corner_accel(case):
+    """The cap run also bounds the corner burst, CORNER_ACCEL_RATIO above
+    the config's max_accel; the floor run leaves it unbounded."""
+    return CORNER_ACCEL_RATIO * _config_max_accel(case)
+
+
 def _sections(case):
     return {
         "floor": "[corner_deviation]\n",
-        "cap": "[corner_deviation]\nmax_deviation: %r\n" % (case.cap,),
+        "cap": "[corner_deviation]\nmax_deviation: %r\nmax_corner_accel: %r\n"
+        % (case.cap, _corner_accel(case)),
     }
 
 
@@ -399,7 +417,50 @@ def _floor_per_unit_accel(epoch):
     )
 
 
-def _check_shaped(v, name, raw, cap):
+def _shaper_spec(state):
+    """corner_deviation.shaper_spec of a captured shaper state."""
+    if state["kind"] == "pulses":
+        if not state["A"]:
+            return None
+        return ("pulses", tuple(state["A"]), tuple(state["T"]))
+    if not state["smooth_time"]:
+        return None
+    return ("smoother", tuple(state["coeffs"]), state["smooth_time"])
+
+
+def _admitted_accel(capture, cap, corner_accel):
+    """Per move, the worst executed (x, y) acceleration the limiter admits
+    at the move's accel under its shaper epoch (corner_deviation's
+    CornerAccel; a stop at every corner without shaping)."""
+    moves = capture["moves"]
+    max_velocity = max(m["max_cruise_v"] for m in moves)
+    models, worst = {}, {}
+    out = np.zeros((len(moves), 2))
+    for i, m in enumerate(moves):
+        epoch = m["shaper_epoch"]
+        if epoch not in models:
+            state = capture["shapers"][epoch]
+            specs = tuple(_shaper_spec(state[axis]) for axis in "xy")
+            models[epoch] = None
+            if None not in specs:
+                kx, ky = (corner_deviation.kernel_from_spec(s) for s in specs)
+                arrays = corner_deviation.table_arrays(
+                    specs, kx, ky, TABLE_CACHE_DIR
+                )
+                models[epoch] = corner_deviation.CornerAccel(arrays, kx, ky)
+        key = (epoch, m["accel"])
+        if key not in worst:
+            model = models[epoch]
+            worst[key] = (
+                (m["accel"], m["accel"])
+                if model is None
+                else model.worst(m["accel"], max_velocity, cap, corner_accel)
+            )
+        out[i] = worst[key]
+    return out
+
+
+def _check_shaped(v, name, raw, cap, corner_accel):
     """A vertex's deviation is measured over [t_arrive - W, t_leave + W]
     (W the kernel reach), and the shaped path there depends on the moves
     within another W: the floor and the stop exemption look that far."""
@@ -462,14 +523,30 @@ def _check_shaped(v, name, raw, cap):
             )
     t = t0 + DT * np.arange(n)
     near = _painted_max(moves, max_accel, t0, n, reach)
-    limit = (1.0 + corner_deviation.ACCEL_MARGIN) * near
+    admitted = _admitted_accel(raw.capture, cap, corner_accel)
+    admitted_near = {
+        axis: _painted_max(moves, admitted[:, i], t0, n, reach)
+        for i, axis in enumerate("xy")
+    }
+    admitted_near["z"] = near
     slack = FLOAT_TOLERANCE * near.max()
     metrics["accel_ratio"] = 0.0
+    metrics["admitted_ratio"] = 0.0
     for axis in "xyz":
         acc = np.abs(motion[axis].acc)
+        limit = (1.0 + corner_deviation.ACCEL_MARGIN) * admitted_near[axis]
         metrics["accel_ratio"] = max(
             metrics["accel_ratio"],
             float((acc / np.where(near > 0.0, near, np.inf)).max(initial=0.0)),
+        )
+        positive = admitted_near[axis] > 0.0
+        metrics["admitted_ratio"] = max(
+            metrics["admitted_ratio"],
+            float(
+                (acc / np.where(positive, admitted_near[axis], np.inf)).max(
+                    initial=0.0
+                )
+            ),
         )
         v.check(
             bool(np.isfinite(acc).all()), "%s: non-finite executed accel", name
@@ -536,7 +613,11 @@ def check(case):
                 continue
             try:
                 result, metrics = _check_shaped(
-                    v, name, raw, case.cap if name == "cap" else None
+                    v,
+                    name,
+                    raw,
+                    case.cap if name == "cap" else None,
+                    _corner_accel(case) if name == "cap" else None,
                 )
             except analysis.ModelMismatch as e:
                 v.check(False, "%s: harness model mismatch: %s", name, e)
@@ -736,7 +817,12 @@ def summary(results):
     """Largest floor/cap/accel ratio per mode and flush counts."""
     lines = []
     for mode in ("floor", "cap"):
-        for metric in ("floor_ratio", "cap_ratio", "accel_ratio"):
+        for metric in (
+            "floor_ratio",
+            "cap_ratio",
+            "accel_ratio",
+            "admitted_ratio",
+        ):
             values = [
                 (r[mode][metric], r["seed"])
                 for r in results

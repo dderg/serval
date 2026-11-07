@@ -72,6 +72,7 @@ class Run:
     mcr: float
     max_deviation: float | None = None
     unlimited_extruder_corner: bool = False
+    max_corner_accel: float | None = None
 
     def key(self):
         return json.dumps(dataclasses.asdict(self), sort_keys=True)
@@ -129,6 +130,8 @@ def _config_path(run, tmpdir):
         section = "[corner_deviation]\n"
         if run.max_deviation is not None:
             section += "max_deviation: %r\n" % (run.max_deviation,)
+        if run.max_corner_accel is not None:
+            section += "max_corner_accel: %r\n" % (run.max_corner_accel,)
         sections.append(section)
     if not sections:
         return base

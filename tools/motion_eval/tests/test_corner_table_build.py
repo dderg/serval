@@ -41,6 +41,9 @@ def _limiter(cache_dir):
     limiter.printer = _Printer()
     limiter.cache_dir = str(cache_dir)
     limiter.max_deviation = None
+    limiter.max_corner_accel = None
+    limiter.toolhead = _Toolhead()
+    limiter.corner_accel_key = limiter.corner_accel = None
     limiter.limit = None
     limiter.building = False
     limiter.generation = 0
@@ -52,6 +55,11 @@ def _limiter(cache_dir):
         ("limited", "stopped_by_cap", "step_limited", "xy_stops"), 0
     )
     return limiter
+
+
+class _Toolhead:
+    max_accel = 5000.0
+    max_velocity = 300.0
 
 
 class _Mutex:
@@ -79,9 +87,9 @@ def _equal(a, b):
 def test_cached_table_is_the_built_table(tmp_path, specs):
     limiter = _limiter(tmp_path)
     kx, ky = (cd.kernel_from_spec(s) for s in specs)
-    built = limiter._table_arrays(specs, kx, ky)
+    built = cd.table_arrays(specs, kx, ky, str(tmp_path))
     (cached_file,) = os.listdir(tmp_path)
-    loaded = limiter._table_arrays(specs, kx, ky)
+    loaded = cd.table_arrays(specs, kx, ky, str(tmp_path))
     assert os.listdir(tmp_path) == [cached_file]
     assert _equal(loaded, built)
     assert _equal(built, cd.build_table_arrays(kx, ky))
@@ -91,7 +99,7 @@ def test_cache_key_covers_the_shaper(tmp_path):
     limiter = _limiter(tmp_path)
     for specs in (OWNER_SPECS, BENCH_SPECS):
         kx, ky = (cd.kernel_from_spec(s) for s in specs)
-        limiter._table_arrays(specs, kx, ky)
+        cd.table_arrays(specs, kx, ky, str(tmp_path))
     assert len(os.listdir(tmp_path)) == 2
 
 
@@ -107,7 +115,7 @@ def test_a_junction_planned_while_the_table_builds_shuts_down(tmp_path):
 
 def _bench_limit():
     kx, ky = (cd.kernel_from_spec(s) for s in BENCH_SPECS)
-    return cd.JunctionLimit(cd.build_table_arrays(kx, ky), kx, ky, None)
+    return cd.JunctionLimit(cd.build_table_arrays(kx, ky), kx, ky, None, None)
 
 
 def test_only_the_latest_build_is_published(tmp_path):
@@ -123,7 +131,6 @@ def test_only_the_latest_build_is_published(tmp_path):
 
 def test_counters_survive_a_shaper_change(tmp_path):
     limiter = _limiter(tmp_path)
-    limiter.toolhead = type("Toolhead", (), {"max_accel": 5000.0})()
     limiter.generation = 1
     limiter._publish(1, (_bench_limit(), None))
     assert limiter.junction_v2(_Move(1.0, 0.0), _Move(0.0, 1.0), 1e6) < 1e6

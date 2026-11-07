@@ -27,8 +27,9 @@ evaluated with its own kernels. Anything else fails with an error.
 and reports the free-vibration amplitude after corners, a ringing proxy for
 tuned and untuned modes (`owner_point.py` uses it).
 
-`fuzz.py` checks [corner_deviation] on random gcode (floor, cap, accel bound,
-unchanged accels and final positions, flush invariance); failing seeds go to
+`fuzz.py` checks [corner_deviation] on random gcode (floor, cap, executed
+accel within what the planner admits or max_corner_accel, unchanged accels
+and final positions, flush invariance); failing seeds go to
 `tests/fuzz_seeds.txt`. `live.py` runs klippy in real time against the
 linux-process MCU (KLIPPER_LINUX_MCU, built by kv2-notes/gate.sh) with
 `step_recorder.c` preloaded and compares the live step stream with batch.
