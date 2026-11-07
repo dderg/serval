@@ -11,17 +11,34 @@ uv run pytest tools/motion_eval
 python3 ~/Developer/serval/scripts/slots.py run -- \
     uv run python -m tools.motion_eval.sweep --jobs 12   # corpus sweep, FINDINGS.md
     uv run python -m tools.motion_eval.owner_point --jobs 12   # 50k / 200-130 Hz point
+python3 ~/Developer/serval/scripts/slots.py run -- \
+    uv run python -m tools.motion_eval.fuzz --seeds 0:10000 --jobs 12  # random gcode
+KLIPPER_LINUX_MCU=.../klipper.elf \
+    uv run python -m tools.motion_eval.live --case arcs   # live klippy CPU, one core
 uv run python -m tools.motion_eval.corpus.build_corpus  # regenerate corpus/
 ```
 
 The gcode must not home: the harness puts `SET_KINEMATIC_POSITION` at `--start`
 in front of it and `M400` after it. One MCU, linear kinematics (cartesian,
-corexy, ...) and a shaper that does not change after motion starts are required;
-anything else fails with an error.
+corexy, ...) are required; a shaper change mid-print starts a new epoch, each
+evaluated with its own kernels. Anything else fails with an error.
 
 `oscillator.py` drives a damped oscillator per axis with the executed motion
 and reports the free-vibration amplitude after corners, a ringing proxy for
 tuned and untuned modes (`owner_point.py` uses it).
+
+`fuzz.py` checks [corner_deviation] on random gcode (floor, cap, accel bound,
+unchanged accels and final positions, flush invariance); failing seeds go to
+`tests/fuzz_seeds.txt`. `live.py` runs klippy in real time against the
+linux-process MCU (KLIPPER_LINUX_MCU, built by kv2-notes/gate.sh) with
+`step_recorder.c` preloaded and compares the live step stream with batch.
+`object_probe.py` calls, in batch mode, the hooks only a live klippy calls
+(statistics `stats`, every get_status) and measures reactor stalls.
+
+`printer_test.py` writes the hardware test gcodes (`printer_test/`).
+`accel_residual.py` is oscillator.py's hardware twin: it aligns a Klipper
+ACCELEROMETER_MEASURE record with the replanned gcode and reports the measured
+ringing and corner acceleration. Procedure: PRINTER_TEST.md.
 
 Batch mode can exit with output still queued in the serial queue, dropping the
 tail of the stream under load. `capture.py` waits for the queue to drain before

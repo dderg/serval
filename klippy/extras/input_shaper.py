@@ -5,6 +5,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import collections
+import copy
 
 from klippy import chelper
 
@@ -571,6 +572,13 @@ class ShaperFactory:
         return shaper
 
 
+def _frozen(shaper):
+    """A copy that later SET_INPUT_SHAPER updates leave unchanged."""
+    frozen = copy.copy(shaper)
+    frozen.params = copy.copy(shaper.params)
+    return frozen
+
+
 class InputShaper:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -586,6 +594,7 @@ class InputShaper:
         ]
         self.input_shaper_stepper_kinematics = []
         self.orig_stepper_kinematics = []
+        self.applied_shapers = None
         # Register gcode commands
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
@@ -656,8 +665,29 @@ class InputShaper:
         motion_queuing.check_step_generation_scan_windows()
 
     def _update_input_shaping(self, error=None):
+        """Steps up to the last flush were generated with the previous
+        shapers; the new ones must see no motion within their reach of
+        it, or the shaped position jumps there and stepcompress rejects
+        the steps. When the generation window grows, the previous shapers
+        generate the stationary tail up to the new window first."""
+        motion_queuing = self.printer.lookup_object("motion_queuing")
         self.toolhead.flush_step_generation()
-        ffi_main, ffi_lib = chelper.get_ffi()
+        flushed_window = motion_queuing.get_kin_flush_delay()
+        failed_shapers = self._apply_shapers(self.shapers)
+        window_growth = motion_queuing.get_kin_flush_delay() - flushed_window
+        if window_growth > 0.0 and self.applied_shapers is not None:
+            self._apply_shapers(self.applied_shapers)
+            motion_queuing.flush_all_steps(window_growth)
+            failed_shapers = self._apply_shapers(self.shapers)
+        self.applied_shapers = [_frozen(s) for s in self.shapers]
+        if failed_shapers:
+            error = error or self.printer.command_error
+            raise error(
+                "Failed to configure shaper(s) %s with given parameters"
+                % (", ".join([s.get_name() for s in failed_shapers]))
+            )
+
+    def _apply_shapers(self, shapers):
         kin = self.toolhead.get_kinematics()
         failed_shapers = []
         for s in kin.get_steppers():
@@ -666,7 +696,7 @@ class InputShaper:
             is_sk = self._get_input_shaper_stepper_kinematics(s)
             if is_sk is None:
                 continue
-            for shaper in self.shapers:
+            for shaper in shapers:
                 if shaper in failed_shapers:
                     continue
                 if not shaper.update_stepper_kinematics(is_sk):
@@ -674,16 +704,12 @@ class InputShaper:
         for e in self.extruders:
             for es in e.get_extruder_steppers():
                 failed_shapers.extend(
-                    es.update_input_shaping(self.shapers, self.exact_mode)
+                    es.update_input_shaping(shapers, self.exact_mode)
                 )
-        motion_queuing = self.printer.lookup_object("motion_queuing")
-        motion_queuing.check_step_generation_scan_windows()
-        if failed_shapers:
-            error = error or self.printer.command_error
-            raise error(
-                "Failed to configure shaper(s) %s with given parameters"
-                % (", ".join([s.get_name() for s in failed_shapers]))
-            )
+        self.printer.lookup_object(
+            "motion_queuing"
+        ).check_step_generation_scan_windows()
+        return failed_shapers
 
     def disable_shaping(self):
         for shaper in self.shapers:

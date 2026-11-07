@@ -2239,7 +2239,8 @@ that corner already can. Acceleration is never changed.
   junctions.
 - `max_deviation` lowers junction speeds further, so that corners round
   at most that much. A corner whose stop alone rounds more than
-  `max_deviation` stops; its acceleration is not lowered.
+  `max_deviation` stops; its acceleration is not lowered. Corners closer
+  together than the shaper's duration can add up to 5% above it.
 - With an input smoother (`smooth_*`), a velocity step at a corner is
   applied over the smoother's duration and adds acceleration. Junction
   speeds are limited so that the executed acceleration, including the
@@ -2252,8 +2253,12 @@ that corner already can. Acceleration is never changed.
 
 Requires [input_shaper]. Setting `square_corner_velocity` in [printer],
 or `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=`, is an error while this
-section is present. The corner tables are rebuilt whenever the input
-shaper changes, which takes about a second.
+section is present. The corner table for each shaper configuration is
+computed once in a background thread (one to several seconds of CPU at
+low priority) and stored in `table_cache_dir`; later starts load it in
+milliseconds. Klipper becomes ready without waiting for it; G-code
+commands wait until it is ready (`table_ready` in the status), and
+`SET_INPUT_SHAPER` returns once the new shaper's table is ready.
 
 ```
 [corner_deviation]
@@ -2261,6 +2266,9 @@ shaper changes, which takes about a second.
 #   The largest distance, in mm, that the input-shaped toolhead path may
 #   deviate from the commanded path at a corner whose stop rounds less
 #   than this. The default is to allow the rounding of a stop.
+#table_cache_dir: ~/.cache/kalico/corner_deviation
+#   Directory for the computed corner tables, one file per shaper
+#   configuration and module version. It must be writable.
 ```
 
 ### [adxl345]

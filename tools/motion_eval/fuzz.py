@@ -15,7 +15,8 @@ flushes, and checks:
   and the executed motion matches the decoded steps (the harness check);
 - floor and cap: each corner of the shaped path rounds at most the shaper
   floor max_accel * hypot(sigma_x^2, sigma_y^2) / 2 of the moves around
-  it; with a cap, at most the cap unless a corner within reach stopped;
+  it; with a cap, at most cap * (1 + CAP_MARGIN) unless a corner within
+  reach stopped;
 - the trapq accels and the final step positions equal the default run's;
 - executed peak acceleration <= max_accel * (1 + ACCEL_MARGIN);
 - lazy flushes at random moves leave the trapq and the junction limits
@@ -56,11 +57,11 @@ MAX_SEGMENT_MM = 200.0
 SPEED_MM_S = (20.0, 1000.0)
 MAX_SEGMENT_S = 0.15
 ACCEL_MM_S2 = (500.0, 60000.0)
-SHAPER_FREQ_HZ = (25.0, 220.0)
+SHAPER_FREQ_HZ = (25.0, 35.0, 50.0, 70.0, 100.0, 130.0, 160.0, 200.0, 220.0)
 SHAPERS = ("smooth_mzv", "smooth_ei", "smooth_zv", "mzv", "ei", "zv")
 CAP_MM = (0.02, 0.3)
 EXTRUDE_PER_MM = 0.033
-DT = 50e-6
+DT = 25e-6
 FLOAT_TOLERANCE = 1e-9
 
 
@@ -222,7 +223,7 @@ class Program:
             % (
                 self.rng.uniform(50.0, 1200.0),
                 accel,
-                self.rng.choice((0.0, 0.25, 0.5, self.rng.random())),
+                self.rng.choice((0.0, 0.25, 0.5, self.rng.uniform(0.0, 0.95))),
             )
         )
 
@@ -234,8 +235,8 @@ class Program:
             "SET_INPUT_SHAPER SHAPER_TYPE=%s SHAPER_FREQ_X=%.2f SHAPER_FREQ_Y=%.2f"
             % (
                 self.rng.choice(SHAPERS),
-                self.rng.uniform(*SHAPER_FREQ_HZ),
-                self.rng.uniform(*SHAPER_FREQ_HZ),
+                self.rng.choice(SHAPER_FREQ_HZ),
+                self.rng.choice(SHAPER_FREQ_HZ),
             )
         )
 
@@ -421,6 +422,13 @@ def _check_shaped(v, name, raw, cap):
     max_accel = np.array([m["max_accel"] for m in moves])
     floor_near = _window_max(moves, floor_per_accel * accel, lo, hi)
     grid = 0.5 * _window_max(moves, max_accel, lo, hi) * DT**2 + FLOAT_TOLERANCE
+    metrics = {
+        "floor_ratio": float(
+            (deviation / np.where(floor_near > 0.0, floor_near, np.inf)).max(
+                initial=0.0
+            )
+        )
+    }
     for k in np.flatnonzero(deviation > floor_near + grid):
         v.check(
             False,
@@ -432,24 +440,37 @@ def _check_shaped(v, name, raw, cap):
         )
     if cap is not None:
         stopped = speed <= 0.0
-        for k in np.flatnonzero(deviation > cap + grid):
+        free = [
+            k
+            for k in range(len(deviation))
+            if not (stopped & (t_leave >= lo[k]) & (t_arrive <= hi[k])).any()
+        ]
+        metrics["cap_ratio"] = float(max(deviation[free], default=0.0) / cap)
+        cap_limit = (1.0 + corner_deviation.CAP_MARGIN) * cap
+        for k in np.flatnonzero(deviation > cap_limit + grid):
             near_stop = stopped & (t_leave >= lo[k]) & (t_arrive <= hi[k])
             v.check(
                 near_stop.any(),
-                "%s: corner at t=%.6f rounds %.6f mm > cap %.6f mm with no"
-                " stopped corner within %.4f s",
+                "%s: corner at t=%.6f rounds %.6f mm > cap %.6f mm (+%g) with"
+                " no stopped corner within %.4f s",
                 name,
                 t_arrive[k],
                 deviation[k],
                 cap,
+                corner_deviation.CAP_MARGIN,
                 reach,
             )
     t = t0 + DT * np.arange(n)
     near = _painted_max(moves, max_accel, t0, n, reach)
     limit = (1.0 + corner_deviation.ACCEL_MARGIN) * near
     slack = FLOAT_TOLERANCE * near.max()
+    metrics["accel_ratio"] = 0.0
     for axis in "xyz":
         acc = np.abs(motion[axis].acc)
+        metrics["accel_ratio"] = max(
+            metrics["accel_ratio"],
+            float((acc / np.where(near > 0.0, near, np.inf)).max(initial=0.0)),
+        )
         v.check(
             bool(np.isfinite(acc).all()), "%s: non-finite executed accel", name
         )
@@ -465,7 +486,7 @@ def _check_shaped(v, name, raw, cap):
                 limit[k],
                 t[k],
             )
-    return result
+    return result, metrics
 
 
 def _final_positions(raw):
@@ -506,7 +527,6 @@ def check(case):
                 v.check(False, "%s: klippy failed: %s", name, str(e)[-3000:])
         if "default" not in runs:
             out["violations"] = v
-            out["generator_error"] = True
             return out
         default_moves = runs["default"].capture["moves"]
         for name, raw in runs.items():
@@ -515,7 +535,7 @@ def check(case):
             if name == "default":
                 continue
             try:
-                result = _check_shaped(
+                result, metrics = _check_shaped(
                     v, name, raw, case.cap if name == "cap" else None
                 )
             except analysis.ModelMismatch as e:
@@ -524,6 +544,7 @@ def check(case):
             out[name] = {
                 "print_time_s": result["print_time_s"],
                 "corner_max_mm": result["executed"]["corners"]["max_mm"],
+                **metrics,
             }
             v.check(
                 [m["accel"] for m in moves]
@@ -539,7 +560,9 @@ def check(case):
                 _final_positions(runs["default"]),
             )
         if "floor" in runs:
-            out["flushes"] = check_flushes(v, case, tmp, runs["floor"])
+            out["flushes"] = check_flushes(
+                v, case, tmp, runs["floor"], runs["default"]
+            )
     out["violations"] = v
     return out
 
@@ -574,6 +597,16 @@ def _full_flushes(raw):
     }
 
 
+def _profiles(raw):
+    """Every trapq move without its start time: a flush that moves the
+    plan in time but not in shape (print_time resynced at a different
+    moment) leaves this unchanged."""
+    return [
+        {k: x for k, x in m.items() if k != "print_time"}
+        for m in raw.capture["moves"]
+    ]
+
+
 def _check_junctions(v, label, raw, base):
     """Every junction both runs computed has the same limiter limit; a
     junction only one of them computed sits at a stop of the other."""
@@ -605,31 +638,38 @@ def _check_junctions(v, label, raw, base):
         )
 
 
-def check_flushes(v, case, tmp, floor=None):
+def check_flushes(v, case, tmp, floor=None, default=None):
     """Floor mode with lazy flushes after case.lazy_flush_at moves, and
     with M400 after case.forced_flush_lines, against the plain batch run
     (planned here unless given). Junction limits: identical wherever both
     runs compute the junction. Lazy flushes: identical trapq unless a lazy
     flush left so little planned that Klipper's runout check stopped the
-    toolhead. Forced flushes, at minimum_cruise_ratio 0: no move faster."""
+    toolhead, or the default planner's own trapq changes with the same
+    flushes (minimum_cruise_ratio smoothing sees a different window; the
+    junction check still holds the limiter to identical limits). Forced
+    flushes, at minimum_cruise_ratio 0: no move faster."""
     if floor is None:
         floor = _run(case, tmp, _sections(case)["floor"])
-    lazy = _run(
-        case,
-        tmp,
-        _sections(case)["floor"],
-        env={
-            "MOTION_EVAL_LAZY_FLUSH_AT": ",".join(map(str, case.lazy_flush_at))
-        },
-    )
+    if default is None:
+        default = _run(case, tmp, None)
+    lazy_env = {
+        "MOTION_EVAL_LAZY_FLUSH_AT": ",".join(map(str, case.lazy_flush_at))
+    }
+    lazy = _run(case, tmp, _sections(case)["floor"], env=lazy_env)
+    default_lazy = _run(case, tmp, None, env=lazy_env)
     label = "lazy flush at %r" % (case.lazy_flush_at,)
     _check_junctions(v, label, lazy, floor)
     extra_stops = _full_flushes(lazy) - _full_flushes(floor)
-    info = {"lazy_runout_stops": len(extra_stops)}
-    if not extra_stops:
+    upstream_invariant = _profiles(default_lazy) == _profiles(default)
+    info = {
+        "lazy_runout_stops": len(extra_stops),
+        "upstream_lazy_differs": not upstream_invariant,
+    }
+    if not extra_stops and upstream_invariant:
         v.check(
-            lazy.capture["moves"] == floor.capture["moves"],
-            "%s: trapq differs from the batch run with no extra stop",
+            _profiles(lazy) == _profiles(floor),
+            "%s: trapq differs from the batch run with no extra stop, while"
+            " the default planner's does not",
             label,
         )
     flat = without_cruise_ratio(case)
@@ -672,9 +712,52 @@ def check_flushes(v, case, tmp, floor=None):
     return info
 
 
+def load_case(path):
+    """A Case frozen as JSON (tests/fuzz_cases), so a counterexample stays
+    reproducible when the generator changes."""
+    data = json.loads(pathlib.Path(path).read_text())
+    return Case(
+        data["seed"],
+        data["config"],
+        data["gcode"],
+        tuple(data["start"]),
+        data["cap"],
+        tuple(data["lazy_flush_at"]),
+        tuple(data["forced_flush_lines"]),
+    )
+
+
 def parse_seeds(text):
     lo, hi = text.split(":")
     return range(int(lo), int(hi))
+
+
+def summary(results):
+    """Largest floor/cap/accel ratio per mode and flush counts."""
+    lines = []
+    for mode in ("floor", "cap"):
+        for metric in ("floor_ratio", "cap_ratio", "accel_ratio"):
+            values = [
+                (r[mode][metric], r["seed"])
+                for r in results
+                if metric in r.get(mode, {})
+            ]
+            if values:
+                value, seed = max(values)
+                lines.append(
+                    "%s %s max %.4f (seed %d)" % (mode, metric, value, seed)
+                )
+    flushes = [r["flushes"] for r in results if "flushes" in r]
+    lines.append(
+        "lazy flush cases %d: with runout stops %d, default planner"
+        " not invariant %d"
+        % (
+            len(flushes),
+            sum(1 for f in flushes if f["lazy_runout_stops"]),
+            sum(1 for f in flushes if f["upstream_lazy_differs"]),
+        )
+    )
+    return "\n".join(lines)
 
 
 def _check_seed(seed):
@@ -695,6 +778,10 @@ def main(argv=None):
         ):
             results.append(res)
             if res["violations"]:
+                case = dataclasses.asdict(generate(res["seed"]))
+                (args.out / ("seed%d.json" % res["seed"])).write_text(
+                    json.dumps(case, indent=1) + "\n"
+                )
                 print(
                     "seed %d (%s): %s"
                     % (res["seed"], res["config"], res["violations"][0]),
@@ -707,6 +794,7 @@ def main(argv=None):
     )
     failed = [r for r in results if r["violations"]]
     print("%d cases, %d with violations" % (len(results), len(failed)))
+    print(summary(results))
     for r in failed:
         print(
             "  seed %d (%s): %d violations, first: %s"

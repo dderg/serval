@@ -150,6 +150,8 @@ class Capture:
         self.added = 0
         self.junctions = []
         self.flushes = []
+        self.flush_work = []
+        self.reactor_meter = None
         self.lazy_flush_at = frozenset(
             int(i)
             for i in os.environ.get("MOTION_EVAL_LAZY_FLUSH_AT", "").split(",")
@@ -171,7 +173,12 @@ class Capture:
         requested = collections.deque()
 
         def flush(lazy=False):
+            queued = len(toolhead_obj.lookahead.queue)
+            start = time.perf_counter()
             moves = real_flush(lazy=lazy)
+            self.flush_work.append(
+                [queued, len(moves), time.perf_counter() - start]
+            )
             self.flushes.append([self.added, lazy, len(moves)])
             requested.extend(
                 (math.sqrt(m.max_cruise_v2), m.motion_eval_max_accel)
@@ -223,6 +230,11 @@ class Capture:
     def _on_ready(self):
         self.printer.lookup_object("gcode").register_command(
             "MOTION_EVAL_EXIT", self._cmd_exit
+        )
+        corner_deviation = self.printer.lookup_object("corner_deviation", None)
+        self.reactor_meter = ReactorMeter(
+            self.printer.get_reactor(),
+            lambda: corner_deviation is not None and corner_deviation.building,
         )
         self._note_shaper()
         shaper_obj = self.printer.lookup_object("input_shaper", None)
@@ -320,12 +332,68 @@ class Capture:
             "shapers": self.shapers,
             "junctions": self.junctions,
             "flushes": self.flushes,
+            "flush_work": self.flush_work,
+            "reactor": self.reactor_meter.summary(),
             "added_moves": self.added,
             "settings": self.settings,
             "timing": self.timing,
             "corner_deviation": None
             if limiter is None
             else limiter.get_status(None),
+        }
+
+
+REACTOR_TICK_S = 0.005
+REACTOR_WORST_KEPT = 8
+
+
+class ReactorMeter:
+    """A reactor timer due every REACTOR_TICK_S, from klippy:ready on.
+    cpu_s: the main-thread CPU spent between two of its runs, i.e. the
+    longest stretch some callback held the reactor. late_s: how long after
+    it was due a run started (wall clock; includes waiting for the CPU on a
+    throttled host and for the GIL). worst: the REACTOR_WORST_KEPT largest
+    of each as [seconds after ready, cpu_s, late_s]; worst_building: the
+    largest late_s while building() (a corner table thread runs)."""
+
+    def __init__(self, reactor, building):
+        self.reactor = reactor
+        self.building = building
+        self.start = self.due = reactor.monotonic()
+        self.last_cpu = time.thread_time()
+        self.worst_cpu = []
+        self.worst_late = []
+        self.worst_building = []
+        self.building_s = 0.0
+        self.ticks = 0
+        reactor.register_timer(self.tick, self.due)
+
+    def tick(self, eventtime):
+        now_cpu = time.thread_time()
+        now = self.reactor.monotonic()
+        sample = [now - self.start, now_cpu - self.last_cpu, now - self.due]
+        kept = [(self.worst_cpu, 1), (self.worst_late, 2)]
+        if self.building():
+            kept.append((self.worst_building, 2))
+            self.building_s = sample[0]
+        for worst, index in kept:
+            worst.append(sample)
+            worst.sort(key=lambda s: -s[index])
+            del worst[REACTOR_WORST_KEPT:]
+        self.last_cpu = now_cpu
+        self.ticks += 1
+        self.due = eventtime + REACTOR_TICK_S
+        return self.due
+
+    def summary(self):
+        return {
+            "max_cpu_s": self.worst_cpu[0][1],
+            "max_late_s": self.worst_late[0][2],
+            "worst_cpu": self.worst_cpu,
+            "worst_late": self.worst_late,
+            "worst_building": self.worst_building,
+            "building_until_s": self.building_s,
+            "ticks": self.ticks,
         }
 
 

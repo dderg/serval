@@ -44,6 +44,7 @@ SOURCE_FILES = [
     "kin_shaper.c",
     "kin_idex.c",
     "integrate.c",
+    "corner_deviation.c",
 ]
 DEST_LIB = "c_helper.so"
 OTHER_FILES = [
@@ -212,6 +213,24 @@ defs_kin_shaper = """
     struct stepper_kinematics * input_shaper_alloc(void);
 """
 
+defs_corner_deviation = """
+    struct cd_limiter {
+        int n_alpha, n_theta, n_w, jump_points;
+        double alpha_step, theta_step;
+        double *w, *g, *floor, *w_floor;
+        double variance, window, max_deviation;
+        int has_cap, smoothing;
+        double density_peak[2];
+        double *jump_cells[2];
+        double step_allowance, min_direction_change, min_xy_share;
+        uint64_t limited, stopped_by_cap, step_limited, xy_stops;
+    };
+    double cd_junction_v2(struct cd_limiter *l, double upx, double upy
+        , double umx, double umy, double prev_d, double move_d
+        , double prev_accel, double move_accel, double max_accel
+        , double cap_v2);
+"""
+
 defs_kin_idex = """
     void dual_carriage_set_sk(struct stepper_kinematics *sk
         , struct stepper_kinematics *orig_sk);
@@ -296,6 +315,7 @@ defs_all = [
     defs_kin_extruder,
     defs_kin_shaper,
     defs_kin_idex,
+    defs_corner_deviation,
 ]
 
 
