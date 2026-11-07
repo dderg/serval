@@ -28,6 +28,8 @@ PI_ENV = f"{PI_KV2}/env"
 PI_CONFIG = f"{PI_KV2}/printer.cfg"
 PI_LOG = f"{PI_KV2}/logs/klippy.log"
 PI_AGENT = f"{PI_KV2}/pi_agent.py"
+PI_PROBE = f"{PI_KV2}/klippy_probe.py"
+PI_PROBE_OUT = f"{PI_KV2}/probe.json"
 PI_OPENOCD_CFG = f"{PI_KV2}/openocd-target.cfg"
 PI_FIRMWARE_ELF = f"{PI_KV2}/kv2-f401.elf"
 PI_GCODES = f"{PI_HOME}/printer_data/gcodes"
@@ -113,6 +115,7 @@ def install_agent() -> None:
     ssh(f"rm -rf {PI_KV2}/runs && mkdir -p {PI_KV2}/logs {PI_KV2}/runs")
     pi.scp_to_pi(Path(__file__).with_name("pi_agent.py"), PI_AGENT)
     pi.scp_to_pi(SERVAL_BENCH / "openocd-target.cfg", PI_OPENOCD_CFG)
+    pi.scp_to_pi(Path(__file__).with_name("klippy_probe.py"), PI_PROBE)
 
 
 def klipper_cmdline() -> str:
@@ -166,13 +169,18 @@ def restart_ready() -> str:
     return settled
 
 
-def activate(remote_tree: str, config: Path) -> None:
+def activate(remote_tree: str, config: Path, probe: bool = False) -> None:
     """Point the klipper service at `remote_tree` with `config` and restart it
     with a fresh log. Readiness is the caller's: the board may still run
     other firmware."""
     pi.scp_to_pi(config, PI_CONFIG)
+    launcher = (
+        f"{PI_PROBE} {remote_tree} {PI_PROBE_OUT}"
+        if probe
+        else f"{remote_tree}/klippy/klippy.py"
+    )
     exec_start = (
-        f"{PI_ENV}/bin/python {remote_tree}/klippy/klippy.py {PI_CONFIG} "
+        f"{PI_ENV}/bin/python {launcher} {PI_CONFIG} "
         f"-I {PI_HOME}/printer_data/comms/klippy.serial -l {PI_LOG} "
         "-a /tmp/klippy_uds"
     )
@@ -184,7 +192,7 @@ def activate(remote_tree: str, config: Path) -> None:
     )
     restart_service()
     cmdline = klipper_cmdline()
-    if f"{remote_tree}/klippy/klippy.py" not in cmdline:
+    if remote_tree not in cmdline:
         raise BenchError(f"klipper runs {cmdline!r}, not {remote_tree}")
 
 

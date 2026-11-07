@@ -59,14 +59,14 @@ def cpu_loop(pid, out_path, stop):
         out.write(json.dumps(sample(pid)) + "\n")
 
 
-def tap_loop(uds, steppers, out_path, stop, ready):
+def tap_loop(uds, subscriptions, out_path, stop, ready):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(uds)
-    for index, name in enumerate(steppers):
+    for index, (method, key, name) in enumerate(subscriptions):
         request = {
             "id": index + 1,
-            "method": "motion_report/dump_stepper",
-            "params": {"name": name, "response_template": {"tap": name}},
+            "method": method,
+            "params": {"name": name, "response_template": {key: name}},
         }
         sock.sendall(json.dumps(request).encode() + ETX)
     sock.settimeout(0.2)
@@ -88,7 +88,7 @@ def tap_loop(uds, steppers, out_path, stop, ready):
                     if "error" in decoded:
                         raise RuntimeError("subscription failed: %r" % decoded)
                     answered.add(decoded["id"])
-                    if len(answered) == len(steppers):
+                    if len(answered) == len(subscriptions):
                         ready.set()
                 out.write(message + b"\n")
     sock.close()
@@ -99,6 +99,7 @@ def main():
     parser.add_argument("out_dir")
     parser.add_argument("--pid", type=int, required=True)
     parser.add_argument("--steppers", default="")
+    parser.add_argument("--trapqs", default="")
     parser.add_argument("--uds", default="/tmp/klippy_uds")
     args = parser.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
@@ -122,13 +123,21 @@ def main():
         )
     ]
     ready = threading.Event()
-    steppers = [s for s in args.steppers.split(",") if s]
-    if steppers:
+    subscriptions = [
+        ("motion_report/dump_stepper", "tap", s)
+        for s in args.steppers.split(",")
+        if s
+    ] + [
+        ("motion_report/dump_trapq", "trapq", t)
+        for t in args.trapqs.split(",")
+        if t
+    ]
+    if subscriptions:
         threads.append(
             guarded(
                 tap_loop,
                 args.uds,
-                steppers,
+                subscriptions,
                 os.path.join(args.out_dir, "tap.jsonl"),
                 stop,
                 ready,

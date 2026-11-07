@@ -97,6 +97,7 @@ class Session:
         prog: program.Program,
         tap: bool,
         host: dict | None = None,
+        **options,
     ) -> dict:
         record = {
             "gate": gate,
@@ -106,6 +107,7 @@ class Session:
             "program": prog.name,
             "tap": tap,
             "host": host or {},
+            "options": options,
         }
         print(
             f"[{gate}] {tree_name} {config} {prog.name} tap={tap} {host or ''}",
@@ -120,6 +122,7 @@ class Session:
                 f"{gate}-{tree_name}-{config}-{prog.name}",
                 tap,
                 extra={"record": record},
+                **options,
             )
             record["run_dir"] = str(run_dir)
             record["print_state"] = "complete"
@@ -242,6 +245,57 @@ def gate_g4(s: Session, kv2: str, upstream: str) -> None:
     bench.restart_ready()
 
 
+def gate_investigate(s: Session, kv2: str, upstream: str) -> None:
+    """Live-vs-batch trapq on the dense x15 case (upstream and kv2), and a
+    probed, py-spy profiled arcs_x30 with and without corner_deviation."""
+    bench.ssh(f"{bench.PI_ENV}/bin/pip install -q py-spy")
+    owner = CONFIGS / "owner_like.cfg"
+    dense = load_program("voron_top_layers", DENSE["voron_top_layers"])
+    s.trees["upstream"] = bench.install_tree(upstream)
+    bench.activate(s.trees["upstream"], owner)
+    bench.restart_ready()
+    s.run(
+        "inv", "upstream", upstream, "owner_like", dense, tap=True, trapq=True
+    )
+    bench.activate(s.trees["kv2"], owner, probe=True)
+    bench.restart_ready()
+    s.run(
+        "inv", "kv2", kv2, "owner_like", dense, tap=True, trapq=True, probe=True
+    )
+    arcs = load_program("arcs", DENSE["arcs"])
+    slow = {"cpus": 1, "max_mhz": 1500}
+    for config in ("owner_like_cd", "owner_like"):
+        for host in ({}, slow):
+            with throttle.throttled(
+                throttle.Throttle(host.get("cpus"), host.get("max_mhz"))
+            ):
+                s.run(
+                    "inv",
+                    "kv2",
+                    kv2,
+                    config,
+                    arcs,
+                    tap=False,
+                    host=host,
+                    profile=True,
+                    probe=True,
+                )
+    with throttle.throttled(throttle.Throttle(1, 1500)), quota(50):
+        s.run(
+            "inv",
+            "kv2",
+            kv2,
+            "owner_like_cd",
+            arcs,
+            tap=False,
+            host={**slow, "quota_pct": 50},
+            profile=True,
+            probe=True,
+        )
+    bench.activate(s.trees["kv2"], owner)
+    bench.restart_ready()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gates", default="g1,g2,g3,g4")
@@ -296,6 +350,8 @@ def main() -> None:
                 )
             if "g4" in gates:
                 gate_g4(session, kv2, upstream)
+            if "inv" in gates:
+                gate_investigate(session, kv2, upstream)
         except BaseException as exc:
             failure = exc
             traceback.print_exc()

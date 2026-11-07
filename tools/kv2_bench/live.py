@@ -24,9 +24,11 @@ POLL_S = 0.5
 AGENT_READY_TIMEOUT_S = 20.0
 
 
-def start_agent(remote_dir: str, tap: bool) -> None:
+def start_agent(remote_dir: str, tap: bool, trapq: bool = False) -> None:
     pid = bench.pi.klipper_pid()
     steppers = f"--steppers {','.join(STEPPERS)}" if tap else ""
+    if trapq:
+        steppers += " --trapqs toolhead"
     bench.ssh(f"rm -rf {remote_dir} && mkdir -p {remote_dir}")
     bench.ssh(
         f"setsid nohup python3 {bench.PI_AGENT} {remote_dir} --pid {pid} "
@@ -68,6 +70,9 @@ def run(
     tap: bool,
     timeout_s: float = 1800.0,
     extra: dict | None = None,
+    trapq: bool = False,
+    profile: bool = False,
+    probe: bool = False,
 ) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = runs_dir / f"{stamp}-{label}"
@@ -90,7 +95,14 @@ def run(
         summary["klipper_cmdline"] = bench.klipper_cmdline()
         summary["mcu_version"] = bench.mcu_version()
         bench.upload(remote_name, program.text())
-        start_agent(remote_dir, tap)
+        start_agent(remote_dir, tap, trapq)
+        if profile:
+            bench.ssh(
+                f"sudo setsid nohup {bench.PI_ENV}/bin/py-spy record "
+                f"-p {bench.pi.klipper_pid()} -r 250 --nonblocking -f raw "
+                f"-o {remote_dir}/pyspy.txt > {remote_dir}/pyspy.log 2>&1 "
+                f"< /dev/null & echo $! > {remote_dir}/pyspy.pid"
+            )
     except BaseException as exc:
         bench.pi.scp_from_pi(bench.PI_LOG, run_dir / "klippy.log")
         summary["failure"] = f"before printing: {exc!r}"
@@ -130,6 +142,14 @@ def run(
         stop_agent(remote_dir)
     except BaseException as exc:
         failure = failure or exc
+    if profile:
+        try:
+            bench.ssh(
+                f"pid=$(cat {remote_dir}/pyspy.pid); sudo kill -INT $pid; "
+                f"while kill -0 $pid 2>/dev/null; do sleep 0.2; done"
+            )
+        except BaseException as exc:
+            failure = failure or exc
     if failure is not None:
         try:
             if bench.pi.printer_state() == "ready":
@@ -137,9 +157,18 @@ def run(
         except Exception as exc:
             failure.add_note(f"cancelling the print also failed: {exc!r}")
     bench.pi.scp_from_pi(bench.PI_LOG, run_dir / "klippy.log")
-    for name in ("cpu.jsonl", "tap.jsonl", "agent.json", "agent.log"):
+    for name in (
+        "cpu.jsonl",
+        "tap.jsonl",
+        "agent.json",
+        "agent.log",
+        "pyspy.txt",
+        "pyspy.log",
+    ):
         if bench.ssh(f"test -e {remote_dir}/{name} && echo y || true").strip():
             bench.pi.scp_from_pi(f"{remote_dir}/{name}", run_dir / name)
+    if probe:
+        bench.pi.scp_from_pi(bench.PI_PROBE_OUT, run_dir / "probe.json")
     bench.remove_upload(remote_name)
     bench.ssh(f"rm -rf {remote_dir}")
     summary.update(
