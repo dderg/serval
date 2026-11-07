@@ -51,6 +51,7 @@ def test_failure_rate_lateness_and_stall_stack(tmp_path):
         {
             "gate": "trials",
             "config": "cd",
+            "host": {},
             "run_dir": str(tmp_path / "bad"),
             "error": "shutdown",
         },
