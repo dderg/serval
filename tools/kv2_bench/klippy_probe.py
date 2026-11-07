@@ -65,6 +65,7 @@ def main():
         "late_events": [],
         "stalls": [],
         "pyspy_native": None,
+        "clocksync": {},
     }
     requested = {}
     labels = {}
@@ -194,6 +195,69 @@ def main():
             self.register_event_handler(event, mark(event))
 
     printer.Printer.__init__ = printer_init
+
+    try:
+        from klippy import clocksync
+    except ImportError:
+        clocksync = None
+
+    def sync_log(sync):
+        with lock:
+            return state["clocksync"].setdefault(
+                "%s@%x" % (type(sync).__name__, id(sync)),
+                {"connect": None, "samples": []},
+            )
+
+    real_connect = clocksync and clocksync.ClockSync.connect
+    real_handle_clock = clocksync and clocksync.ClockSync._handle_clock
+
+    def clock_connect(self, serial):
+        log = sync_log(self)
+        start = mono()
+        real_connect(self, serial)
+        with lock:
+            log["connect"] = {
+                "start": start,
+                "end": mono(),
+                "mcu_freq": self.mcu_freq,
+                "clock_est": list(self.clock_est),
+            }
+
+    def handle_clock(self, params):
+        before = (
+            self.last_prediction_time,
+            self.prediction_variance,
+            self.time_avg,
+            self.clock_est,
+        )
+        real_handle_clock(self, params)
+        if before[2] == self.time_avg:
+            decision = "ignored"
+        elif self.prediction_variance == (0.001 * self.mcu_freq) ** 2 and (
+            before[1] != self.prediction_variance
+        ):
+            decision = "reset"
+        else:
+            decision = "accepted"
+        log = sync_log(self)
+        with lock:
+            log["samples"].append(
+                {
+                    "sent": params.get("#sent_time"),
+                    "received": params.get("#receive_time"),
+                    "clock": self.last_clock,
+                    "decision": decision,
+                    "freq": self.clock_est[2],
+                    "pred_stddev": self.prediction_variance**0.5,
+                    "time_avg": self.time_avg,
+                    "clock_avg": self.clock_avg,
+                    "in_connect": self.get_clock_cmd is None,
+                }
+            )
+
+    if clocksync is not None:
+        clocksync.ClockSync.connect = clock_connect
+        clocksync.ClockSync._handle_clock = handle_clock
 
     try:
         from klippy.extras import corner_deviation

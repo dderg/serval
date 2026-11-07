@@ -191,3 +191,52 @@ def run(
             f"print ended {final.get('state')!r}: {final.get('message')} ({run_dir})"
         )
     return run_dir
+
+
+def startup_trial(
+    program: Program | None,
+    config: Path,
+    runs_dir: Path,
+    label: str,
+    watch_s: float,
+    extra: dict,
+) -> dict:
+    """Restart klippy (probe launcher active) and watch it for `watch_s`:
+    printing `program` from the start, or idle when it is None. No capture:
+    the outcome is klippy's state and the probe's record."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = runs_dir / f"{stamp}-{label}"
+    run_dir.mkdir(parents=True)
+    bench.push_config(config)
+    (run_dir / "printer.cfg").write_text(config.read_text())
+    bench.ssh(f": > {bench.PI_LOG}")
+    summary: dict = {"label": label, **extra, "failure": None}
+    remote_name = f"kv2trial_{stamp}.gcode"
+    try:
+        summary["settled_after_restart"] = bench.restart_ready()
+        if program is not None:
+            bench.upload(remote_name, program.text())
+            summary["print_start_pi_monotonic"] = pi_monotonic()
+            bench.start_print(remote_name)
+        deadline = time.monotonic() + watch_s
+        while time.monotonic() < deadline:
+            state = bench.pi.printer_state()
+            if state != "ready":
+                raise bench.BenchError(f"klippy entered state {state!r}")
+            time.sleep(POLL_S)
+        summary["watch_end_pi_monotonic"] = pi_monotonic()
+    except BaseException as exc:
+        summary["failure"] = repr(exc)
+    bench.pi.scp_from_pi(bench.PI_LOG, run_dir / "klippy.log")
+    bench.pi.scp_from_pi(bench.PI_PROBE_OUT, run_dir / "probe.json")
+    if program is not None:
+        if bench.pi.printer_state() == "ready" and bench.print_stats()[
+            "state"
+        ] in (
+            "printing",
+            "paused",
+        ):
+            bench.pi.http("POST", "/printer/print/cancel")
+        bench.remove_upload(remote_name)
+    (run_dir / "run.json").write_text(json.dumps(summary, indent=2))
+    return {"run_dir": str(run_dir), **summary}

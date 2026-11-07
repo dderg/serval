@@ -356,6 +356,42 @@ def gate_trials(s: Session, kv2: str, trials: int) -> None:
     bench.restart_ready()
 
 
+CLOCK_TRIAL_KINDS = (
+    ("owner_like_cd", True),
+    ("owner_like", True),
+    ("owner_like", False),
+)
+CLOCK_TRIAL_WATCH_S = 15.0
+
+
+def gate_clocktrials(s: Session, kv2: str, trials: int) -> None:
+    """Startup + 15 s, at 1 cpu / 1500 MHz, `trials` rounds of: owner_like_cd
+    printing arcs_x15, owner_like printing it, owner_like idle. The probe
+    records every clocksync sample; the outcome is klippy's state."""
+    bench.activate(s.trees["kv2"], CONFIGS / "owner_like.cfg", probe=True)
+    bench.restart_ready()
+    arcs = load_program("arcs", 15)
+    with throttle.throttled(throttle.Throttle(1, 1500)):
+        for trial in range(trials):
+            for config, printing in CLOCK_TRIAL_KINDS:
+                kind = f"{config}-{'print' if printing else 'idle'}"
+                print(f"[clocktrials] {trial} {kind}", flush=True)
+                record = live.startup_trial(
+                    arcs if printing else None,
+                    CONFIGS / f"{config}.cfg",
+                    s.out / "runs",
+                    f"clock-{kind}",
+                    CLOCK_TRIAL_WATCH_S,
+                    {"trial": trial, "kind": kind, "commit": kv2},
+                )
+                record["gate"] = "clocktrials"
+                s.records.append(record)
+                s.save()
+                print(f"  -> {record['failure']}", flush=True)
+    bench.activate(s.trees["kv2"], CONFIGS / "owner_like.cfg")
+    bench.restart_ready()
+
+
 def gate_investigate(s: Session, kv2: str, upstream: str) -> None:
     """Live-vs-batch trapq on the dense x15 case (upstream and kv2), and a
     probed, py-spy profiled arcs_x30 with and without corner_deviation."""
@@ -476,6 +512,8 @@ def main() -> None:
                 gate_investigate(session, kv2, upstream)
             if "trials" in gates:
                 gate_trials(session, kv2, args.trials)
+            if "clocktrials" in gates:
+                gate_clocktrials(session, kv2, args.trials)
             if "soak" in gates:
                 gate_soak(session, kv2, set(args.configs.split(",")))
         except BaseException as exc:
