@@ -474,7 +474,7 @@ Klipper master and Kalico main have the same code: no upstream fix to port.
 
 ### Fix (kv2/clocksync, 2 commits on 713e70c9d)
 
-`klippy/clocksync.py` +68 −30, `klippy/mcu.py` ±1, test +150, data +100.
+`klippy/clocksync.py` +70 −28, `klippy/mcu.py` ±1, test +150, data +100 (321 insertions, 29 deletions).
 
 1. **Calibration.** `get_uptime` only extends the clock to 64 bits. The estimate is seeded with a least-squares fit of the 8 `get_clock` samples, whose round trips are measured.
 2. **Outlier filter.** A sample may lead the prediction by at most its own round trip, because a late send reads the clock at most that late. A larger lead means the estimate is wrong: the prediction variance is reset and the sample is used instead of ignored. A low estimate can no longer freeze.
