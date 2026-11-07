@@ -43,8 +43,13 @@ def run_klippy(
     start_xyz,
     mcu_config=mcu_dict.DEFAULT_MCU_CONFIG,
     klippy_root=REPO_ROOT,
+    env=None,
+    dictionary=None,
 ) -> RawRun:
-    dictionary = mcu_dict.build(mcu_config)
+    """env: extra environment variables for the klippy process. dictionary:
+    an MCU data dictionary to use instead of building mcu_config's."""
+    if dictionary is None:
+        dictionary = mcu_dict.build(mcu_config)
     with tempfile.TemporaryDirectory(prefix="motion_eval_") as tmp:
         tmpdir = pathlib.Path(tmp)
         gcode_path = tmpdir / "input.gcode"
@@ -67,7 +72,7 @@ def run_klippy(
             "-l",
             str(log_path),
         ]
-        env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+        env = dict(os.environ, PYTHONPATH=str(REPO_ROOT), **(env or {}))
         res = subprocess.run(
             cmd, cwd=klippy_root, env=env, capture_output=True, text=True
         )

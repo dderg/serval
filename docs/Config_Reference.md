@@ -2234,17 +2234,19 @@ time spread; 0.2-0.35 mm at typical settings). Each junction runs at the
 highest speed whose corner, after shaping, rounds no more than a stop at
 that corner already can. Acceleration is never changed.
 
-- On curves the speed is capped so that the shaped curve stays within the
-  same rounding, and segments shorter than the shaper's duration get that
-  cap as their cruise speed.
+- On curves the junction speed is capped so that the shaped curve stays
+  within the same rounding, including what short segments gain between
+  junctions.
 - `max_deviation` lowers junction speeds further, so that corners round
   at most that much. A corner whose stop alone rounds more than
   `max_deviation` stops; its acceleration is not lowered.
 - With an input smoother (`smooth_*`), a velocity step at a corner is
   applied over the smoother's duration and adds acceleration. Junction
-  speeds are limited so that the executed acceleration stays within
-  about 5% above `max_accel` (the default `square_corner_velocity`
-  reaches about 3% above). The limit is approximate.
+  speeds are limited so that the executed acceleration, including the
+  moves' own acceleration along a curve, stays within 5% of
+  `max_accel`. The limit is approximate and checked on random gcode.
+- A junction to or from a move without X/Y motion (e.g. a pure Z move)
+  stops.
 - While input shaping is disabled on X or Y, every change of direction
   stops, the same as `square_corner_velocity: 0`.
 

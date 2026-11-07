@@ -203,7 +203,7 @@ def _shaper_floor(r):
     """sigma_x^2 * a_x and sigma_y^2 * a_y over 2 at max_accel on both axes:
     no acceleration profile within max_accel rounds the shaped path more."""
     variances = [
-        analysis.Kernel.from_shaper(r["shaper"][axis]).second_moment()
+        analysis.Kernel.from_shaper(r["shapers"][0][axis]).second_moment()
         for axis in "xy"
     ]
     return 0.5 * r["settings"]["max_accel"] * math.hypot(*variances)

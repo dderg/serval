@@ -1,0 +1,10 @@
+0
+1
+2  # pure-Z junction: ZeroDivisionError in the curve speed
+3
+8  # vertex window spans a gap: floor from the moves around t_leave
+18  # accelerating arc: legs accel plus curve steps above the margin
+22  # same, low max_accel
+44  # forced flush with minimum_cruise_ratio: compared at 0
+56  # cap exceeded by a short-segment arc speeding up between junctions
+64  # stock lookahead faster after a forced stop with minimum_cruise_ratio
