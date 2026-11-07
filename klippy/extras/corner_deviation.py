@@ -17,19 +17,21 @@ just stops.
 
 The isolated corner is read from a table built from the active X/Y
 shapers, the worst over each leg decelerating or accelerating through the
-vertex, over incoming direction and turn angle. Along curves the speed is
-also capped so that sigma^2 * v^2 * curvature / 2 stays within the room the
-corner leaves, and moves shorter than the kernel support get that cap as
-their cruise speed.
+vertex, over incoming direction and turn angle. Along curves the junction
+speed is also capped so that sigma^2 * v^2 * curvature / 2 stays within
+the room the corner leaves, less what a short move can gain between two
+such junctions. A junction where either move has no XY component (a pure
+Z move) stops.
 
 An input smoother turns a velocity step dv into acceleration dv * density
 over its duration. Even a slow corner approached at full deceleration then
 exceeds max_accel slightly, so a junction's own step must fit under
 (1 + STEP_ALLOWANCE) * max_accel on top of what its legs command, for any
-leg cruising or accelerating either way at max_accel; the steps of a curve
-continuing with the same spacing get max_accel. Junctions with different
-direction changes nearby are not summed, so the bound is approximate:
-ACCEL_MARGIN is the stated allowance on the executed peak above max_accel.
+leg cruising or accelerating either way at max_accel. The steps of a curve
+continuing with the same spacing share that with the legs' acceleration
+along the axis. Junctions with different direction changes nearby are not
+summed, so the bound is approximate: ACCEL_MARGIN is the stated allowance
+on the executed peak above max_accel, checked by tools/motion_eval/fuzz.py.
 
 With input shaping inactive on X or Y every direction change stops (as
 square_corner_velocity: 0).
@@ -48,6 +50,7 @@ TABLE_W_MAX = 2.0
 MODEL_DT = 2e-4
 SMOOTHER_NODES = 256
 MIN_DIRECTION_CHANGE = 1e-9
+MIN_XY_SHARE = 1e-6
 STEP_ALLOWANCE = 0.03
 ACCEL_MARGIN = 0.05
 JUMP_GRID_POINTS = 41
@@ -298,7 +301,12 @@ class CornerDeviation:
         self.window = 0.0
         self.smoothing = False
         self.reported_inactive = False
-        self.counters = {"limited": 0, "stopped_by_cap": 0, "step_limited": 0}
+        self.counters = {
+            "limited": 0,
+            "stopped_by_cap": 0,
+            "step_limited": 0,
+            "xy_stops": 0,
+        }
         self.printer.register_event_handler("klippy:connect", self._connect)
 
     def _connect(self):
@@ -371,6 +379,9 @@ class CornerDeviation:
         dux, duy = abs(umx - upx), abs(umy - upy)
         if math.hypot(dux, duy) < MIN_DIRECTION_CHANGE:
             return cap_v2
+        if min(math.hypot(upx, upy), math.hypot(umx, umy)) < MIN_XY_SHARE:
+            self.counters["xy_stops"] += 1
+            return 0.0
         accel = max(prev_move.accel, move.accel)
         turn = math.atan2(upx * umy - upy * umx, upx * umx + upy * umy)
         cell = self.table.cell(upx, upy, turn)
@@ -386,18 +397,10 @@ class CornerDeviation:
         speed = 0.0
         if room > 0.0:
             speed = accel * w
-            xy_length = prev_move.move_d * math.hypot(upx, upy)
-            xy_length += move.move_d * math.hypot(umx, umy)
-            curvature = 2.0 * abs(turn) / xy_length
-            curve_speed = math.sqrt(
-                2.0 * accel * room / (self.variance * curvature)
+        if room > 0.0 and turn:
+            speed = min(
+                speed, self._curve_speed(prev_move, move, turn, accel, room)
             )
-            if curve_speed < speed:
-                speed = curve_speed
-                reach = 2.0 * curve_speed * self.window
-                for m in (prev_move, move):
-                    if m.move_d < reach and speed * speed < m.max_cruise_v2:
-                        m.limit_speed(speed, m.accel)
         if self.smoothing:
             speed = self._step_bound(prev_move, move, speed, dux, duy)
         v2 = min(cap_v2, speed * speed)
@@ -405,22 +408,48 @@ class CornerDeviation:
             self.counters["limited"] += 1
         return v2
 
+    def _curve_speed(self, prev_move, move, turn, accel, room):
+        """Junction speed keeping a curve continuing at this curvature
+        within room: sigma^2 * v^2 * curvature / 2 <= accel * room. A move
+        between two junctions at v may reach v^2 + accel * length in its
+        middle; where it is shorter than the distance covered within the
+        kernel's reach, the kernel averages about half of that, so the
+        junction keeps that much below the curve speed."""
+        lengths = tuple(
+            m.move_d * math.hypot(m.axes_r[0], m.axes_r[1])
+            for m in (prev_move, move)
+        )
+        curvature = 2.0 * abs(turn) / sum(lengths)
+        curve_v2 = 2.0 * accel * room / (self.variance * curvature)
+        longest = max(lengths)
+        if longest < math.sqrt(curve_v2) * self.window:
+            curve_v2 -= 0.5 * accel * longest
+        return math.sqrt(max(curve_v2, 0.0))
+
     def _step_bound(self, prev_move, move, speed, dux, duy):
         """The junction's own step adds |dv| * density_peak on top of what
         its legs command. A curve of junctions spaced like these, at most
         the shorter adjacent move apart, sums its steps to about
-        |dv| * (density_peak + v / spacing); its legs cruise at the curve's
-        speed, so that sum gets max_accel."""
+        |dv| * (density_peak + v / spacing), on top of the legs' commanded
+        acceleration along the axis; together they get
+        (1 + STEP_ALLOWANCE) * max_accel."""
         max_accel = self.toolhead.max_accel
-        curve_room = max_accel
+        legs_accel = max(prev_move.accel, move.accel)
         rate = 1.0 / min(prev_move.move_d, move.move_d)
         bound = speed
         for axis, du in ((0, dux), (1, duy)):
             kernel = self.kernels[axis]
             if not kernel.density_peak or not du:
                 continue
+            up, um = prev_move.axes_r[axis], move.axes_r[axis]
             linear = du * kernel.density_peak
-            own = kernel.jump_room(prev_move.axes_r[axis], move.axes_r[axis])
+            own = kernel.jump_room(up, um) * max_accel / linear
+            curve_room = (1.0 + STEP_ALLOWANCE) * max_accel - legs_accel * max(
+                abs(up), abs(um)
+            )
+            if curve_room <= 0.0:
+                bound = 0.0
+                continue
             quadratic = du * rate
             curve = (
                 2.0
@@ -430,7 +459,7 @@ class CornerDeviation:
                     + math.sqrt(linear * linear + 4.0 * quadratic * curve_room)
                 )
             )
-            bound = min(bound, own * max_accel / linear, curve)
+            bound = min(bound, own, curve)
         if bound < speed:
             self.counters["step_limited"] += 1
         return bound
