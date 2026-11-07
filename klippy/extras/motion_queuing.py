@@ -200,8 +200,9 @@ class PrinterMotionQueuing:
                 return
             self.reactor.pause(systime + min(1.0, wait))
 
-    def flush_all_steps(self):
-        flush_time = self.need_step_gen_time
+    def flush_all_steps(self, extra_time=0.0):
+        """Generate every step queued so far, and extra_time beyond."""
+        flush_time = self.need_step_gen_time + extra_time
         self._await_flush_time(flush_time)
         self._advance_flush_time(flush_time)
 
