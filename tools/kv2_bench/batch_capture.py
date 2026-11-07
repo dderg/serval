@@ -14,7 +14,7 @@ import json
 import math
 import sys
 
-from klippy import printer, toolhead
+from klippy import chelper, printer, toolhead
 from klippy.extras import motion_queuing
 from tools.motion_eval import capture as motion_capture
 
@@ -57,7 +57,39 @@ class BenchCapture(motion_capture.Capture):
                     "final_mcu_position": stepper.get_mcu_position(),
                 },
             )["step_history"] = self.history.entries[name]
+        result["trapqs"] = {
+            "toolhead": trapq_phases(self.toolhead.get_trapq()),
+            **{
+                name: trapq_phases(extruder.get_trapq())
+                for name, extruder in self.printer.lookup_objects("extruder")
+            },
+        }
         return result
+
+
+def trapq_phases(trapq) -> list[dict]:
+    """Every phase in a trapq's history, in the shape pi_agent's
+    motion_report/dump_trapq tap delivers (oldest first)."""
+    ffi_main, ffi_lib = chelper.get_ffi()
+    phases = {}
+    end_time = math.inf
+    while True:
+        data = ffi_main.new("struct pull_move[1024]")
+        count = ffi_lib.trapq_extract_old(trapq, data, len(data), 0.0, end_time)
+        for m in data[0:count]:
+            if m.move_t > 1e-12:
+                phases[m.print_time] = {
+                    "t": m.print_time,
+                    "dur": m.move_t,
+                    "v0": m.start_v,
+                    "a": m.accel,
+                    "start": [m.start_x, m.start_y, m.start_z],
+                    "axes": [m.x_r, m.y_r, m.z_r],
+                }
+        if count < len(data):
+            break
+        end_time = data[count - 1].print_time
+    return [phases[t] for t in sorted(phases)]
 
 
 def main():

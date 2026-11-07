@@ -111,6 +111,8 @@ def first_divergence(a: np.ndarray, b: np.ndarray) -> int | None:
 def sequences(planned: dict[str, Steps], executed: dict[str, Steps]) -> dict:
     per_motor = {}
     for name in CHANNELS:
+        if name not in planned:
+            continue
         p, e = planned[name], executed[name]
         divergence = first_divergence(p.signs, e.signs)
         per_motor[name] = {
@@ -142,6 +144,8 @@ class Paired:
 def pair(planned: dict[str, Steps], executed: dict[str, Steps]) -> Paired:
     xs, ys, motors, indices = [], [], [], []
     for number, name in enumerate(CHANNELS):
+        if name not in planned:
+            continue
         n = len(planned[name].clocks)
         xs.append(planned[name].clocks)
         ys.append(executed[name].clocks)
@@ -259,13 +263,16 @@ def schedule_identity(
     ids, mid_motion = epochs(p, freq)
     d = p.y - p.x
     departure = np.zeros(len(d), np.int64)
+    offsets = []
     for epoch in range(int(ids.max()) + 1 if len(ids) else 0):
         mask = ids == epoch
         values, counts = np.unique(d[mask], return_counts=True)
-        departure[mask] = d[mask] - values[np.argmax(counts)]
+        offsets.append(int(values[np.argmax(counts)]))
+        departure[mask] = d[mask] - offsets[-1]
     worst = int(np.argmax(np.abs(departure))) if len(d) else 0
     return {
         "epochs": int(ids.max() + 1) if len(ids) else 0,
+        "offset_ticks": offsets,
         "jumps_mid_motion": mid_motion,
         "steps_identical": float(np.mean(departure == 0)) if len(d) else 1.0,
         "abs_max_us": float(np.abs(departure).max() / freq * 1e6)

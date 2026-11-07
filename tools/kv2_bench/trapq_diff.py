@@ -26,11 +26,20 @@ MIN_PHASE_S = 1e-12
 AXIS = re.compile(r"([XYZ])(-?[\d.]+)", re.IGNORECASE)
 
 
-def live_phases(run_dir: Path) -> list[dict]:
+def trapq_names(run_dir: Path) -> list[str]:
+    names = set()
+    for line in (run_dir / "tap.jsonl").read_text().splitlines():
+        message = json.loads(line)
+        if "trapq" in message:
+            names.add(message["trapq"])
+    return sorted(names)
+
+
+def live_phases(run_dir: Path, name: str = "toolhead") -> list[dict]:
     seen = {}
     for line in (run_dir / "tap.jsonl").read_text().splitlines():
         message = json.loads(line)
-        if "trapq" not in message:
+        if message.get("trapq") != name:
             continue
         for pt, move_t, start_v, accel, start, axes in message["params"][
             "data"

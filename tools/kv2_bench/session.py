@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import traceback
 from collections.abc import Iterator
@@ -28,6 +29,7 @@ from . import (
     live,
     program,
     reference,
+    replay,
     restore,
 )
 from .serval_tools import TREE as SERVAL_TREE
@@ -43,6 +45,14 @@ SESSIONS = Path("~/bench/kv2").expanduser()
 UPSTREAM = "1ee39ff2c"
 FAST_PROGRAMS = ("speed_ladder", "voron_top_layers", "arcs")
 DENSE = {"arcs": 30, "voron_top_layers": 15}
+SOAK_SLICES = (
+    "voron_top_layers",
+    "arcs",
+    "circles",
+    "zigzag_infill",
+    "corners_turn90",
+)
+SOAK_SECONDS = 1800.0
 
 
 def load_program(name: str, repeat: int = 1) -> program.Program:
@@ -97,6 +107,7 @@ class Session:
         prog: program.Program,
         tap: bool,
         host: dict | None = None,
+        judge: str = "batch",
         **options,
     ) -> dict:
         record = {
@@ -108,13 +119,18 @@ class Session:
             "tap": tap,
             "host": host or {},
             "options": options,
+            "judge": judge,
         }
         print(
             f"[{gate}] {tree_name} {config} {prog.name} tap={tap} {host or ''}",
             flush=True,
         )
         try:
-            ref_dir = self.reference(tree_name, commit, config, prog)
+            ref_dir = (
+                self.reference(tree_name, commit, config, prog)
+                if judge == "batch"
+                else None
+            )
             run_dir = live.run(
                 prog,
                 CONFIGS / f"{config}.cfg",
@@ -148,7 +164,12 @@ class Session:
                 record["headroom_error"] = repr(exc)
             if (run_dir / "events.bin").exists():
                 try:
-                    analysis = compare.analyze(run_dir, ref_dir)
+                    if judge == "batch":
+                        analysis = compare.analyze(run_dir, ref_dir)
+                    else:
+                        analysis = self.replay_judgement(
+                            tree_name, commit, run_dir
+                        )
                     record["analysis_ok"] = analysis["ok"]
                     record["checks"] = analysis["checks"]
                 except Exception as exc:
@@ -161,6 +182,22 @@ class Session:
             flush=True,
         )
         return record
+
+    def replay_judgement(
+        self, tree_name: str, commit: str, run_dir: Path
+    ) -> dict:
+        worktree = (
+            firmware.FW_WORKTREE if tree_name == "kv2" else UPSTREAM_WORKTREE
+        )
+        firmware.checkout(worktree, commit)
+        reference = replay.build(
+            run_dir, worktree, self.fw.dictionary, run_dir / "replay"
+        )
+        result = replay.judge(run_dir, reference)
+        (run_dir / "replay" / "replay_judgement.json").write_text(
+            json.dumps(result, indent=2)
+        )
+        return result
 
 
 UPSTREAM_WORKTREE = Path("~/Developer/kv2-bench-upstream").expanduser()
@@ -241,6 +278,48 @@ def gate_g4(s: Session, kv2: str, upstream: str) -> None:
             load_program(name),
             tap=True,
         )
+    bench.activate(s.trees["kv2"], CONFIGS / "owner_like.cfg")
+    bench.restart_ready()
+
+
+def soak_program(s: Session, kv2: str, config: str) -> program.Program:
+    """SOAK_SLICES concatenated for SOAK_SECONDS of motion at `config`, the
+    cycle count taken from one cycle's batch plan."""
+    paths = [CORPUS / f"{name}.gcode" for name in SOAK_SLICES]
+    cycle = program.concat(paths, 1, "soak")
+    firmware.checkout(firmware.FW_WORKTREE, kv2)
+    planned = reference.build(
+        firmware.FW_WORKTREE,
+        CONFIGS / f"{config}.cfg",
+        cycle,
+        s.fw.dictionary,
+        s.out / "refs" / "soak_cycle" / config,
+    )
+    clocks = [st.clocks for st in planned.steppers.values() if len(st.clocks)]
+    first = min(int(c[0]) for c in clocks)
+    last = max(int(c[-1]) for c in clocks)
+    seconds = (last - first) / planned.clock_freq
+    return program.concat(paths, math.ceil(SOAK_SECONDS / seconds), "soak")
+
+
+def gate_soak(s: Session, kv2: str, configs: set[str]) -> None:
+    """30 min of dense corpus slices per config and host, event capture,
+    judged against the live-trapq replay, with the timer-lateness probe."""
+    bench.activate(s.trees["kv2"], CONFIGS / "owner_like.cfg", probe=True)
+    bench.restart_ready()
+    for config in ("owner_like", "owner_like_cd"):
+        if config not in configs:
+            continue
+        prog = soak_program(s, kv2, config)
+        for host in ({}, {"cpus": 1, "max_mhz": 1500}):
+            with throttle.throttled(
+                throttle.Throttle(host.get("cpus"), host.get("max_mhz"))
+            ):
+                s.run(
+                    "soak", "kv2", kv2, config, prog, tap=True, host=host,
+                    judge="replay", trapq=True, probe=True,
+                    timeout_s=2 * SOAK_SECONDS,
+                )  # fmt: skip
     bench.activate(s.trees["kv2"], CONFIGS / "owner_like.cfg")
     bench.restart_ready()
 
@@ -352,6 +431,8 @@ def main() -> None:
                 gate_g4(session, kv2, upstream)
             if "inv" in gates:
                 gate_investigate(session, kv2, upstream)
+            if "soak" in gates:
+                gate_soak(session, kv2, set(args.configs.split(",")))
         except BaseException as exc:
             failure = exc
             traceback.print_exc()

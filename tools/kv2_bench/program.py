@@ -53,11 +53,9 @@ def start_of(source: str) -> tuple[float, float, float]:
     return (x, y, z)
 
 
-def load(path: Path, repeat: int = 1) -> Program:
-    source = path.read_text()
-    start = start_of(source)
+def body_of(path: Path) -> list[str]:
     body = []
-    for number, raw in enumerate(source.splitlines(), 1):
+    for number, raw in enumerate(path.read_text().splitlines(), 1):
         line = raw.split(";", 1)[0].strip()
         if not line:
             continue
@@ -67,16 +65,40 @@ def load(path: Path, repeat: int = 1) -> Program:
         if command not in ALLOWED:
             raise ProgramError(f"{path}:{number}: unsupported command {raw!r}")
         body.append(line)
+    return body
+
+
+def travel_to(start: tuple[float, float, float]) -> list[str]:
+    x, y, z = start
+    return ["G90", f"G1 X{x!r} Y{y!r} Z{z!r} F6000", "G92 E0"]
+
+
+def load(path: Path, repeat: int = 1) -> Program:
     if repeat < 1:
         raise ProgramError(f"repeat must be >= 1, got {repeat}")
+    start = start_of(path.read_text())
+    body = body_of(path)
     x, y, z = start
-    preamble = [f"SET_KINEMATIC_POSITION X={x!r} Y={y!r} Z={z!r}", "G92 E0"]
-    back_to_start = ["G90", f"G1 X{x!r} Y{y!r} Z{z!r} F6000"]
-    lines = list(preamble)
+    lines = [f"SET_KINEMATIC_POSITION X={x!r} Y={y!r} Z={z!r}", "G92 E0"]
     for index in range(repeat):
         if index:
-            lines += back_to_start
+            lines += travel_to(start)[:2]
         lines += body
     lines.append("M400")
     name = path.stem if repeat == 1 else f"{path.stem}_x{repeat}"
     return Program(name, tuple(lines), start)
+
+
+def concat(paths: list[Path], cycles: int, name: str) -> Program:
+    """`cycles` passes over the slices, each slice entered by a travel to
+    its start position (all slices are absolute-XYZ, relative-E programs)."""
+    if cycles < 1:
+        raise ProgramError(f"cycles must be >= 1, got {cycles}")
+    slices = [(start_of(p.read_text()), body_of(p)) for p in paths]
+    x, y, z = slices[0][0]
+    lines = [f"SET_KINEMATIC_POSITION X={x!r} Y={y!r} Z={z!r}", "G92 E0"]
+    for _ in range(cycles):
+        for start, body in slices:
+            lines += travel_to(start) + body
+    lines.append("M400")
+    return Program(f"{name}_x{cycles}", tuple(lines), slices[0][0])

@@ -116,26 +116,26 @@ def message_digest(dictionary: Path, output: Path) -> tuple[str, int]:
     return digest.hexdigest(), count
 
 
-def build(
+def run_batch(
+    module: str,
     klippy_tree: Path,
-    live_config: Path,
-    program: Program,
+    config_path: Path,
+    gcode_path: Path,
     dictionary: Path,
     out_dir: Path,
-) -> Reference:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    config_path = out_dir / "batch.cfg"
-    config_path.write_text(batch_config(live_config.read_text()))
-    gcode_path = out_dir / "program.gcode"
-    gcode_path.write_text(program.text())
+    extra_args: tuple[str, ...] = (),
+) -> tuple[dict, Path]:
+    """Run `python -m module CAPTURE_JSON [extra] <klippy batch args>` with
+    TREE's klippy and return the capture and the MCU output file."""
     output_path = out_dir / "mcu.out"
     log_path = out_dir / "batch_klippy.log"
     capture_path = out_dir / "batch_capture.json"
     cmd = [
         sys.executable,
         "-m",
-        "tools.kv2_bench.batch_capture",
+        module,
         str(capture_path),
+        *extra_args,
         str(config_path),
         "-i",
         str(gcode_path),
@@ -157,7 +157,12 @@ def build(
             f"{result.stderr[-LOG_TAIL_CHARS:]}\n--- klippy.log tail ---\n"
             f"{log[-LOG_TAIL_CHARS:]}"
         )
-    capture = json.loads(capture_path.read_text())
+    return json.loads(capture_path.read_text()), output_path
+
+
+def decode(
+    capture: dict, output_path: Path, dictionary: Path
+) -> tuple[dict[str, Steps], float]:
     steppers = capture["steppers"]
     foreign = sorted(n for n, s in steppers.items() if s["mcu"] != "mcu")
     if foreign:
@@ -180,6 +185,31 @@ def build(
         if len(signs) and not np.all(np.abs(signs) == 1):
             raise ReferenceError(f"{name}: decoded positions skip steps")
         decoded[name] = Steps(trace.clocks.astype(np.int64), signs)
+    return decoded, freqs.pop()
+
+
+def build(
+    klippy_tree: Path,
+    live_config: Path,
+    program: Program,
+    dictionary: Path,
+    out_dir: Path,
+) -> Reference:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    config_path = out_dir / "batch.cfg"
+    config_path.write_text(batch_config(live_config.read_text()))
+    gcode_path = out_dir / "program.gcode"
+    gcode_path.write_text(program.text())
+    capture, output_path = run_batch(
+        "tools.kv2_bench.batch_capture",
+        klippy_tree,
+        config_path,
+        gcode_path,
+        dictionary,
+        out_dir,
+    )
+    steppers = capture["steppers"]
+    decoded, freq = decode(capture, output_path, dictionary)
     messages_sha256, messages = message_digest(dictionary, output_path)
     meta = {
         "klippy_tree": str(klippy_tree),
@@ -198,6 +228,6 @@ def build(
         "step_dist": {n: s["step_dist"] for n, s in steppers.items()},
         "invert_dir": {n: s["invert_dir"] for n, s in steppers.items()},
     }
-    reference = Reference(decoded, freqs.pop(), meta)
+    reference = Reference(decoded, freq, meta)
     reference.save(out_dir)
     return reference

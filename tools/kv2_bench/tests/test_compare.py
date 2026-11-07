@@ -146,3 +146,21 @@ def test_schedule_identity_reports_departures_from_shared_offset():
     assert identity["epochs"] == 1
     assert identity["steps_identical"] == pytest.approx(0.998)
     assert identity["abs_max_us"] == pytest.approx(2000 / FREQ * 1e6)
+
+
+def test_concat_enters_each_slice_at_its_start(tmp_path):
+    a = tmp_path / "a.gcode"
+    b = tmp_path / "b.gcode"
+    a.write_text("; motion_eval start=1,2,3\nG90\nM83\nG1 X5 E1\n")
+    b.write_text("; motion_eval start=4,5,6\nG90\nG1 Y7\n")
+    loaded = program.concat([a, b], 2, "soak")
+    assert loaded.name == "soak_x2"
+    assert loaded.lines[:2] == (
+        "SET_KINEMATIC_POSITION X=1.0 Y=2.0 Z=3.0",
+        "G92 E0",
+    )
+    cycle = (
+        "G90", "G1 X1.0 Y2.0 Z3.0 F6000", "G92 E0", "G90", "M83", "G1 X5 E1",
+        "G90", "G1 X4.0 Y5.0 Z6.0 F6000", "G92 E0", "G90", "G1 Y7",
+    )  # fmt: skip
+    assert loaded.lines[2:] == cycle + cycle + ("M400",)

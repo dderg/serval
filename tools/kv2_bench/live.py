@@ -28,7 +28,7 @@ def start_agent(remote_dir: str, tap: bool, trapq: bool = False) -> None:
     pid = bench.pi.klipper_pid()
     steppers = f"--steppers {','.join(STEPPERS)}" if tap else ""
     if trapq:
-        steppers += " --trapqs toolhead"
+        steppers += " --trapqs toolhead,extruder"
     bench.ssh(f"rm -rf {remote_dir} && mkdir -p {remote_dir}")
     bench.ssh(
         f"setsid nohup python3 {bench.PI_AGENT} {remote_dir} --pid {pid} "

@@ -6,7 +6,10 @@
 - **G2 pass on every single-pass program; one open host finding.** Each pass checked net steps, every step paired, and timing against a bound of `MAX_STEPCOMPRESS_ERROR` (25 µs) plus this run's measured MCU lateness. Event mode, all 11 runs (3 programs × 3 configs, plus the upstream rows):
   - The MCU executed every commanded step. The captured sequence equals the live queue_step tap on every run, including the dense ×15 rows.
   - Worst capture−reference error is 29.2 µs, against a bound of 33.8 µs.
-  - Open finding: with `voron_top_layers` repeated 15×, the live host commands 40 X / 46 Y fewer steps than batch mode. Net steps stay identical. The divergence is deterministic (same step index in 8 runs, any host load), it starts in the second repetition (reference t = 3.70 s), and the tap shows the live schedule already differs. So the live planner differs from batch planning there; it is not an MCU loss. Not root-caused.
+  - Open finding, now explained: with `voron_top_layers` repeated 15×, the live host commands 40 X / 46 Y fewer steps than batch mode, with identical net steps. The divergence is deterministic (same step index in 8 runs, any host load) and the tap shows the live schedule already differs, so it is not an MCU loss.
+    - First step divergence (reference t ≈ 3.97 s): a ±1 reversal pair that batch emits and live does not. It is step generation, not the planner: replaying batch's own trapq with live-like flush batches drops the same pair (see "Live-trapq replay reference").
+    - First trapq divergence comes later (t = 4.05 s): a 0.085 mm/s cruise difference (follow-up section 1). It is upstream behaviour too.
+    - Long prints are now judged against the live-trapq replay, which passes on both x15 runs.
 - **G3: real-time headroom is large on a Pi 5, and smaller with `[corner_deviation]`.**
   - Densest corpus cases at owner-like, full Pi 5: klippy uses 4–8 % of one core (1 s peak ≤ 14 %). buffer_time stays ≥ 1.3 s while the host feeds (≈ 2.2 s median). No stalls, no `Timer too close`.
   - Without `corner_deviation`, both dense cases survive 1 core at 1500 MHz with a 25 % CFS quota (25 % of one core). They fail with `Timer too close` only at a 12 % quota.
@@ -285,3 +288,62 @@ Probed runs, 312ddf16a. "Timer lateness" is the largest delay between a timer's 
 - **Profile caveats.**
   - The longest single callbacks (virtual_sdcard `work_handler`, `ReactorCallback.invoke`) pause inside themselves, so their wall times (51 s, ~0.24 s) are not stalls.
   - py-spy self time in `_advance_flush_time` includes the GIL-released C step generation (`steppersyncmgr_gen_steps`), which competes for the single core.
+
+## Live-trapq replay reference (offline, data of session `-131347`)
+
+`replay.py` regenerates the expected step stream from the live run's own toolhead (and extruder) trapq tap:
+- The batch-mode klippy of the tree under test runs `replay_capture.py`. It sets the start position, appends every recorded trapq phase at its live print_time, and generates steps in the live background flusher's 0.25 s batches.
+- Steps go through the unmodified chelper itersolve, input shaper and stepcompress path, with the run's printer.cfg. The shaper comes from the config; the allowlist forbids `SET_INPUT_SHAPER` in programs.
+- So it judges step generation, transport and MCU execution, while `trapq_diff.py` judges the planner. Both run on the live print_time axis, so the expected shared offset is 0 ticks.
+
+| run | replay = tap sequence (X / Y / Z steps) | shared offset | steps at identical clock | max departure | capture vs replay | bound |
+|---|---|---|---|---|---|---|
+| upstream x15 | yes (617366 / 616751 / 23200) | 0 ticks | 98.32 % | 24.71 µs ≤ 25 µs | 24.86 µs | 34.93 µs (MCU lateness max 9.83 µs) |
+| kv2 x15 | yes (617366 / 616751 / 23200) | 0 ticks | 98.32 % | 24.71 µs ≤ 25 µs | 24.78 µs | 34.10 µs (MCU lateness max 9.00 µs) |
+
+These runs predate the extruder trapq tap, so their extruder was not replayed. `pi_agent` now taps `toolhead,extruder`.
+
+### Offline self-check
+
+`replay.self_check` replays the trapqs a batch run recorded (`batch_capture.py` now saves them), extruder included, and compares with that batch run's own steps. Owner_like, owner_like_cd and default configs, on voron_top_layers, arcs, speed_ladder, voron ×15 and one soak cycle:
+- 13 of 14 cases give identical sequences, offset 0, max departure ≤ 24.96 µs.
+- The exception is owner_like voron ×15: replay has 617404 X steps, batch 617406.
+  - The difference is one ±1 reversal pair at t ≈ 3.97 s, which batch emits and replay drops. It is exactly where the live run diverged from batch.
+  - So itersolve's detection of a sub-step excursion depends on the step-generation window boundaries. That is the first cause of the live/batch x15 divergence, ahead of the 4.05 s planner difference.
+  - It is also the residual risk of the replay reference: a window-dependent ±1 pair would show as an adjacent-pair mismatch with equal net steps. Neither live x15 replay showed one.
+
+## Soak session (prepared, not run)
+
+```
+uv run python ~/Developer/kv2-bench-serval/tools/bench/lock.py hold -- \
+    uv run python -m tools.kv2_bench.session --gates soak --configs owner_like,owner_like_cd
+```
+
+- **Program.** voron_top_layers, arcs, circles, zigzag_infill and corners_turn90, concatenated with a travel to each slice's start. The cycle count comes from one cycle's batch plan: ×85 for owner_like and ×76 for owner_like_cd, ≈ 30 min each.
+- **Matrix.** Full Pi 5 and 1 cpu / 1500 MHz, for each config.
+- **Recording.** Event-mode capture, stepper and trapq tap (toolhead, extruder), klippy_probe timer lateness, CPU samples.
+- **Judging.** Each run is judged by `replay.judge`: replay = tap sequence, departure ≤ 25 µs, capture = replay sequence, capture within 25 µs + MCU lateness. Batch is not used for these runs. Results go to `<run>/replay/replay_judgement.json`.
+- **Size.** About 4 h of bench time including restarts. A tap is ~160 kB/s, so about 300 MB per run on the Pi; it is deleted after each fetch.
+- Run it detached (`setsid nohup`).
+
+## Data request: timing of the corner_deviation lateness peaks and the two failures
+
+Session `-131347`, probe top-40 lists, times relative to print start (virtual_sdcard start):
+
+| run | max timer lateness | at | late callback | default (no cd) same host, first 1.5 s |
+|---|---|---|---|---|
+| owner_like_cd full | 53.1 ms | +0.067 s | `verify_heater.HeaterCheck.check_event` (with `statistics.generate_stats` 26.8 ms at the same instant) | not in the run's top-40 lateness list, so < 5.7 ms; its max of 7.1 ms is at +38 s |
+| owner_like_cd 1 cpu/1500 | 87.6 ms | +0.118 s | `webhooks.QueryStatusHelper._do_query` | 36.3 ms at +0.085 s (`_do_query`) |
+| owner_like_cd 1 cpu/1500 + 50 % | 102.8 ms | +0.169 s | `webhooks.QueryStatusHelper._do_query` | – (not run without cd) |
+
+After the first 1.5 s the cd runs' worst lateness is 12.3 / 21.7 / 21.8 ms, the latter two at +1.61 s.
+
+So the cd maxima sit in the print-start burst, consistent with the priming hypothesis. Without cd the same burst stays ≤ 36 ms on the slow host and does not appear in the top-40 at full speed.
+
+The two `Timer too close` failures on 5d53e78f8 (session `-124110`, `owner_like_cd` `arcs_x30`, 1 cpu/1500 and the same with 50 % quota) **refute the priming hypothesis for themselves**:
+- The MCU shutdown clock is 496631016. The last `clock` reply, 447987208 received at +4.409 s, extrapolates that to +4.99 s, and the shutdown report arrived at +4.988 s.
+- The send-queue dump covers the last 100 messages from +2.11 to +4.987 s. The last host message (a queue_step batch) went out at +4.987 s, 1 ms before the shutdown.
+- The timer that fired too late was therefore scheduled at ~+4.98 s (+4.984 s in the quota run), well after the start burst.
+- buffer_time read 1.5–2.9 s at the time, and Stats shows print_time jumping 1.5–1.7 s in the last interval before the shutdown.
+- Both logs dump `clocksync state` with an estimated MCU frequency of 83.18 / 83.24 MHz (−0.97 %, nominal 84 MHz). The estimate's `time_avg` is 4.8 s / 5.7 s before print start, and `pred_variance` is 1.4e10 / 1.3e9. So the host's clock estimate was stale and degraded when the late step batch was sent.
+- [INFERENCE] The failure mechanism is a mid-print (+5 s) reactor stall that delayed step generation/transmission, compounded by a degraded clock estimate. It is not the priming burst. The probe was not running in those two runs, so the stalled callback is not identified.
