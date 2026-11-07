@@ -22,6 +22,7 @@ STEPPERS = ("stepper_x", "stepper_y", "stepper_z", "extruder")
 TERMINAL_STATES = {"complete", "error", "cancelled"}
 POLL_S = 0.5
 AGENT_READY_TIMEOUT_S = 20.0
+TRIAL_PRINT_GRACE_S = 120.0
 
 
 def start_agent(remote_dir: str, tap: bool, trapq: bool = False) -> None:
@@ -219,10 +220,20 @@ def startup_trial(
             summary["print_start_pi_monotonic"] = pi_monotonic()
             bench.start_print(remote_name)
         deadline = time.monotonic() + watch_s
-        while time.monotonic() < deadline:
+        while True:
             state = bench.pi.printer_state()
             if state != "ready":
                 raise bench.BenchError(f"klippy entered state {state!r}")
+            printing = (
+                program is not None
+                and bench.print_stats()["state"] not in TERMINAL_STATES
+            )
+            if time.monotonic() >= deadline and not printing:
+                break
+            if time.monotonic() > deadline + TRIAL_PRINT_GRACE_S:
+                raise bench.BenchError(
+                    f"print still running {TRIAL_PRINT_GRACE_S} s after the watch"
+                )
             time.sleep(POLL_S)
         summary["watch_end_pi_monotonic"] = pi_monotonic()
     except BaseException as exc:
@@ -230,13 +241,6 @@ def startup_trial(
     bench.pi.scp_from_pi(bench.PI_LOG, run_dir / "klippy.log")
     bench.pi.scp_from_pi(bench.PI_PROBE_OUT, run_dir / "probe.json")
     if program is not None:
-        if bench.pi.printer_state() == "ready" and bench.print_stats()[
-            "state"
-        ] in (
-            "printing",
-            "paused",
-        ):
-            bench.pi.http("POST", "/printer/print/cancel")
         bench.remove_upload(remote_name)
     (run_dir / "run.json").write_text(json.dumps(summary, indent=2))
     return {"run_dir": str(run_dir), **summary}
