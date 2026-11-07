@@ -30,6 +30,8 @@ PI_LOG = f"{PI_KV2}/logs/klippy.log"
 PI_AGENT = f"{PI_KV2}/pi_agent.py"
 PI_PROBE = f"{PI_KV2}/klippy_probe.py"
 PI_PROBE_OUT = f"{PI_KV2}/probe.json"
+PI_TABLE_CACHE = f"{PI_HOME}/.cache/kalico/corner_deviation"
+PI_DEPLOY_RECORD = f"{PI_KV2}/.kv2-deploy.json"
 PI_OPENOCD_CFG = f"{PI_KV2}/openocd-target.cfg"
 PI_FIRMWARE_ELF = f"{PI_KV2}/kv2-f401.elf"
 PI_GCODES = f"{PI_HOME}/printer_data/gcodes"
@@ -112,10 +114,28 @@ def ensure_env(remote_tree: str) -> None:
 
 
 def install_agent() -> None:
-    ssh(f"rm -rf {PI_KV2}/runs && mkdir -p {PI_KV2}/logs {PI_KV2}/runs")
+    ssh(
+        f"rm -rf {PI_KV2}/runs && mkdir -p {PI_KV2}/logs {PI_KV2}/runs "
+        f"{PI_TABLE_CACHE} && test -w {PI_TABLE_CACHE}"
+    )
     pi.scp_to_pi(Path(__file__).with_name("pi_agent.py"), PI_AGENT)
     pi.scp_to_pi(SERVAL_BENCH / "openocd-target.cfg", PI_OPENOCD_CFG)
     pi.scp_to_pi(Path(__file__).with_name("klippy_probe.py"), PI_PROBE)
+
+
+def clear_table_cache() -> list[str]:
+    removed = ssh(f"ls {PI_TABLE_CACHE}").split()
+    ssh(f"rm -f {PI_TABLE_CACHE}/*")
+    return removed
+
+
+def write_kv2_deploy_record(record: dict) -> None:
+    subprocess.run(
+        ["ssh", pi.PI_SSH, f"cat > {PI_DEPLOY_RECORD}"],
+        input=json.dumps(record, indent=2),
+        text=True,
+        check=True,
+    )
 
 
 def klipper_cmdline() -> str:

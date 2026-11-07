@@ -42,7 +42,12 @@ def test_failure_rate_lateness_and_stall_stack(tmp_path):
     write_run(tmp_path / "ok", 100.0)
     write_run(tmp_path / "bad", 200.0, shutdown=205.0)
     runs = [
-        {"gate": "trials", "config": "cd", "run_dir": str(tmp_path / "ok")},
+        {
+            "gate": "trials",
+            "config": "cd",
+            "host": {},
+            "run_dir": str(tmp_path / "ok"),
+        },
         {
             "gate": "trials",
             "config": "cd",

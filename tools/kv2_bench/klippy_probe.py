@@ -211,6 +211,41 @@ def main():
                 state["table_builds"].append({"start": start, "end": mono()})
 
         corner_deviation.CornerTable.__init__ = table_init
+    if corner_deviation is not None and hasattr(
+        corner_deviation, "CornerDeviation"
+    ):
+        cd_class = corner_deviation.CornerDeviation
+        real_build = cd_class._build
+        real_publish = cd_class._publish
+
+        def build(self, generation, specs):
+            start = mono()
+            cached = sorted(os.listdir(self.cache_dir))
+            with lock:
+                state["table_builds"].append(
+                    {
+                        "generation": generation,
+                        "start": start,
+                        "cache_files_before": cached,
+                    }
+                )
+            real_build(self, generation, specs)
+
+        def publish(self, generation, result):
+            with lock:
+                for item in state["table_builds"]:
+                    if (
+                        item.get("generation") == generation
+                        and "published" not in item
+                    ):
+                        item["published"] = mono()
+                        item["error"] = (
+                            None if result[1] is None else repr(result[1])
+                        )
+            return real_publish(self, generation, result)
+
+        cd_class._build = build
+        cd_class._publish = publish
 
     py_spy = os.path.join(os.path.dirname(sys.executable), "py-spy")
     pyspy_busy = threading.Lock()

@@ -224,7 +224,10 @@ def gate_g1_g2(
                 s.run(gate, "kv2", kv2, config, load_program(name), tap=True)
         if config != "default" and "g2" in gates:
             dense = load_program("voron_top_layers", DENSE["voron_top_layers"])
-            s.run("g2", "kv2", kv2, config, dense, tap=True)
+            s.run(
+                "g2", "kv2", kv2, config, dense, tap=True, judge="replay",
+                trapq=True,
+            )  # fmt: skip
 
 
 def gate_g3(s: Session, kv2: str, configs: set[str]) -> None:
@@ -336,11 +339,17 @@ def gate_trials(s: Session, kv2: str, trials: int) -> None:
     bench.restart_ready()
     arcs = load_program("arcs", DENSE["arcs"])
     with throttle.throttled(throttle.Throttle(1, 1500)):
+        cold_done = False
         for trial in range(trials):
             for config in TRIAL_CONFIGS:
+                host = {"cpus": 1, "max_mhz": 1500, "trial": trial}
+                if config == "owner_like_cd":
+                    host["table_cache"] = "warm" if cold_done else "cold"
+                    if not cold_done:
+                        host["cleared_cache_files"] = bench.clear_table_cache()
+                        cold_done = True
                 s.run(
-                    "trials", "kv2", kv2, config, arcs, tap=False,
-                    host={"cpus": 1, "max_mhz": 1500, "trial": trial},
+                    "trials", "kv2", kv2, config, arcs, tap=False, host=host,
                     probe=True,
                 )  # fmt: skip
     bench.activate(s.trees["kv2"], CONFIGS / "owner_like.cfg")
@@ -442,6 +451,16 @@ def main() -> None:
                 fw.elf, fw.version
             )
             session.save()
+            bench.write_kv2_deploy_record(
+                {
+                    "kv2_commit": kv2,
+                    "tree": session.trees["kv2"],
+                    "firmware": session.trees["firmware"],
+                    "table_cache_dir": bench.PI_TABLE_CACHE,
+                    "session": str(out),
+                }
+            )
+            session.trees["table_cache_dir"] = bench.PI_TABLE_CACHE
             configs = set(args.configs.split(","))
             if gates & {"g1", "g2"}:
                 gate_g1_g2(session, kv2, gates, configs)

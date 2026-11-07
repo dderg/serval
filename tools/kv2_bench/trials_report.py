@@ -26,6 +26,27 @@ def run_window(run_dir: Path, probe: dict) -> tuple[float | None, float | None]:
     return start, end
 
 
+def table_build(build: dict, probe: dict) -> dict:
+    """A corner table build: duration, publish time against klippy:ready,
+    and the reactor's worst timer lateness while the build thread ran."""
+    published = build.get("published")
+    ready = probe["events"].get("klippy:ready")
+    during = [
+        late
+        for at, late in probe["late_samples"]
+        if published is not None and build["start"] <= at <= published
+    ]
+    return {
+        "cache_files_before": build.get("cache_files_before"),
+        "build_s": None if published is None else published - build["start"],
+        "published_after_ready_s": None
+        if published is None or ready is None
+        else published - ready,
+        "max_late_during_build_ms": 1e3 * max(during, default=0.0),
+        "error": build.get("error"),
+    }
+
+
 def summarize_run(record: dict) -> dict:
     run_dir = Path(record["run_dir"])
     probe = json.loads((run_dir / "probe.json").read_text())
@@ -48,6 +69,9 @@ def summarize_run(record: dict) -> dict:
             if start is not None and e["at"] >= start
         ),
         "pyspy_native": probe.get("pyspy_native"),
+        "table_builds": [
+            table_build(build, probe) for build in probe.get("table_builds", [])
+        ],
     }
     shutdown = probe["events"].get("klippy:shutdown")
     if shutdown is not None and start is not None:
@@ -81,7 +105,9 @@ def summarize(session: Path) -> dict:
     ]
     by_config: dict[str, list[dict]] = collections.defaultdict(list)
     for record in records:
-        by_config[record["config"]].append(summarize_run(record))
+        cache = record["host"].get("table_cache")
+        key = record["config"] + (f" ({cache} table cache)" if cache else "")
+        by_config[key].append(summarize_run(record))
     result = {}
     for config, runs in by_config.items():
         pooled = np.array([v for r in runs for v in r["late_ms"]] or [0.0])
