@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 TREE = Path(
@@ -34,6 +35,30 @@ __all__ = [
     "throttle",
     "head",
 ]
+
+
+TRANSIENT_SSH = ("Could not resolve hostname", "Connection timed out")
+SSH_ATTEMPTS = 5
+SSH_RETRY_S = 3.0
+_pi_ssh = pi.ssh
+
+
+def _ssh_with_retry(command: str) -> str:
+    """bench-pi resolves over mDNS (bench-pi.local), which failed once
+    transiently; only those failures are retried, any other is raised."""
+    for attempt in range(SSH_ATTEMPTS):
+        try:
+            return _pi_ssh(command)
+        except pi.BenchError as exc:
+            if attempt + 1 == SSH_ATTEMPTS or not any(
+                text in str(exc) for text in TRANSIENT_SSH
+            ):
+                raise
+            time.sleep(SSH_RETRY_S)
+    raise AssertionError("unreachable")
+
+
+pi.ssh = _ssh_with_retry
 
 
 def head() -> str:
