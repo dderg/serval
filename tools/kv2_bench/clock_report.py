@@ -41,7 +41,7 @@ def run_outcome(record: dict) -> dict:
     nominal = sync["connect"]["mcu_freq"]
     samples = sync["samples"]
     after = [s for s in samples if not s["in_connect"]]
-    calibrated = [s for s in samples if s["in_connect"]][-1]["freq"]
+    calibrated = sync["connect"]["clock_est"][2]
     ppm = [1e6 * (s["freq"] / nominal - 1.0) for s in after] or [0.0]
     log = (run_dir / "klippy.log").read_text()
     return {
