@@ -98,7 +98,8 @@ def cpu_usage(path: Path, start: float, end: float) -> dict:
 
 
 def buffer_while_feeding(stats: list[dict], start: float, end: float) -> dict:
-    rows = [r for r in stats if start <= r["eventtime"] <= end]
+    before = [r for r in stats if r["eventtime"] < start][-1:]
+    rows = before + [r for r in stats if start <= r["eventtime"] <= end]
     feeding = [
         cur
         for prev, cur in zip(rows, rows[1:])

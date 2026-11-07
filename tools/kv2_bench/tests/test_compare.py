@@ -133,3 +133,16 @@ def test_program_reads_start_and_repeats(tmp_path):
     source.write_text("G28\nM117 hi\n")
     with pytest.raises(program.ProgramError, match="M117"):
         program.load(source)
+
+
+def test_schedule_identity_reports_departures_from_shared_offset():
+    ref = np.arange(0, 1000) * 2100
+    live = ref + 5_000_000
+    live[10] -= 2000
+    live[11] += 1500
+    identity = compare.schedule_identity(
+        motors(stepper_x=steps(ref)), motors(stepper_x=steps(live)), FREQ
+    )
+    assert identity["epochs"] == 1
+    assert identity["steps_identical"] == pytest.approx(0.998)
+    assert identity["abs_max_us"] == pytest.approx(2000 / FREQ * 1e6)

@@ -249,6 +249,32 @@ def mcu_lateness(residual_s: np.ndarray) -> dict:
     }
 
 
+def schedule_identity(
+    planned: dict[str, Steps], executed: dict[str, Steps], freq: float
+) -> dict:
+    """Two queue_step schedules in one clock domain: per epoch, the offset
+    most steps share, the share of steps exactly at it and the largest
+    departure from it (compression choosing other steps)."""
+    p = pair(planned, executed)
+    ids, mid_motion = epochs(p, freq)
+    d = p.y - p.x
+    departure = np.zeros(len(d), np.int64)
+    for epoch in range(int(ids.max()) + 1 if len(ids) else 0):
+        mask = ids == epoch
+        values, counts = np.unique(d[mask], return_counts=True)
+        departure[mask] = d[mask] - values[np.argmax(counts)]
+    worst = int(np.argmax(np.abs(departure))) if len(d) else 0
+    return {
+        "epochs": int(ids.max() + 1) if len(ids) else 0,
+        "jumps_mid_motion": mid_motion,
+        "steps_identical": float(np.mean(departure == 0)) if len(d) else 1.0,
+        "abs_max_us": float(np.abs(departure).max() / freq * 1e6)
+        if len(d)
+        else 0.0,
+        "worst_reference_s": float(p.x[worst] / freq) if len(d) else None,
+    }
+
+
 def analyze(run_dir: Path, reference_dir: Path) -> dict:
     reference = Reference.load(reference_dir)
     freq = reference.clock_freq
@@ -276,12 +302,9 @@ def analyze(run_dir: Path, reference_dir: Path) -> dict:
             result["capture_vs_tap"]["timing"] = stats
             result["capture_vs_tap"]["mcu_lateness"] = lateness
         if tap_ref_seq["all_steps_paired"]:
-            stats, p, residual = timeline(
-                reference.steppers, tap, freq, 1.0, False
+            result["tap_vs_reference"]["identity"] = schedule_identity(
+                reference.steppers, tap, freq
             )
-            ticks = np.rint(residual * freq).astype(np.int64)
-            stats["steps_identical_after_offset"] = float(np.mean(ticks == 0))
-            result["tap_vs_reference"]["timing"] = stats
     if seq["all_steps_paired"]:
         stats, _, _ = timeline(reference.steppers, captured, freq, None, False)
         result["capture_vs_reference"]["timing"] = stats

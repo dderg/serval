@@ -139,8 +139,10 @@ class Session:
             log = run_dir / "klippy.log"
             if log.exists():
                 record["fatal_lines"] = headroom.fatal_lines(log.read_text())
-            with contextlib.suppress(Exception):
+            try:
                 record["headroom"] = headroom.analyze(run_dir)
+            except Exception as exc:
+                record["headroom_error"] = repr(exc)
             if (run_dir / "events.bin").exists():
                 try:
                     analysis = compare.analyze(run_dir, ref_dir)

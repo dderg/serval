@@ -96,8 +96,8 @@ def correctness_table(runs: list[dict]) -> list[str]:
         checks = a.get("checks", {})
         timing = a.get("capture_vs_reference", {}).get("timing", {})
         late = a.get("capture_vs_tap", {}).get("mcu_lateness", {})
-        tapref = a.get("tap_vs_reference", {}).get("timing", {})
-        identical = tapref.get("steps_identical_after_offset")
+        tapref = a.get("tap_vs_reference", {}).get("identity", {})
+        identical = tapref.get("steps_identical")
         rows.append(
             f"| {r['gate']} | {r['tree']} | {r['config']} | {r['program']} "
             f"| {r.get('print_state', 'FAILED')} "
@@ -184,11 +184,9 @@ def g4_table(runs: list[dict]) -> list[str]:
         tap_seq = compare.sequences(tap_kv2, tap_up)
         identical = abs_max = None
         if tap_seq["all_steps_paired"]:
-            stats, _, residual = compare.timeline(
-                tap_kv2, tap_up, 84e6, 1.0, False
-            )
-            identical = float(np.mean(np.rint(residual * 84e6) == 0))
-            abs_max = stats["abs_max_us"]
+            identity = compare.schedule_identity(tap_kv2, tap_up, 84e6)
+            identical = identity["steps_identical"]
+            abs_max = identity["abs_max_us"]
         rows.append(
             f"| {name} | {same_messages} | {seq['all_steps_paired']} "
             f"| {fmt(None if identical is None else 100 * identical, '.3f')}% "
