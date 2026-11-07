@@ -454,3 +454,117 @@ Oscillator at ratio × the axis' shaper frequency (X 200, Y 130 Hz).
   Whether the motors deliver it, or skip, depends on torque headroom that
   the harness cannot see.
 - The corpus is sliced for slower machines: print moves at ≤300 mm/s.
+
+# Production readiness
+
+Evidence for running `[corner_deviation]` and the shaper-switch fix on a
+real printer, gathered offline and live on the dev box (the Pi bench runs
+separately). Owner config `configs/owner.cfg` (corexy, smooth_mzv 200/130
+Hz, 50 000 mm/s²); live runs use `configs/owner_linux.cfg`, the same
+machine on the Linux-process MCU at 4 microsteps.
+
+## Bugs found and fixed
+
+| found by | bug | fix |
+|---|---|---|
+| live klippy (bench) | `stats` dict collided with statistics.py's `stats()` callback: crash 1 s after ready | 19348edc9; `tests/test_printer_objects.py` calls every object's `stats` and json-dumps every status |
+| bench, 5d53e78f8 | table build (0.6–2 s on the Pi) in the connect handler; print-start burst late 53–103 ms; "Timer too close" at 1 cpu/1500 MHz | 7b467cbad: junction limit in C (0.43 against 2.56 µs), tables built in a nice-19 thread and cached; gcode waits until ready |
+| fuzz seed 1044 (default planner, upstream too) | SET_INPUT_SHAPER to a longer kernel right after motion: "stepcompress: Invalid sequence", shutdown | 44cd81786; `tests/test_shaper_switch.py` |
+| fuzz seed 2 | junction to a pure Z move: ZeroDivisionError in the curve speed | such junctions stop (`xy_stops`), 7717e74de |
+| fuzz seed 56 | short-chord arc sped up between curve-capped junctions; the cruise cap was flush-dependent | curve cap leaves room for a short move's gain, cruise cap removed, 7717e74de |
+| fuzz seeds 18, 22 | accelerating arcs: legs' accel plus curve steps reached 1.054× max_accel | at the time: curve steps shared (1 + 3%)·max_accel with the legs, 7717e74de; now the opt-in max_corner_accel |
+| fuzz seed 64 | not a limiter bug: with minimum_cruise_ratio > 0 the stock lookahead cruises faster after a forced stop | forced-flush check at minimum_cruise_ratio 0 |
+| fuzz generator, seed 253 | minimum_cruise_ratio 1.0 is an invalid config | drawn from [0, 0.95) |
+| owner | the burst bound cost 2.6 of corner_deviation's 3.2% against scv 50 | 7b117b1e4: bound opt-in (`max_corner_accel`), `corner_accel_x/y`, `CORNER_DEVIATION_REPORT` |
+| fuzz seeds 356, 421, 1306, 2682, 4438 | max_deviation exceeded by 1–17% on corner clusters | cap mode removed, 5e22ba62f |
+| cluster fuzz seeds 7, 79, 111, 207, 250 | floor exceeded by up to 1.106× on micro-move clusters | junctions next to a short move turning > 60° stop, 5e22ba62f |
+| cluster fuzz seeds 143, 170, 387 | cluster steps summed 10–20% past the isolated-corner accel bound | max_corner_accel bounds the steps' superposition (5e22ba62f, shaped in 1f44ab989); the unbounded worst states a 25% cluster margin |
+| cluster fuzz seeds 319, 577 | turns ≤ 60° in clusters still round 1.04–1.06× the floor | stated FLOOR_MARGIN 10%, fuzz-enforced, 1f44ab989 |
+| cluster fuzz seeds 32, 36, 120, 202 | harness: step check failed by < 0.2% (clock rounding; smoother quadrature at a 25 µs grid) | 2-tick rounding, speed-peak term (5e22ba62f); the fuzz re-checks on a 10 µs grid where the 25 µs one misses a step (1f44ab989) |
+| owner steer | max_corner_accel: the windowed peak-density bound cost +8.5% at 51 500 | bound by kernel-shaped superposition over the allowed step placements, 1f44ab989 (+5.4% at 51 500, +1.1% at 81 000) |
+
+## Fuzz
+
+Final runs at 1f44ab989 (`tools/motion_eval/.build/fuzz*/results.jsonl`):
+
+| run | cases | violations | floor ratio max | executed / admitted max (floor run, bounded run) |
+|---|---|---|---|---|
+| `fuzz.py --seeds 0:10000` (random gcode) | 10 000 | 0 | 0.9999 | 1.0000, 1.0000 |
+| `fuzz.py --generator clusters --seeds 0:2000` | 2 000 | 0 | 1.063 (seed 577; FLOOR_MARGIN 10%) | 1.0000, 1.0000 |
+
+Each case plans the default planner, floor mode, floor bounded by
+max_corner_accel 1.03·max_accel, floor with lazy flushes, the default
+planner with the same lazy flushes, and floor with forced flushes at
+minimum_cruise_ratio 0 (6–8 klippy runs), and checks completion, finite
+moves, the harness's step check, the floor, unchanged accels and final
+step positions, the admitted acceleration (unbounded: CornerAccel.worst
+with its 25% cluster margin; bounded: max_corner_accel exactly) and flush
+invariance. The 10k run took 3.5 h with 10 jobs. Regression subsets run in
+the test suite: `tests/fuzz_seeds.txt`, `tests/fuzz_cluster_seeds.txt`,
+`tests/fuzz_cases/*.json`.
+
+## Flush invariance
+
+- Lazy flushes (`MOTION_EVAL_LAZY_FLUSH_AT`, random add_move counts) leave
+  every junction limit identical (all fuzz cases, `tests/test_flush_invariance.py`
+  on corpus cases, seeds in `tests/flush_seeds.txt`), and the trapq
+  identical wherever the default planner's own trapq is identical with the
+  same flushes: with minimum_cruise_ratio > 0 the stock lookahead smooths
+  cruise speeds over the flush window (84 of the 2000 cluster cases, 0 of the 10 000 random ones;
+  the bench saw the same on voron top layers ×15, upstream and kv2 alike).
+- Forced flushes (M400 after random lines), at minimum_cruise_ratio 0:
+  limits identical wherever both runs compute the junction, no move faster.
+- Klipper's runout flush (`_handle_step_flush`) is accounted for: a lazy
+  flush that leaves too little planned stops the toolhead, and those
+  junctions are exempt (0 cases in both final runs).
+
+## Live against batch (linux-process MCU, step recorder preload)
+
+`tests/test_live.py` on corners_turn90, circles and voron_top_layers,
+owner_linux.cfg, with and without `[corner_deviation]`, statuses polled
+every 0.25 s and one statistics period waited: trapq identical to batch
+(one time offset), every step position identical, step times within
+2·MAX_STEPCOMPRESS_ERROR after an affine clock fit, every commanded step
+executed, no status query failed. At 1f44ab989 all 6 pass; with two live
+runs in parallel next to the fuzz (load 25) the linux-process MCU once fell
+behind ("Stepper too far in past", voron top layers with
+corner_deviation) and the case passed twice alone: the MCU process, not the
+plan. Earlier runs measured step time errors of 21–29 µs against the
+50.04 µs allowed and step jitter p99 ≈ 14 µs.
+
+## Reactor and startup (this box, taskset one core, ReactorMeter 5 ms timer)
+
+| condition | default late ms | corner_deviation late ms | note |
+|---|---|---|---|
+| full speed | 21.2 | 24.3 | the print-start burst; in print ≤ 7.7 ms both |
+| 30% CPU quota | 74.9 | 92.6 | |
+| 12% CPU quota | 211.6 | 227.8 | 5d53e78f8 shut down here ("Timer too close") |
+
+Ready is not delayed (0.77 / 0.79 s to ready); a cold table is ready 0.5 s
+after ready at full speed (1.9 s at 30%), gcode waits for it; GIL and CPU
+sharing with the build thread cost ≤ 3 ms of lateness at full speed. Bench
+(Pi 5, 5d53e78f8) saw 53–103 ms on the print-start burst with
+corner_deviation against < 6–36 ms without; the C limiter (0.38–0.43 µs per
+junction) is what the bench re-run should confirm.
+
+## Planner CPU (owner_linux, klippy pinned to one core)
+
+| limiter | case | moves/s of print | lookahead µs/move | of which limiter | klippy CPU here | Pi 5 (×2.5) |
+|---|---|---|---|---|---|---|
+| default | arcs ×10 | 1240 | 2.1 | 0.0 | 1.7% | 4.3% |
+| corner_deviation | arcs ×10 | 1242 | 2.9 | 0.6 | 2.0% | 5.0% |
+| default | voron_top ×3 | 231 | 2.0 | 0.0 | 1.1% | 2.8% |
+| corner_deviation | voron_top ×3 | 415 | 2.9 | 0.5 | 1.6% | 4.0% |
+
+The limiter column includes the harness's timing wrapper. "Pi 5" assumes
+a Pi 5 core is 2.5× slower than this one, an assumption, not a
+measurement. corner_deviation prints voron top layers faster, so more moves
+per second of print. Measured at 7b117b1e4; the cluster rules leave the
+unbounded junction cost unchanged.
+
+## Printer protocol
+
+`PRINTER_TEST.md`, `printer_test.py` and `printer_test/*.gcode` (corners
+and stress programs for scv 5/20/50, floor and bounded), `accel_residual.py`
+(accelerometer record → corner acceleration and residual, tested on
+synthetic records in `tests/test_accel_residual.py`).
