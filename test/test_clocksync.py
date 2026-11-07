@@ -7,8 +7,10 @@ from klippy import clocksync
 
 DATA = Path(__file__).with_name("data") / "clocksync_late_uptime.json"
 CLOCK_MASK = 0xFFFFFFFF
-MAX_PREDICTION_ERROR_S = 0.001
-MAX_CALIBRATION_PPM = 1000.0
+# Eight calibration samples span 0.35 s with up to ~0.8 ms of send jitter, so
+# their slope is good to a few 1000 ppm; the running regression refines it.
+MAX_CALIBRATION_PPM = 3000.0
+MAX_PREDICTION_ERROR_S = 0.005
 
 
 class FakeReactor:
@@ -84,7 +86,9 @@ def clock_params(sample):
 def connected(data, connect_count=8):
     sync = clocksync.ClockSync(FakeReactor())
     samples = data["samples"]
-    sync.connect(FakeSerial(data["mcu_freq"], data["uptime"], samples[:connect_count]))
+    sync.connect(
+        FakeSerial(data["mcu_freq"], data["uptime"], samples[:connect_count])
+    )
     return sync, samples[connect_count:]
 
 
@@ -113,9 +117,8 @@ def test_estimate_follows_samples_after_a_bad_start():
     for index, sample in enumerate(later):
         half_rtt = 0.5 * (sample["received"] - sample["sent"])
         predicted = sync.get_clock(sample["sent"] + half_rtt)
-        if index >= 2:
-            error_s = (sample["clock"] - predicted) / freq
-            assert abs(error_s) < MAX_PREDICTION_ERROR_S, (index, error_s)
+        error_s = (sample["clock"] - predicted) / freq
+        assert abs(error_s) < MAX_PREDICTION_ERROR_S, (index, error_s)
         sync._handle_clock(clock_params(sample))
 
 
@@ -134,3 +137,14 @@ def test_implausible_frequency_fails_at_connect():
     }
     with pytest.raises(clocksync.ClockSyncError, match="CLOCK_FREQ"):
         connected(data)
+
+
+def test_secondary_mcu_uses_the_same_calibration():
+    data = json.loads(DATA.read_text())
+    main, _ = connected(data)
+    secondary = clocksync.SecondarySync(FakeReactor(), main)
+    samples = data["samples"]
+    secondary.connect(FakeSerial(data["mcu_freq"], data["uptime"], samples[:8]))
+    truth = true_frequency(samples)
+    error_ppm = 1e6 * (secondary.clock_est[2] / truth - 1.0)
+    assert abs(error_ppm) < MAX_CALIBRATION_PPM, error_ppm
