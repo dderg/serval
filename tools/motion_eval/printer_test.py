@@ -4,9 +4,10 @@
 
 Writes, into tools/motion_eval/printer_test/ by default:
 - corners_<setting>.gcode: the corner/ringing pattern, one file per
-  setting (scv 5, 20, 50, [corner_deviation] floor and cap 0.07).
+  setting (scv 5, 20, 50; [corner_deviation] floor, cap 0.07, and bounded
+  at max_corner_accel 1.03 x max_accel).
 - stress_<setting>.gcode: dense zigzags, polyline circles and reversals
-  at scv 50 and in floor mode, between two printed reference marks.
+  at scv 50, floor and bounded, between two printed reference marks.
 
 Every file is replanned through run_klippy on configs/owner.cfg under its
 own setting. The generator asserts that:
@@ -29,6 +30,8 @@ import sys
 
 import numpy as np
 
+from klippy.extras.corner_deviation import ACCEL_MARGIN
+
 from . import accel_residual, evaluate
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -44,14 +47,21 @@ QUIET_TAIL_MS = 100
 SELF_CHECK_RATE_HZ = 3200.0
 SELF_CHECK_OFFSET_S = 1000.0031416
 PRIME_GAP_MM = 5.0
+BOUNDED_RATIO = 1.03
+BOUNDED_CORNER_ACCEL = round(
+    BOUNDED_RATIO
+    * float(accel_residual.config_option(CONFIG, "printer", "max_accel"))
+)
 CORNER_SETTINGS = {
     "scv5": (5.0, "none"),
     "scv20": (20.0, "none"),
     "scv50": (50.0, "none"),
     "floor": (None, "floor"),
     "cap0.07": (None, "0.07"),
+    "bounded": (None, "bound%d" % BOUNDED_CORNER_ACCEL),
 }
-STRESS_SETTINGS = ("scv50", "floor")
+STRESS_SETTINGS = ("scv50", "floor", "bounded")
+BOUNDED_FILES = ("corners_bounded", "stress_bounded")
 LOWEST_MODE_RATIO = 0.8
 RING_PERIODS = 5.0
 CRUISE_MARGIN = 1.5
@@ -542,6 +552,25 @@ def generate(out):
                 "%s: executed peak x %.3f y %.3f of max_accel, below the"
                 " %.2f it is meant to reach"
                 % (name, peaks["x"], peaks["y"], STRESS_PEAK_EXPECTED)
+            )
+        bounded_limit = (
+            BOUNDED_CORNER_ACCEL
+            * (1.0 + ACCEL_MARGIN)
+            / raw.capture["settings"]["max_accel"]
+        )
+        if name in BOUNDED_FILES and (
+            max(peaks["x"], peaks["y"]) > bounded_limit
+        ):
+            raise AssertionError(
+                "%s: executed peak x %.3f y %.3f of max_accel, above the"
+                " %.4f that max_corner_accel %d plus ACCEL_MARGIN allows"
+                % (
+                    name,
+                    peaks["x"],
+                    peaks["y"],
+                    bounded_limit,
+                    BOUNDED_CORNER_ACCEL,
+                )
             )
         (out / (name + ".gcode")).write_text(text)
         report.append(

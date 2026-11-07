@@ -39,8 +39,11 @@ Every gcode carries `; motion_eval key=value` headers (written by
 printer_test.py):
 - start: the toolhead position the replay starts from.
 - setting: the row name.
-- corner_deviation: none, floor, or a max_deviation in mm. It selects the
-  replay config.
+- corner_deviation: the replay config's [corner_deviation] section.
+  `none` leaves it out (square_corner_velocity mode). `floor` is the
+  section with no options. `<mm>` (e.g. `0.07`) adds max_deviation.
+  `bound<mm/s^2>` (e.g. `bound51500`) adds max_corner_accel. Any other
+  value fails.
 - measured_moves: the trapq move range [first, end) that runs between the
   file's MOTION_EVAL_ACCEL_START and MOTION_EVAL_ACCEL_STOP.
 - sync_s: how long that range's opening sync motion lasts.
@@ -101,6 +104,7 @@ import dataclasses
 import functools
 import math
 import pathlib
+import re
 import sys
 import tempfile
 
@@ -122,6 +126,10 @@ REQUIRED_HEADERS = (
     "sync_s",
 )
 AXES = "xy"
+CORNER_DEVIATION_HEADER = re.compile(
+    r"(?P<none>none)|(?P<floor>floor)"
+    r"|(?P<cap>[0-9]+\.[0-9]+)|bound(?P<bound>[0-9]+)"
+)
 START_MACRO = "MOTION_EVAL_ACCEL_START"
 STOP_MACRO = "MOTION_EVAL_ACCEL_STOP"
 DT = 25e-6
@@ -301,16 +309,35 @@ def shaper_freqs(config):
     return out
 
 
+def corner_deviation_section(value):
+    """[corner_deviation] config text for a corner_deviation header value,
+    or None for `none`."""
+    match = CORNER_DEVIATION_HEADER.fullmatch(value)
+    if match is None:
+        raise AccelResidualError(
+            "corner_deviation header %r is none of: none, floor, <mm> (a"
+            " max_deviation such as 0.07), bound<mm/s^2> (a"
+            " max_corner_accel such as bound51500)" % (value,)
+        )
+    if match["none"]:
+        return None
+    section = "[corner_deviation]\n"
+    if match["cap"]:
+        section += "max_deviation: %s\n" % (float(match["cap"]),)
+    if match["bound"]:
+        section += "max_corner_accel: %d\n" % (int(match["bound"]),)
+    return section
+
+
 def replay_config(config, corner_deviation, tmpdir):
     """A printer.cfg that includes `config`, defines the accelerometer
     macros as no-ops and adds [corner_deviation] as the header asks."""
     text = "[include %s]\n" % (pathlib.Path(config).resolve(),)
     for macro in (START_MACRO, STOP_MACRO):
         text += "\n[gcode_macro %s]\ngcode:\n" % (macro,)
-    if corner_deviation != "none":
-        text += "\n[corner_deviation]\n"
-        if corner_deviation != "floor":
-            text += "max_deviation: %s\n" % (float(corner_deviation),)
+    section = corner_deviation_section(corner_deviation)
+    if section is not None:
+        text += "\n" + section
     path = pathlib.Path(tmpdir) / "printer.cfg"
     path.write_text(text)
     return path
