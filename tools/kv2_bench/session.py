@@ -45,6 +45,12 @@ SESSIONS = Path("~/bench/kv2").expanduser()
 UPSTREAM = "1ee39ff2c"
 FAST_PROGRAMS = ("speed_ladder", "voron_top_layers", "arcs")
 DENSE = {"arcs": 30, "voron_top_layers": 15}
+CONFIG_ORDER = (
+    "default",
+    "owner_like",
+    "owner_like_cd",
+    "owner_like_cd_bounded",
+)
 SOAK_SLICES = (
     "voron_top_layers",
     "arcs",
@@ -215,7 +221,7 @@ def quota(percent: int | None) -> Iterator[None]:
 def gate_g1_g2(
     s: Session, kv2: str, gates: set[str], configs: set[str]
 ) -> None:
-    for config in ("default", "owner_like", "owner_like_cd"):
+    for config in CONFIG_ORDER:
         if config not in configs:
             continue
         for name in FAST_PROGRAMS:
@@ -237,7 +243,7 @@ def gate_g3(s: Session, kv2: str, configs: set[str]) -> None:
         {"max_mhz": 1500},
         {"cpus": 1, "max_mhz": 1500},
     ]
-    for config in ("owner_like", "owner_like_cd"):
+    for config in CONFIG_ORDER[1:]:
         if config not in configs:
             continue
         for name, repeat in DENSE.items():
@@ -310,7 +316,7 @@ def gate_soak(s: Session, kv2: str, configs: set[str]) -> None:
     judged against the live-trapq replay, with the timer-lateness probe."""
     bench.activate(s.trees["kv2"], CONFIGS / "owner_like.cfg", probe=True)
     bench.restart_ready()
-    for config in ("owner_like", "owner_like_cd"):
+    for config in CONFIG_ORDER[1:]:
         if config not in configs:
             continue
         prog = soak_program(s, kv2, config)
@@ -328,7 +334,7 @@ def gate_soak(s: Session, kv2: str, configs: set[str]) -> None:
 
 
 TRIALS = 10
-TRIAL_CONFIGS = ("owner_like_cd", "owner_like")
+TRIAL_CONFIGS = ("owner_like_cd", "owner_like", "owner_like_cd_bounded")
 
 
 def gate_trials(s: Session, kv2: str, trials: int) -> None:
@@ -448,16 +454,20 @@ def main() -> None:
     parser.add_argument("--gates", default="g1,g2,g3,g4")
     parser.add_argument(
         "--configs",
-        default="default,owner_like,owner_like_cd",
+        default="default,owner_like,owner_like_cd,owner_like_cd_bounded",
         help="configs the g1-g3 rows run with",
     )
     parser.add_argument(
         "--g3-configs", help="configs of the g3 rows (default: --configs)"
     )
+    parser.add_argument(
+        "--soak-configs", help="configs of the soak rows (default: --configs)"
+    )
     parser.add_argument("--kv2-ref", default="kv2/main")
     parser.add_argument("--upstream-ref", default=UPSTREAM)
     parser.add_argument("--lock-timeout", type=float, default=7200.0)
     parser.add_argument("--trials", type=int, default=TRIALS)
+    parser.add_argument("--clock-trials", type=int, default=30)
     args = parser.parse_args()
     if lock.TOKEN_ENV not in os.environ:
         raise SystemExit(
@@ -513,9 +523,13 @@ def main() -> None:
             if "trials" in gates:
                 gate_trials(session, kv2, args.trials)
             if "clocktrials" in gates:
-                gate_clocktrials(session, kv2, args.trials)
+                gate_clocktrials(session, kv2, args.clock_trials)
             if "soak" in gates:
-                gate_soak(session, kv2, set(args.configs.split(",")))
+                gate_soak(
+                    session,
+                    kv2,
+                    set((args.soak_configs or args.configs).split(",")),
+                )
         except BaseException as exc:
             failure = exc
             traceback.print_exc()
