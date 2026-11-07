@@ -57,9 +57,9 @@ def build(commit: str) -> Firmware:
     out.mkdir(parents=True, exist_ok=True)
     kconfig = out / "f401.config"
     shutil.copyfile(KCONFIG, kconfig)
+    (out / "compile_time_request.o").unlink(missing_ok=True)
     make = ["make", f"OUT={out}/", f"KCONFIG_CONFIG={kconfig}"]
     for args in ([*make, "olddefconfig"], [*make, "-j8"]):
-    (out / "compile_time_request.o").unlink(missing_ok=True)
         subprocess.run(
             ["python3", str(SLOTS), "run", "--", *args],
             cwd=FW_WORKTREE,
