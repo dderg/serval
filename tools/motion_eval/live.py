@@ -56,6 +56,8 @@ class LiveRun:
     klippy_cpu_s: float
     print_wall_s: float
     state: str
+    ready_s: float
+    table_ready_s: float
     status_polls: int
     status_errors: list
 
@@ -167,8 +169,20 @@ def _read_steps(path, names):
     }  # fmt: skip
 
 
-def run_live(config_path, gcode, start_xyz, cpu=None, env=None):
-    """Plan and execute gcode in real time. cpu: pin klippy to that core."""
+def run_live(
+    config_path,
+    gcode,
+    start_xyz,
+    cpu=None,
+    quota=None,
+    env=None,
+    wait_table=True,
+):
+    """Plan and execute gcode in real time. cpu: pin klippy to that core.
+    quota: CPU percent klippy may use, enforced by the kernel in
+    QUOTA_PERIOD slices (a slower host, without the long gaps of the
+    default 100 ms period). wait_table: start the print only once the
+    corner_deviation table is ready."""
     if not LINUX_MCU:
         raise LiveRunError("KLIPPER_LINUX_MCU is not set")
     steppers = recorded_steppers(_expanded(config_path))
@@ -200,6 +214,11 @@ def run_live(config_path, gcode, start_xyz, cpu=None, env=None):
                    "-a", str(api_path), "-I", str(tmp / "printer")]  # fmt: skip
             if cpu is not None:
                 cmd = ["taskset", "-c", str(cpu)] + cmd
+            if quota is not None:
+                cmd = ["systemd-run", "--user", "--scope", "-q",
+                       "-p", "CPUQuota=%d%%" % (quota,),
+                       "-p", "CPUQuotaPeriodSec=%s" % (QUOTA_PERIOD,)] + cmd  # fmt: skip
+            launched = time.monotonic()
             klippy = subprocess.Popen(
                 cmd,
                 cwd=run.REPO_ROOT,
@@ -216,10 +235,23 @@ def run_live(config_path, gcode, start_xyz, cpu=None, env=None):
                 "klippy to start",
             )
             info = api.call("info")
+            ready_s = time.monotonic() - launched
+            table_ready_s = 0.0
             if info["state"] != "ready":
                 raise LiveRunError(
                     "klippy %s: %s" % (info["state"], info["state_message"])
                 )
+            if (
+                wait_table
+                and "corner_deviation" in api.call("objects/list")["objects"]
+            ):
+                _wait_for(
+                    lambda: api.call(
+                        "objects/query", objects={"corner_deviation": None}
+                    )["status"]["corner_deviation"]["table_ready"],
+                    "the corner_deviation table",
+                )
+            table_ready_s = time.monotonic() - launched - ready_s
             poller = _StatusPoller(api_path)
             cpu0, wall0 = _cpu_seconds(klippy.pid), time.monotonic()
             poller.start()
@@ -252,12 +284,15 @@ def run_live(config_path, gcode, start_xyz, cpu=None, env=None):
             klippy_cpu_s=cpu_s,
             print_wall_s=wall_s,
             state=state,
+            ready_s=ready_s,
+            table_ready_s=table_ready_s,
             status_polls=poller.polls,
             status_errors=poller.errors,
         )
 
 
 STATS_PERIOD_S = 1.2
+QUOTA_PERIOD = "5ms"
 POLL_PERIOD_S = 0.25
 
 
@@ -391,25 +426,41 @@ def compare_trapq(batch_moves, live_moves):
 PI5_SLOWDOWN = 2.5
 
 
-def cpu_report(case, repeat, core):
-    """klippy CPU at real time on one pinned core, the case printed repeat
-    times (returning to its start in between), without and with
-    [corner_deviation]."""
+def cpu_report(case, repeat, core, quota=None, cold=False, wait_table=True):
+    """klippy at real time on one pinned core (and a CPU quota): the case
+    printed repeat times (returning to its start in between), without and
+    with [corner_deviation]; cold builds the corner table at startup."""
     from . import sweep
 
     text = (sweep.CORPUS / (case + ".gcode")).read_text()
     start = sweep.case_start(text)
     back = "G1 X%r Y%r Z%r F30000\n" % tuple(start)
     gcode = (text + back) * repeat
-    rows = []
-    for limiter, section in (
-        ("default", ""),
-        ("corner_deviation", "[corner_deviation]\n"),
-    ):
+    rows, details = [], []
+    for limiter in ("default", "corner_deviation"):
         with tempfile.TemporaryDirectory() as tmp:
+            section = ""
+            if limiter == "corner_deviation":
+                section = "[corner_deviation]\n"
+                if cold:
+                    section += "table_cache_dir: %s\n" % (tmp,)
             config = pathlib.Path(tmp) / "printer.cfg"
             config.write_text("[include %s]\n\n%s" % (OWNER_LINUX_CFG, section))
-            r = run_live(config, gcode, start, cpu=core)
+            try:
+                r = run_live(
+                    config,
+                    gcode,
+                    start,
+                    cpu=core,
+                    quota=quota,
+                    wait_table=wait_table,
+                )
+            except LiveRunError as e:
+                rows.append(
+                    "| %s | %s | failed: %s |"
+                    % (limiter, case, str(e)[:160].replace("\n", " "))
+                )
+                continue
         moves = r.capture["moves"]
         span = (
             moves[-1]["print_time"]
@@ -419,20 +470,46 @@ def cpu_report(case, repeat, core):
             - moves[0]["print_time"]
         )
         timing = r.capture["timing"]
+        reactor = r.capture["reactor"]
         n = r.capture["added_moves"]
         share = r.klippy_cpu_s / r.print_wall_s
+        work = r.capture["flush_work"]
+        status = r.capture["corner_deviation"]
+        if status is not None:
+            details.append(
+                "%s table built until %.2f s after ready, worst late while"
+                " building %s, unbuilt_stops %d"
+                % (limiter, reactor["building_until_s"],
+                   _ms(reactor["worst_building"][:3]), status["unbuilt_stops"])
+            )  # fmt: skip
+        details.append(
+            "%s worst [s after ready, cpu ms, late ms]: cpu %s late %s;"
+            " lookahead flushes %d, max queued %d, max flush %.1f ms"
+            % (limiter, _ms(reactor["worst_cpu"][:4]),
+               _ms(reactor["worst_late"][:4]), len(work),
+               max(w[0] for w in work), 1e3 * max(w[2] for w in work))
+        )  # fmt: skip
         rows.append(
-            "| %s | %s | %d | %.0f | %.1f | %.1f | %.2f | %.1f%% | %.1f%% |"
-            % (limiter, case, n, n / span, 1e6 * timing["lookahead_s"] / n,
-               1e6 * timing["junction_limiter_s"] / n, r.print_wall_s,
-               100.0 * share, 100.0 * share * PI5_SLOWDOWN)
+            "| %s | %s | %s | %.2f | %.2f | %d | %.1f | %.1f | %.1f%% | %.1f | %.1f |"
+            % (limiter, case, r.state, r.ready_s, r.table_ready_s, n / span,
+               1e6 * timing["lookahead_s"] / n,
+               1e6 * timing["junction_limiter_s"] / n, 100.0 * share,
+               1e3 * reactor["max_cpu_s"], 1e3 * reactor["max_late_s"])
         )  # fmt: skip
     head = (
-        "| limiter | case | moves | moves/s of print | lookahead us/move |"
-        " of which limiter | print wall s | klippy CPU, one core here |"
-        " Pi 5 (x%g) |\n|%s" % (PI5_SLOWDOWN, "---|" * 9)
+        "| limiter | case | state | to ready s | table after ready s |"
+        " moves/s of print | lookahead us/move | of which limiter |"
+        " klippy CPU | longest callback ms (CPU) | worst timer lateness ms |"
+        "\n|%s" % ("---|" * 11,)
     )
-    return head + "\n" + "\n".join(rows)
+    return head + "\n" + "\n".join(rows + [""] + details)
+
+
+def _ms(samples):
+    return [
+        [round(t, 2), round(1e3 * cpu, 1), round(1e3 * late, 1)]
+        for t, cpu, late in samples
+    ]
 
 
 def main(argv=None):
@@ -442,8 +519,20 @@ def main(argv=None):
     ap.add_argument("--case", default="arcs")
     ap.add_argument("--repeat", type=int, default=10)
     ap.add_argument("--core", type=int, default=os.cpu_count() - 1)
+    ap.add_argument("--quota", type=int)
+    ap.add_argument("--cold", action="store_true")
+    ap.add_argument("--no-table-wait", action="store_true")
     args = ap.parse_args(argv)
-    print(cpu_report(args.case, args.repeat, args.core))
+    print(
+        cpu_report(
+            args.case,
+            args.repeat,
+            args.core,
+            args.quota,
+            args.cold,
+            not args.no_table_wait,
+        )
+    )
 
 
 if __name__ == "__main__":
