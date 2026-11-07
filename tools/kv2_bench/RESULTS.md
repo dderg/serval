@@ -497,3 +497,14 @@ They pass on the fix: calibration +1063 ppm, prediction error ≤ 1.55 ms, a cle
 | owner_like idle | 30 | 0 | −558 … +1366 ppm | 0 |
 
 Worst estimate error after connect over all 90 starts: max 1411 ppm, median 594 ppm. The baseline was max 9904 ppm, median 1464 ppm, with 17 runs ignoring up to 10 samples.
+
+Soak on the fix (owner_like_cd ×84 ≈ 34 min, replay judge with the new 10 s windowed clock fit):
+
+| host | X / Y / Z / E steps | replay = tap | capture−replay / bound | MCU lateness max | klippy CPU | buffer_time min | fatal |
+|---|---|---|---|---|---|---|---|
+| full | 19060250 / 16736950 / 2806400 / 4754618 | yes, 73.0 % at the same clock, max 25.00 µs | 27.79 / 34.84 µs | 9.74 µs | 4.6 % | 1.38 s | 0 |
+| 1 cpu / 1500 MHz | same | yes, 73.3 %, max 25.00 µs | 27.26 / 34.95 µs | 9.85 µs | 4.7 % | 1.25 s | 0 |
+
+- **Every check passes.** The step counts at 1 cpu equal those at full speed.
+- **The windowed clock fit (`compare.timeline` for runs > 120 s) gives the tight bound directly.** Re-judging the earlier 1-cpu owner_like soak gives 27.57 µs against a bound of 35.00 µs, where the single fit gave 84.4 / 126.1 µs.
+- **Restoration:** differences `[]`; `state.py`: printer ready, deployed 2a9597f4b, MCU serial present, capture present.
