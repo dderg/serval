@@ -332,6 +332,22 @@ conjunction with other calibration commands to store the results of
 calibration tests.
 If RESTART is set to 0, no restart will be performed !!USE WITH CAUTION!!.
 
+### [corner_deviation]
+
+The following command is enabled if a
+[corner_deviation config section](Config_Reference.md#corner_deviation)
+has been enabled.
+
+#### CORNER_DEVIATION_REPORT
+`CORNER_DEVIATION_REPORT [MOTOR_ACCEL=<mm/s²>]`: Reports the worst
+executed acceleration per axis (X and Y) that the junction speeds admit
+at the current `max_accel` and `max_velocity`: the legs' acceleration
+plus the shaped velocity step of the fastest corner, or a curve's
+tangential and centripetal acceleration. With MOTOR_ACCEL it also
+reports `recommended_max_accel`, the largest `max_accel` whose worst
+case stays within MOTOR_ACCEL on both axes. On corexy each motor sees up
+to the sum of the X and Y accelerations.
+
 ### [delayed_gcode]
 
 The following command is enabled if a

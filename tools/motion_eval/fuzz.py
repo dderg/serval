@@ -7,18 +7,19 @@ Each seed generates a gcode program: segments from 1 um to 200 mm, exact
 reversals, collinear runs, arcs, Z hops, extrude-only moves and retracts,
 G92, SET_VELOCITY_LIMIT, M204 and SET_INPUT_SHAPER mid-print (smoothers,
 pulse shapers and off), on owner.cfg, bench.cfg or fast.cfg. It runs the
-default planner (no limiter), [corner_deviation] in floor mode, with a
-random cap, and floor mode again with forced and with lazy lookahead
-flushes, and checks:
+default planner (no limiter), [corner_deviation] in floor mode, bounded
+by max_corner_accel, and floor mode again with forced and with lazy
+lookahead flushes, and checks:
 
 - every run completes, every trapq move is finite with positive duration,
   and the executed motion matches the decoded steps (the harness check);
-- floor and cap: each corner of the shaped path rounds at most the shaper
-  floor max_accel * hypot(sigma_x^2, sigma_y^2) / 2 of the moves around
-  it; with a cap, at most cap * (1 + CAP_MARGIN) unless a corner within
-  reach stopped;
+- each corner of the shaped path rounds at most (1 + FLOOR_MARGIN) times
+  the shaper floor max_accel * hypot(sigma_x^2, sigma_y^2) / 2 of the
+  moves around it;
 - the trapq accels and the final step positions equal the default run's;
-- executed peak acceleration <= max_accel * (1 + ACCEL_MARGIN);
+- executed peak acceleration per axis <= what the limiter admits
+  (CornerAccel.worst, cluster margin included, in floor mode;
+  max_corner_accel in the bounded run);
 - lazy flushes at random moves leave the trapq and the junction limits
   identical; forced flushes (M400) leave every junction limit not at a
   flush identical and every move at most as fast.
@@ -29,8 +30,10 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import dataclasses
+import functools
 import json
 import math
+import os
 import pathlib
 import random
 import re
@@ -59,10 +62,19 @@ MAX_SEGMENT_S = 0.15
 ACCEL_MM_S2 = (500.0, 60000.0)
 SHAPER_FREQ_HZ = (25.0, 35.0, 50.0, 70.0, 100.0, 130.0, 160.0, 200.0, 220.0)
 SHAPERS = ("smooth_mzv", "smooth_ei", "smooth_zv", "mzv", "ei", "zv")
-CAP_MM = (0.02, 0.3)
 EXTRUDE_PER_MM = 0.033
 DT = 25e-6
+FINE_DT = 10e-6
 FLOAT_TOLERANCE = 1e-9
+APPROACH_MM = (50.0, 200.0)
+APPROACH_SPEED_MM_S = (300.0, 1000.0)
+CHORD_MM = (0.02, 1.0)
+CHORD_TURN_DEG = (2.0, 25.0)
+MICRO_MM = (0.01, 0.5)
+CLUSTER_MOVES = (3, 40)
+CLUSTERS = (3, 12)
+CORNER_ACCEL_RATIO = 1.03
+TABLE_CACHE_DIR = os.path.expanduser(corner_deviation.TABLE_CACHE_DIR)
 
 
 @dataclasses.dataclass
@@ -71,7 +83,6 @@ class Case:
     config: str
     gcode: str
     start: tuple
-    cap: float
     lazy_flush_at: tuple
     forced_flush_lines: tuple
 
@@ -227,6 +238,43 @@ class Program:
             )
         )
 
+    def approach(self):
+        """A long fast move: the cluster after it is entered decelerating."""
+        self.heading, x, y = self.target(
+            self.heading + self.turn(), self.rng.uniform(*APPROACH_MM)
+        )
+        self.pos[0], self.pos[1] = x, y
+        self.feed = self.rng.uniform(*APPROACH_SPEED_MM_S)
+        self.emit(
+            "G1 X%.6f Y%.6f F%.3f"
+            % (self.logical(0), self.logical(1), 60.0 * self.feed)
+        )
+
+    def polyline_arc(self):
+        """Short chords turning the same way, as a slicer's small arcs."""
+        chord = math.exp(self.rng.uniform(*map(math.log, CHORD_MM)))
+        step = self.rng.choice((1, -1)) * math.radians(
+            self.rng.uniform(*CHORD_TURN_DEG)
+        )
+        speed = self.speed() if self.rng.random() < 0.5 else ""
+        for i in range(self.rng.randint(*CLUSTER_MOVES)):
+            self.heading, x, y = self.target(self.heading + step, chord)
+            self.pos[0], self.pos[1] = x, y
+            self.emit(
+                "G1 X%.6f Y%.6f%s"
+                % (self.logical(0), self.logical(1), speed if i == 0 else "")
+            )
+
+    def micro_cluster(self):
+        """Very short moves turning at random."""
+        for _ in range(self.rng.randint(*CLUSTER_MOVES)):
+            length = math.exp(self.rng.uniform(*map(math.log, MICRO_MM)))
+            self.heading, x, y = self.target(
+                self.heading + self.rng.uniform(-math.pi, math.pi), length
+            )
+            self.pos[0], self.pos[1] = x, y
+            self.emit("G1 X%.6f Y%.6f" % (self.logical(0), self.logical(1)))
+
     def shaper(self):
         if self.rng.random() < 0.15:
             self.emit("SET_INPUT_SHAPER SHAPER_FREQ_X=0 SHAPER_FREQ_Y=0")
@@ -301,10 +349,46 @@ def generate(seed):
         config,
         "\n".join(lines) + "\n",
         start,
-        rng.uniform(*CAP_MM),
         lazy,
         forced,
     )
+
+
+def generate_clusters(seed):
+    """Corner clusters within one kernel reach (short-chord arcs and
+    micro-move clusters), each entered decelerating from a long fast move,
+    under a random shaper and accel."""
+    rng = random.Random(seed)
+    names, paths, weights = zip(*CONFIGS)
+    config = rng.choices(names, weights)[0]
+    start = tuple(rng.uniform(*BED) for _ in range(2)) + (
+        rng.uniform(*Z_RANGE),
+    )
+    prog = Program(rng, start)
+    if rng.random() < 0.7:
+        prog.shaper()
+    if rng.random() < 0.5:
+        prog.limits()
+    for _ in range(rng.randint(*CLUSTERS)):
+        prog.approach()
+        rng.choice((prog.polyline_arc, prog.micro_cluster))()
+    lines = prog.lines
+    move_lines = [i for i, line in enumerate(lines) if line.startswith("G1")]
+    return Case(
+        seed,
+        config,
+        "\n".join(lines) + "\n",
+        start,
+        tuple(sorted(rng.sample(range(400), rng.randint(1, 12)))),
+        tuple(
+            sorted(
+                rng.sample(move_lines, min(len(move_lines), rng.randint(1, 4)))
+            )
+        ),
+    )
+
+
+GENERATORS = {"random": generate, "clusters": generate_clusters}
 
 
 def _config(case, tmpdir, section):
@@ -316,10 +400,23 @@ def _config(case, tmpdir, section):
     return path
 
 
+def _config_max_accel(case):
+    base = dict((n, p) for n, p, _ in CONFIGS)[case.config]
+    (value,) = re.findall(r"^max_accel:\s*(\S+)", base.read_text(), re.M)
+    return float(value)
+
+
+def _corner_accel(case):
+    """The bounded run bounds the corner burst, CORNER_ACCEL_RATIO above
+    the config's max_accel; the floor run leaves it unbounded."""
+    return CORNER_ACCEL_RATIO * _config_max_accel(case)
+
+
 def _sections(case):
     return {
         "floor": "[corner_deviation]\n",
-        "cap": "[corner_deviation]\nmax_deviation: %r\n" % (case.cap,),
+        "bounded": "[corner_deviation]\nmax_corner_accel: %r\n"
+        % (_corner_accel(case),),
     }
 
 
@@ -382,13 +479,13 @@ def _window_max(moves, values, lo, hi):
     return out
 
 
-def _painted_max(moves, values, t0, n, reach):
-    """Per sample t0 + DT*i, the largest value of the moves overlapping
+def _painted_max(moves, values, t0, n, reach, dt):
+    """Per sample t0 + dt*i, the largest value of the moves overlapping
     [t - reach, t + reach]."""
     out = np.zeros(n)
     for m, value in zip(moves, values):
-        i0 = max(0, int(math.floor((m["print_time"] - reach - t0) / DT)))
-        i1 = min(n, int(math.ceil((_move_end(m) + reach - t0) / DT)) + 1)
+        i0 = max(0, int(math.floor((m["print_time"] - reach - t0) / dt)))
+        i1 = min(n, int(math.ceil((_move_end(m) + reach - t0) / dt)) + 1)
         np.maximum(out[i0:i1], value, out=out[i0:i1])
     return out
 
@@ -399,18 +496,70 @@ def _floor_per_unit_accel(epoch):
     )
 
 
-def _check_shaped(v, name, raw, cap):
+def _shaper_spec(state):
+    """corner_deviation.shaper_spec of a captured shaper state."""
+    if state["kind"] == "pulses":
+        if not state["A"]:
+            return None
+        return ("pulses", tuple(state["A"]), tuple(state["T"]))
+    if not state["smooth_time"]:
+        return None
+    return ("smoother", tuple(state["coeffs"]), state["smooth_time"])
+
+
+def _admitted_accel(capture, corner_accel):
+    """Per move, the worst executed (x, y) acceleration the limiter admits
+    at the move's accel under its shaper epoch (corner_deviation's
+    CornerAccel; a stop at every corner without shaping)."""
+    moves = capture["moves"]
+    max_velocity = max(m["max_cruise_v"] for m in moves)
+    models, worst = {}, {}
+    out = np.zeros((len(moves), 2))
+    for i, m in enumerate(moves):
+        epoch = m["shaper_epoch"]
+        if epoch not in models:
+            state = capture["shapers"][epoch]
+            specs = tuple(_shaper_spec(state[axis]) for axis in "xy")
+            models[epoch] = None
+            if None not in specs:
+                kx, ky = (corner_deviation.kernel_from_spec(s) for s in specs)
+                arrays = corner_deviation.table_arrays(
+                    specs, kx, ky, TABLE_CACHE_DIR
+                )
+                models[epoch] = corner_deviation.CornerAccel(arrays, kx, ky)
+        key = (epoch, m["accel"])
+        if key not in worst:
+            model = models[epoch]
+            worst[key] = (
+                (m["accel"], m["accel"])
+                if model is None
+                else model.worst(m["accel"], max_velocity, corner_accel)
+            )
+        out[i] = worst[key]
+    return out
+
+
+def _check_shaped(v, name, raw, corner_accel):
+    """_check_shaped_at on the DT grid; where the harness model misses a
+    step there, on the FINE_DT grid (the smoother convolution is a Riemann
+    sum on the grid, which errs more on steep accelerations)."""
+    try:
+        return _check_shaped_at(v, name, raw, corner_accel, DT)
+    except analysis.ModelMismatch:
+        return _check_shaped_at(v, name, raw, corner_accel, FINE_DT)
+
+
+def _check_shaped_at(v, name, raw, corner_accel, dt):
     """A vertex's deviation is measured over [t_arrive - W, t_leave + W]
     (W the kernel reach), and the shaped path there depends on the moves
     within another W: the floor and the stop exemption look that far."""
-    result = evaluate.analyze(raw, dt=DT, sample_dt=None)
+    result = evaluate.analyze(raw, dt=dt, sample_dt=None)
     moves = raw.capture["moves"]
-    seg, epochs, t0, n, _, motion = evaluate.executed_motion(raw.capture, DT)
+    seg, epochs, t0, n, _, motion = evaluate.executed_motion(raw.capture, dt)
     vertices = result["executed"]["vertices"]
     t_arrive = np.array(vertices["t_arrive"])
     t_leave = np.array(vertices["t_leave"])
     deviation = np.array(vertices["deviation_mm"])
-    speed = np.array(vertices["speed_mm_s"])
     reach = 2.0 * max(
         max(abs(s) for s in evaluate.kernel_support(e.kernels)) for e in epochs
     )
@@ -421,7 +570,7 @@ def _check_shaped(v, name, raw, cap):
     accel = np.array([m["accel"] for m in moves])
     max_accel = np.array([m["max_accel"] for m in moves])
     floor_near = _window_max(moves, floor_per_accel * accel, lo, hi)
-    grid = 0.5 * _window_max(moves, max_accel, lo, hi) * DT**2 + FLOAT_TOLERANCE
+    grid = 0.5 * _window_max(moves, max_accel, lo, hi) * dt**2 + FLOAT_TOLERANCE
     metrics = {
         "floor_ratio": float(
             (deviation / np.where(floor_near > 0.0, floor_near, np.inf)).max(
@@ -429,47 +578,43 @@ def _check_shaped(v, name, raw, cap):
             )
         )
     }
-    for k in np.flatnonzero(deviation > floor_near + grid):
+    floor_limit = (1.0 + corner_deviation.FLOOR_MARGIN) * floor_near
+    for k in np.flatnonzero(deviation > floor_limit + grid):
         v.check(
             False,
-            "%s: corner at t=%.6f rounds %.6f mm > shaper floor %.6f mm",
+            "%s: corner at t=%.6f rounds %.6f mm > shaper floor %.6f mm (+%g)",
             name,
             t_arrive[k],
             deviation[k],
             floor_near[k],
+            corner_deviation.FLOOR_MARGIN,
         )
-    if cap is not None:
-        stopped = speed <= 0.0
-        free = [
-            k
-            for k in range(len(deviation))
-            if not (stopped & (t_leave >= lo[k]) & (t_arrive <= hi[k])).any()
-        ]
-        metrics["cap_ratio"] = float(max(deviation[free], default=0.0) / cap)
-        cap_limit = (1.0 + corner_deviation.CAP_MARGIN) * cap
-        for k in np.flatnonzero(deviation > cap_limit + grid):
-            near_stop = stopped & (t_leave >= lo[k]) & (t_arrive <= hi[k])
-            v.check(
-                near_stop.any(),
-                "%s: corner at t=%.6f rounds %.6f mm > cap %.6f mm (+%g) with"
-                " no stopped corner within %.4f s",
-                name,
-                t_arrive[k],
-                deviation[k],
-                cap,
-                corner_deviation.CAP_MARGIN,
-                reach,
-            )
-    t = t0 + DT * np.arange(n)
-    near = _painted_max(moves, max_accel, t0, n, reach)
-    limit = (1.0 + corner_deviation.ACCEL_MARGIN) * near
+    t = t0 + dt * np.arange(n)
+    near = _painted_max(moves, max_accel, t0, n, reach, dt)
+    admitted = _admitted_accel(raw.capture, corner_accel)
+    admitted_near = {
+        axis: _painted_max(moves, admitted[:, i], t0, n, reach, dt)
+        for i, axis in enumerate("xy")
+    }
+    admitted_near["z"] = near
     slack = FLOAT_TOLERANCE * near.max()
     metrics["accel_ratio"] = 0.0
+    metrics["admitted_ratio"] = 0.0
     for axis in "xyz":
         acc = np.abs(motion[axis].acc)
+        limit = admitted_near[axis]
         metrics["accel_ratio"] = max(
             metrics["accel_ratio"],
             float((acc / np.where(near > 0.0, near, np.inf)).max(initial=0.0)),
+        )
+        positive = admitted_near[axis] > 0.0
+        metrics["admitted_ratio"] = max(
+            metrics["admitted_ratio"],
+            float(
+                (acc / np.where(positive, admitted_near[axis], np.inf)).max(
+                    initial=0.0
+                )
+            ),
         )
         v.check(
             bool(np.isfinite(acc).all()), "%s: non-finite executed accel", name
@@ -536,7 +681,10 @@ def check(case):
                 continue
             try:
                 result, metrics = _check_shaped(
-                    v, name, raw, case.cap if name == "cap" else None
+                    v,
+                    name,
+                    raw,
+                    _corner_accel(case) if name == "bounded" else None,
                 )
             except analysis.ModelMismatch as e:
                 v.check(False, "%s: harness model mismatch: %s", name, e)
@@ -721,7 +869,6 @@ def load_case(path):
         data["config"],
         data["gcode"],
         tuple(data["start"]),
-        data["cap"],
         tuple(data["lazy_flush_at"]),
         tuple(data["forced_flush_lines"]),
     )
@@ -733,10 +880,14 @@ def parse_seeds(text):
 
 
 def summary(results):
-    """Largest floor/cap/accel ratio per mode and flush counts."""
+    """Largest floor/accel ratio per mode and flush counts."""
     lines = []
-    for mode in ("floor", "cap"):
-        for metric in ("floor_ratio", "cap_ratio", "accel_ratio"):
+    for mode in ("floor", "bounded"):
+        for metric in (
+            "floor_ratio",
+            "accel_ratio",
+            "admitted_ratio",
+        ):
             values = [
                 (r[mode][metric], r["seed"])
                 for r in results
@@ -760,8 +911,8 @@ def summary(results):
     return "\n".join(lines)
 
 
-def _check_seed(seed):
-    return check(generate(seed))
+def _check_seed(generator, seed):
+    return check(GENERATORS[generator](seed))
 
 
 def main(argv=None):
@@ -769,16 +920,23 @@ def main(argv=None):
     ap.add_argument("--seeds", type=parse_seeds, default=parse_seeds("0:100"))
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
+    ap.add_argument("--generator", choices=sorted(GENERATORS), default="random")
     args = ap.parse_args(argv)
+    generate_case = GENERATORS[args.generator]
     args.out.mkdir(parents=True, exist_ok=True)
     results = []
     with concurrent.futures.ProcessPoolExecutor(args.jobs) as pool:
         for i, res in enumerate(
-            pool.map(_check_seed, args.seeds, chunksize=4), 1
+            pool.map(
+                functools.partial(_check_seed, args.generator),
+                args.seeds,
+                chunksize=4,
+            ),
+            1,
         ):
             results.append(res)
             if res["violations"]:
-                case = dataclasses.asdict(generate(res["seed"]))
+                case = dataclasses.asdict(generate_case(res["seed"]))
                 (args.out / ("seed%d.json" % res["seed"])).write_text(
                     json.dumps(case, indent=1) + "\n"
                 )

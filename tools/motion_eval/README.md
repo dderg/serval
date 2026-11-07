@@ -27,8 +27,9 @@ evaluated with its own kernels. Anything else fails with an error.
 and reports the free-vibration amplitude after corners, a ringing proxy for
 tuned and untuned modes (`owner_point.py` uses it).
 
-`fuzz.py` checks [corner_deviation] on random gcode (floor, cap, accel bound,
-unchanged accels and final positions, flush invariance); failing seeds go to
+`fuzz.py` checks [corner_deviation] on random gcode (floor, executed accel
+within what the planner admits or max_corner_accel, unchanged accels
+and final positions, flush invariance); failing seeds go to
 `tests/fuzz_seeds.txt`. `live.py` runs klippy in real time against the
 linux-process MCU (KLIPPER_LINUX_MCU, built by kv2-notes/gate.sh) with
 `step_recorder.c` preloaded and compares the live step stream with batch.
@@ -84,8 +85,8 @@ runs never see a dictionary being rewritten.
     distance to the executed path; count, max, p99, p50 and the worst corner.
   - `final_position_model` / `_steps`.
 - `phase_time`: time in accel, cruise and decel phases and between moves.
-- `corner_deviation`: the `[corner_deviation]` status (junction counters and
-  `max_deviation`) when the config has that section, else null.
+- `corner_deviation`: the `[corner_deviation]` status (junction counters,
+  `corner_accel_x/y`) when the config has that section, else null.
 - `timing`, `moves_planned`: wall time spent in lookahead (`add_move`/`flush`)
   and in the junction limiter, and the number of planned moves.
 - `steppers.*.model_vs_steps`: worst model-vs-step error and its allowed bound.

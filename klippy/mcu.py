@@ -1114,7 +1114,7 @@ class MCUConnectHelper:
             else:
                 self._serial.connect_pipe(self._serialport)
             self._clocksync.connect(self._serial)
-        except serialhdl.error as e:
+        except (serialhdl.error, clocksync.ClockSyncError) as e:
             raise error(str(e))
 
     def _mcu_identify(self):

@@ -478,9 +478,10 @@ def cpu_report(case, repeat, core, quota=None, cold=False, wait_table=True):
         if status is not None:
             details.append(
                 "%s table built until %.2f s after ready, worst late while"
-                " building %s, unbuilt_stops %d"
+                " building %s; admitted corner accel X %.0f Y %.0f"
                 % (limiter, reactor["building_until_s"],
-                   _ms(reactor["worst_building"][:3]), status["unbuilt_stops"])
+                   _ms(reactor["worst_building"][:3]),
+                   status["corner_accel_x"], status["corner_accel_y"])
             )  # fmt: skip
         details.append(
             "%s worst [s after ready, cpu ms, late ms]: cpu %s late %s;"

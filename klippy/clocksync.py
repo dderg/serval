@@ -10,6 +10,12 @@ import traceback
 RTT_AGE = 0.000010 / (60.0 * 60.0)
 DECAY = 1.0 / 30.0
 TRANSMIT_EXTRA = 0.001
+CALIBRATION_SAMPLES = 8
+MAX_FREQ_DEVIATION = 0.05
+
+
+class ClockSyncError(Exception):
+    pass
 
 
 class ClockSync:
@@ -37,23 +43,68 @@ class ClockSync:
     def connect(self, serial):
         self.serial = serial
         self.mcu_freq = serial.msgparser.get_constant_float("CLOCK_FREQ")
-        # Load initial clock and frequency
+        # get_uptime only extends the clock to 64 bits: its reply time is not
+        # bounded (it follows identify), so it must not anchor the estimate
         params = serial.send_with_response("get_uptime", "uptime")
         self.last_clock = (params["high"] << 32) | params["clock"]
-        self.clock_avg = self.last_clock
-        self.time_avg = params["#sent_time"]
-        self.clock_est = (self.time_avg, self.clock_avg, self.mcu_freq)
-        self.prediction_variance = (0.001 * self.mcu_freq) ** 2
-        # Enable periodic get_clock timer
-        for i in range(8):
+        self.clock_est = (params["#sent_time"], self.last_clock, self.mcu_freq)
+        samples = []
+        for i in range(CALIBRATION_SAMPLES):
             self.reactor.pause(self.reactor.monotonic() + 0.050)
-            self.last_prediction_time = -9999.0
             params = serial.send_with_response("get_clock", "clock")
-            self._handle_clock(params)
+            clock = self._extend_clock(params["clock"])
+            self._update_best_rtt(params["#sent_time"], params["#receive_time"])
+            samples.append((params["#sent_time"], clock))
+        self._calibrate(samples)
         self.get_clock_cmd = serial.get_msgparser().create_command("get_clock")
         self.cmd_queue = serial.alloc_command_queue()
         serial.register_response(self._handle_clock, "clock")
         self.reactor.update_timer(self.get_clock_timer, self.reactor.NOW)
+
+    def _calibrate(self, samples):
+        """Least squares over the calibration samples, which seeds the
+        running regression."""
+        count = len(samples)
+        time_avg = sum(t for t, c in samples) / count
+        clock_avg = sum(c for t, c in samples) / count
+        time_variance = sum((t - time_avg) ** 2 for t, c in samples) / count
+        clock_covariance = (
+            sum((t - time_avg) * (c - clock_avg) for t, c in samples) / count
+        )
+        freq = clock_covariance / time_variance
+        deviation = freq / self.mcu_freq - 1.0
+        if abs(deviation) > MAX_FREQ_DEVIATION:
+            raise ClockSyncError(
+                "MCU clock measured at %.0f Hz, %+.2f%% off its CLOCK_FREQ"
+                " %.0f Hz: the firmware's clock configuration does not match"
+                " the hardware, or the host could not time its clock queries"
+                % (freq, 100.0 * deviation, self.mcu_freq)
+            )
+        self.time_avg = time_avg
+        self.clock_avg = clock_avg
+        self.time_variance = time_variance
+        self.clock_covariance = clock_covariance
+        self.prediction_variance = (0.001 * self.mcu_freq) ** 2
+        self.last_prediction_time = samples[-1][0]
+        self._update_estimate(samples[-1][1])
+
+    def _extend_clock(self, clock32):
+        clock_delta = (clock32 - self.last_clock) & 0xFFFFFFFF
+        self.last_clock += clock_delta
+        return self.last_clock
+
+    def _update_best_rtt(self, sent_time, receive_time):
+        half_rtt = 0.5 * (receive_time - sent_time)
+        aged_rtt = (sent_time - self.min_rtt_time) * RTT_AGE
+        if half_rtt < self.min_half_rtt + aged_rtt:
+            self.min_half_rtt = half_rtt
+            self.min_rtt_time = sent_time
+            logging.debug(
+                "new minimum rtt %.3f: hrtt=%.6f freq=%d",
+                sent_time,
+                half_rtt,
+                self.clock_est[2],
+            )
 
     def connect_file(self, serial, pace=False):
         self.serial = serial
@@ -74,26 +125,12 @@ class ClockSync:
 
     def _handle_clock(self, params):
         self.queries_pending = 0
-        # Extend clock to 64bit
-        last_clock = self.last_clock
-        clock_delta = (params["clock"] - last_clock) & 0xFFFFFFFF
-        self.last_clock = clock = last_clock + clock_delta
-        # Check if this is the best round-trip-time seen so far
+        clock = self._extend_clock(params["clock"])
         sent_time = params["#sent_time"]
         if not sent_time:
             return
         receive_time = params["#receive_time"]
-        half_rtt = 0.5 * (receive_time - sent_time)
-        aged_rtt = (sent_time - self.min_rtt_time) * RTT_AGE
-        if half_rtt < self.min_half_rtt + aged_rtt:
-            self.min_half_rtt = half_rtt
-            self.min_rtt_time = sent_time
-            logging.debug(
-                "new minimum rtt %.3f: hrtt=%.6f freq=%d",
-                sent_time,
-                half_rtt,
-                self.clock_est[2],
-            )
+        self._update_best_rtt(sent_time, receive_time)
         # Filter out samples that are extreme outliers
         exp_clock = (sent_time - self.time_avg) * self.clock_est[
             2
@@ -103,9 +140,14 @@ class ClockSync:
             clock_diff2 > 25.0 * self.prediction_variance
             and clock_diff2 > (0.000500 * self.mcu_freq) ** 2
         ):
+            # A sample that went out late reads the clock late: it may lead
+            # the prediction by at most its own round trip. A larger lead
+            # means the estimate is wrong, and ignoring it would freeze it.
             if (
                 clock > exp_clock
                 and sent_time < self.last_prediction_time + 10.0
+                and clock - exp_clock
+                <= (receive_time - sent_time) * self.mcu_freq
             ):
                 logging.debug(
                     "Ignoring clock sample %.3f: freq=%d diff=%d stddev=%.3f",
@@ -140,7 +182,9 @@ class ClockSync:
         self.clock_covariance = (1.0 - DECAY) * (
             self.clock_covariance + diff_sent_time * diff_clock * DECAY
         )
-        # Update prediction from linear regression
+        self._update_estimate(clock)
+
+    def _update_estimate(self, clock):
         new_freq = self.clock_covariance / self.time_variance
         pred_stddev = math.sqrt(self.prediction_variance)
         self.serial.set_clock_est(
@@ -154,8 +198,6 @@ class ClockSync:
             self.clock_avg,
             new_freq,
         )
-        # logging.debug("regr %.3f: freq=%.3f d=%d(%.3f)",
-        #              sent_time, new_freq, clock - exp_clock, pred_stddev)
 
     # clock frequency conversions
     def print_time_to_clock(self, print_time):

@@ -8,7 +8,9 @@ or, for an input smoother, its polynomial kernel sampled on the time grid
 (a Riemann sum of the convolution, evaluated by FFT). The model is checked
 against every decoded step: itersolve places a step where the stepper
 position crosses the midpoint between two step positions and stepcompress
-may move it by at most MAX_STEPCOMPRESS_ERROR.
+may move it by at most MAX_STEPCOMPRESS_ERROR, plus CLOCK_ROUNDING_TICKS:
+the error bound rounded to whole ticks, the step time rounded to a tick
+(stepcompress_append) and the tick converted back to print time here.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ CONTIGUOUS_EPS = 1e-9
 MIN_VELOCITY_JUMP = 1e-9
 STRAIGHT_COS = 1.0 - 1e-9
 FLOAT_TOLERANCE_MM = 1e-9
+CLOCK_ROUNDING_TICKS = 2
 KERNEL_DESCRIBE_POINTS = 2001
 SMOOTHER_OVERSAMPLE = 4
 
@@ -328,19 +331,16 @@ def check_steps_against_model(
     )
     midpoint = 0.5 * (before + after)
     predicted = np.interp(times, t, model_pos)
-    time_slack = MAX_STEPCOMPRESS_ERROR + 1.0 / freq
+    time_slack = MAX_STEPCOMPRESS_ERROR + CLOCK_ROUNDING_TICKS / freq
     speed = np.maximum.reduce(
         [
             np.abs(np.interp(times + d, t, model_vel))
             for d in (-time_slack, 0.0, time_slack)
         ]
     )
-    grid_error = (
-        dt * dt * float(np.abs(model_acc).max())
-        + 0.25 * dt * max_jump
-        + FLOAT_TOLERANCE_MM
-    )
-    allowed = speed * time_slack + grid_error
+    peak_acc = float(np.abs(model_acc).max())
+    grid_error = dt * dt * peak_acc + 0.25 * dt * max_jump + FLOAT_TOLERANCE_MM
+    allowed = (speed + peak_acc * time_slack) * time_slack + grid_error
     error = np.abs(predicted - midpoint)
     worst = int(np.argmax(error - allowed))
     if error[worst] > allowed[worst]:

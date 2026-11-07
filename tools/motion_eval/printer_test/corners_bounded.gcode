@@ -1,6 +1,6 @@
 ; motion_eval start=175.0000,175.0000,10.0000
-; motion_eval setting=corners_cap0.07
-; motion_eval corner_deviation=0.07
+; motion_eval setting=corners_bounded
+; motion_eval corner_deviation=bound51500
 ; motion_eval measured_moves=0,140
 ; motion_eval sync_s=0.767212
 ; Corner/ringing pattern, travel only, at Z 10. Squares, diamonds,
@@ -174,4 +174,4 @@ G1 X186.33 Y186.33 F12000
 G1 X175 Y175 F12000
 G4 P100
 M400
-MOTION_EVAL_ACCEL_STOP NAME=corners_cap0.07
+MOTION_EVAL_ACCEL_STOP NAME=corners_bounded

@@ -2237,15 +2237,26 @@ that corner already can. Acceleration is never changed.
 - On curves the junction speed is capped so that the shaped curve stays
   within the same rounding, including what short segments gain between
   junctions.
-- `max_deviation` lowers junction speeds further, so that corners round
-  at most that much. A corner whose stop alone rounds more than
-  `max_deviation` stops; its acceleration is not lowered. Corners closer
-  together than the shaper's duration can add up to 5% above it.
+- Corners closer together than the shaper's duration, with a move between
+  them that accelerates and decelerates, round beyond what lowering one
+  junction's speed can bound: a junction next to such a short move stops
+  when it turns more than 60°, and smaller turns can round up to 10%
+  beyond a stop's rounding. There is no tighter deviation cap.
 - With an input smoother (`smooth_*`), a velocity step at a corner is
-  applied over the smoother's duration and adds acceleration. Junction
-  speeds are limited so that the executed acceleration, including the
-  moves' own acceleration along a curve, stays within 5% of
-  `max_accel`. The limit is approximate and checked on random gcode.
+  applied over the smoother's duration and adds acceleration on top of
+  `max_accel`, as it does with `square_corner_velocity`. By default this
+  burst is not limited. The worst executed acceleration per axis that the
+  junction speeds admit is logged when a corner table is ready and
+  reported as `corner_accel_x` / `corner_accel_y` in the status (at the
+  current `max_accel` and `max_velocity`; it includes 25% for corners
+  closer together than the shaper's duration).
+  `CORNER_DEVIATION_REPORT MOTOR_ACCEL=<mm/s²>` also prints the largest
+  `max_accel` at which that worst case stays within the given motor
+  acceleration. `max_corner_accel` limits the burst instead: junction
+  speeds are lowered so that the executed acceleration per axis, the
+  moves' own acceleration and the steps of nearby corners included, stays
+  within it. A corner whose legs already accelerate along an axis at
+  `max_corner_accel` stops.
 - A junction to or from a move without X/Y motion (e.g. a pure Z move)
   stops.
 - While input shaping is disabled on X or Y, every change of direction
@@ -2262,10 +2273,10 @@ commands wait until it is ready (`table_ready` in the status), and
 
 ```
 [corner_deviation]
-#max_deviation:
-#   The largest distance, in mm, that the input-shaped toolhead path may
-#   deviate from the commanded path at a corner whose stop rounds less
-#   than this. The default is to allow the rounding of a stop.
+#max_corner_accel:
+#   With an input smoother, the executed acceleration (mm/s²) per axis
+#   that corner velocity steps may reach, legs included. The default is
+#   no limit.
 #table_cache_dir: ~/.cache/kalico/corner_deviation
 #   Directory for the computed corner tables, one file per shaper
 #   configuration and module version. It must be writable.
