@@ -222,3 +222,66 @@ Sessions: `~/bench/kv2/20261107-120619` (G1 smoke), `-121054` (kv2 a0306ad35: G1
 | speed_ladder | True | True | 92.759% | 23.54 |
 | voron_top_layers | True | True | 99.999% | 0.01 |
 
+
+## Follow-up: x15 divergence and corner_deviation stalls (session `~/bench/kv2/20261107-131347`, kv2/main 312ddf16a)
+
+This session was evidence only; no production code changed. Its tools:
+- `trapq_diff.py` compares the live toolhead trapq (`motion_report/dump_trapq` via `pi_agent.py --trapqs toolhead`) with the batch `trapq_append` record.
+- `klippy_probe.py` is an instrumented launcher, started by the service drop-in. It records timer lateness against the requested waketime, callback wall times and the CornerTable build. It does not modify the klippy tree.
+- py-spy 0.4 (`record --nonblocking -f raw`, into `~/kv2/env`) profiled the print. `profile_report.py` summarizes the result.
+
+The session was restored; `restoration.json` shows no differences.
+
+### 1. Live vs batch divergence on `voron_top_layers` ×15 is upstream behaviour
+
+| tree | live trapq phases | batch phases | first diverging phase | batch move | gcode | live−batch |
+|---|---|---|---|---|---|---|
+| upstream 1ee39ff2c | 44412 | 44341 | 3738 (batch t = 4.0505 s) | 1649 | program line 1769 `G1 X118.946 Y145.494 E.00914` | cruise 368.827 vs 368.742 mm/s; accel phase 123 vs 121 µs, decel 102 vs 100 µs; same start_v, accel, direction and start time |
+| kv2 312ddf16a | 44412 | 44341 | 3738 | 1649 | same line | identical numbers |
+
+- **Where.** It is the 2nd repetition: move 1649 = 1313 (1st repetition + return travel) + 336. The same passage in the 1st repetition (move 336) matches batch exactly.
+- **What differs.** The planned cruise speed of one mid-perimeter move differs by 0.085 mm/s. There is no stop, no Z move and no M400/G4 nearby. It is not the repetition boundary.
+- **Upstream too.** Upstream and kv2 reproduce it at the same phase with the same values.
+- **Feed path.** virtual_sdcard: Moonraker `POST /printer/print/start` → `SDCARD_PRINT_FILE`.
+- **Forced-stop hypothesis refuted.** The hypothesis was a non-lazy flush (priming timer or `_handle_step_flush` runout) when gcode arrives slowly. The data rule it out:
+  - no stop was inserted (start_v identical, no zero-velocity phase);
+  - `print_stall` stayed 0;
+  - buffer_time stayed 2.0–3.0 s around the divergence (klippy.log Stats lines at print_time 43.5–46.7 s on upstream: buffer_time 2.967, 2.366, 2.196, 2.043, 2.169).
+- **[INFERENCE] likely mechanism, not verified.** The lookahead flush window differs.
+  - Live klippy leaves the NeedPrime/Priming state, where the window is `set_flush_time(BUFFER_TIME_HIGH)` = 2 s.
+  - It enters the main state, where the window is `LOOKAHEAD_FLUSH_TIME` = 0.25 s. That transition is driven by real time (`_check_pause` / `_priming_handler`).
+  - Batch mode has no real time, so its lazy flushes cut the lookahead queue at other moves.
+  - The `minimum_cruise_ratio` smoothing of a move near a cut then sees a different window.
+  - This fits the observed pattern: the 1st repetition matches, and a later move differs by a fraction of a mm/s.
+- **Consequence for the harness.** Long dense programs cannot be judged step-for-step against batch mode. Only net steps and live-tap vs capture are valid there. Single-pass corpus cases (≤ 3 s) are unaffected.
+
+### 2. corner_deviation reactor stalls and the G3 `Timer too close`
+
+Failures on kv2 5d53e78f8 (session `-124110`), `owner_like_cd` `arcs_x30`:
+
+| host | fatal lines | MCU shutdown received | host state at failure |
+|---|---|---|---|
+| 1 cpu, 1500 MHz | `MCU 'mcu' shutdown: Timer too close` / `Transition to shutdown state: MCU shutdown` | 4.99 s after print start | buffer_time 2.0–2.9 s; Stats shows print_time jumping 1.7 s in one 1 s interval just before |
+| 1 cpu, 1500 MHz, quota 50 % | same | 4.98 s after print start | buffer_time 2.1–2.9 s; print_time +1.5 s in one interval |
+
+The host had 2 s of motion queued. So this is not underrun of the motion queue. A `Timer too close` with a full buffer points to a host-scheduled MCU command sent late during a long reactor stall [INFERENCE]: heater/verify_heater refresh or clock sync, not step data.
+
+On 312ddf16a, whose klippy/ is identical to 5d53e78f8, the same two conditions passed (1 run each). The failure is intermittent: 2 of 2 failed earlier, 0 of 2 failed here.
+
+Probed runs, 312ddf16a. "Timer lateness" is the largest delay between a timer's requested waketime and its run. It is the measurable reactor stall.
+
+| config | host | connect phase wall s | CornerTable build s | table done before print start | max timer lateness during print | py-spy top self (share of samples) |
+|---|---|---|---|---|---|---|
+| owner_like | full | 0.76 | – | – | 7 ms (verify_heater check_event) | reactor poll 12 %, `_process_lookahead` 7 %, `cmd_G1` 6 %, `LookAheadQueue.flush` 5 %, `set_junction` 5 % |
+| owner_like | 1 cpu, 1500 MHz | 0.82 | – | – | 36 ms (webhooks query) | `motion_queuing._advance_flush_time` (C step generation) 32 %, reactor 8 %, extruder `process_move` 6 % |
+| owner_like_cd | full | 1.50 | 0.62 | yes, 3.0 s before | 53 ms (verify_heater check_event) | reactor 9 %, `CornerDeviation._step_bound` 5 %, `_process_lookahead` 4 %, `set_junction` 4 %, `planArc` 4 % |
+| owner_like_cd | 1 cpu, 1500 MHz | 1.93 | 0.98 | yes, 3.9 s before | 88 ms (webhooks query) | `_advance_flush_time` 30 %, reactor 8 %, `cmd_G1` 3 % |
+| owner_like_cd | 1 cpu, 1500 MHz, quota 50 % | 3.12 | 1.99 | yes, 3.3 s before | 103 ms (webhooks query) | `_advance_flush_time` 31 %, reactor 8 %, `corner_deviation.junction_v2` 2.5 % |
+
+- **Table build.** The CornerTable is built in the klippy:connect handler, before ready. It finished 3–4 s before every print started, so it was never in progress during a print.
+- **Startup.** The connect phase (ready-gating callback) took 1.5–3.1 s with `[corner_deviation]`, against 0.8 s without. Process start to print start was 4.5–6.6 s; that includes Moonraker polling.
+- **Probe gap.** The probe misses the ready instant: klippy calls the `klippy:ready` handlers directly, not through `send_event`. So lateness is split at print start, not at ready. Everything after ready but before print start was ≤ 12 ms late.
+- **Stalls during the print.** With `corner_deviation` the reactor stalls 2.4–7× longer than without (53–103 ms vs 7–36 ms) under the same host limits. At 1 core / 1500 MHz the largest stalls approach the 100 ms scale of host-scheduled MCU deadlines, which is consistent with the intermittent `Timer too close`.
+- **Profile caveats.**
+  - The longest single callbacks (virtual_sdcard `work_handler`, `ReactorCallback.invoke`) pause inside themselves, so their wall times (51 s, ~0.24 s) are not stalls.
+  - py-spy self time in `_advance_flush_time` includes the GIL-released C step generation (`steppersyncmgr_gen_steps`), which competes for the single core.

@@ -22,6 +22,7 @@ from pathlib import Path
 REL_TOL = 1e-9
 ABS_TOL = 1e-9
 TIME_TOL_S = 1e-6
+MIN_PHASE_S = 1e-12
 AXIS = re.compile(r"([XYZ])(-?[\d.]+)", re.IGNORECASE)
 
 
@@ -34,7 +35,7 @@ def live_phases(run_dir: Path) -> list[dict]:
         for pt, move_t, start_v, accel, start, axes in message["params"][
             "data"
         ]:
-            if move_t > 0.0:
+            if move_t > MIN_PHASE_S:
                 seen[pt] = {
                     "t": pt,
                     "dur": move_t,
@@ -58,7 +59,7 @@ def batch_phases(ref_dir: Path) -> list[dict]:
             (m["cruise_t"], m["cruise_v"], 0.0),
             (m["decel_t"], m["cruise_v"], -m["accel"]),
         ):
-            if dur > 0.0:
+            if dur > MIN_PHASE_S:
                 phases.append(
                     {
                         "t": t,
