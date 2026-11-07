@@ -356,6 +356,18 @@ scv 50 with shaping off for reference. Results are in `.build/owner_point/`.
    | burst unbounded (the default now) | 101.1 | +0.7% | 3.08 / 2.81 / 2.43 | 1.483 / 1.239 | 0.123 / 0.123 (0.98) | 11.7 / 12.9 |
    | unbounded, cap 0.146 replacing the floor (experiment) | 100.2 | −0.2% | 2.72 / 2.80 / 2.35 | 2.477 / 1.302 | 0.146 / 0.146 (1.17) | 15.4 / 18.7 |
 
+   **The unbounded default bursts less than scv 50 on this corpus (1.48×
+   against 1.62× X) but more on some geometry.** On the printer test's
+   45° octagon (`corners_floor` against `corners_scv50`) the planned X
+   peak is 1.78× max_accel against 1.42×: floor mode runs those turns at
+   up to 200 mm/s where scv 50 runs 112 mm/s. On the stress program's
+   small circle (`stress_floor` against `stress_scv50`) it is 2.23× against
+   2.16× on X and 2.47× against 2.30× on a corexy motor. The default
+   bounds the deviation, not the burst. `max_corner_accel: 81000` caps the
+   burst at 1.62×, what scv 50 demands on this corpus (101.5 s, +1.1%):
+   1.48× X on the octagon (scv 50 1.42×) and 0.85× X / 1.27× motor on the
+   small circle (scv 50 2.16× / 2.30×).
+
    The bound cost 2.6 of the 3.2 points; the floor the remaining 0.6
    (voron top layers 3.08 against 2.73 s). The cap row needed a build in
    which a cap replaces the floor: 0.8% faster than the default, at 2.48×
@@ -562,9 +574,22 @@ measurement. corner_deviation prints voron top layers faster, so more moves
 per second of print. Measured at 7b117b1e4; the cluster rules leave the
 unbounded junction cost unchanged.
 
+## What the default does not bound
+
+The unbounded default (no `max_corner_accel`) keeps corners within the
+shaper floor but does not keep the corner burst at or below scv 50's. It
+is lower on the owner corpus (peak 1.48× against 1.62× X) and higher on
+the printer test's 45° octagon (1.78× against 1.42× X) and small circle
+(2.23× against 2.16× X; 2.47× against 2.30× on a corexy motor).
+`max_corner_accel: 81000` caps it at 1.62×, scv 50's corpus burst (101.5
+s, +1.1% against scv 50, 0.4% slower than the default): 1.48× X on the
+octagon and 0.85× X / 1.27× motor on the small circle. 51 500 is the
+low-burst setting (105.8 s, +5.4%). Both are in the printer protocol
+(`bounded81000`, `bounded`).
+
 ## Printer protocol
 
 `PRINTER_TEST.md`, `printer_test.py` and `printer_test/*.gcode` (corners
-and stress programs for scv 5/20/50, floor and bounded), `accel_residual.py`
+and stress programs for scv 5/20/50, floor, bounded81000 and bounded), `accel_residual.py`
 (accelerometer record → corner acceleration and residual, tested on
 synthetic records in `tests/test_accel_residual.py`).
