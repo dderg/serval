@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -36,6 +37,7 @@ QUOTA_DROPIN = f"{DROPIN_DIR}/kv2-quota.conf"
 SERIAL_GLOB = "/dev/serial/by-id/usb-Klipper_stm32f401xc_*"
 READY_TIMEOUT_S = 120.0
 SERIAL_TIMEOUT_S = 30.0
+EXEC_ARGV = re.compile(r"argv\[\]=([^;]*);")
 
 
 class BenchError(RuntimeError):
@@ -108,7 +110,7 @@ def ensure_env(remote_tree: str) -> None:
 
 
 def install_agent() -> None:
-    ssh(f"mkdir -p {PI_KV2}/logs {PI_KV2}/runs")
+    ssh(f"rm -rf {PI_KV2}/runs && mkdir -p {PI_KV2}/logs {PI_KV2}/runs")
     pi.scp_to_pi(Path(__file__).with_name("pi_agent.py"), PI_AGENT)
     pi.scp_to_pi(SERVAL_BENCH / "openocd-target.cfg", PI_OPENOCD_CFG)
 
@@ -260,9 +262,11 @@ def snapshot_state() -> dict:
     return {
         "deploy_record": json.loads(ssh("cat ~/klipper/.bench-deploy.json")),
         "service_active": ssh("systemctl is-active klipper || true").strip(),
-        "exec_start": ssh(
-            "systemctl show -p ExecStart --value klipper"
-        ).strip(),
+        "exec_start": EXEC_ARGV.search(
+            ssh("systemctl show -p ExecStart --value klipper")
+        )
+        .group(1)
+        .strip(),
         "dropins": sorted(ssh(f"ls {DROPIN_DIR} 2>/dev/null || true").split()),
         "klipper_cmdline": klipper_cmdline(),
         "printer_state": info["state"],

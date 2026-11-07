@@ -27,10 +27,11 @@ AGENT_READY_TIMEOUT_S = 20.0
 def start_agent(remote_dir: str, tap: bool) -> None:
     pid = bench.pi.klipper_pid()
     steppers = f"--steppers {','.join(STEPPERS)}" if tap else ""
+    bench.ssh(f"rm -rf {remote_dir} && mkdir -p {remote_dir}")
     bench.ssh(
-        f"rm -rf {remote_dir} && mkdir -p {remote_dir} && "
-        f"nohup python3 {bench.PI_AGENT} {remote_dir} --pid {pid} {steppers} "
-        f"> {remote_dir}/agent.log 2>&1 < /dev/null & echo $! > {remote_dir}/agent.pid"
+        f"setsid nohup python3 {bench.PI_AGENT} {remote_dir} --pid {pid} "
+        f"{steppers} > {remote_dir}/agent.log 2>&1 < /dev/null & "
+        f"echo $! > {remote_dir}/agent.pid"
     )
     deadline = time.monotonic() + AGENT_READY_TIMEOUT_S
     while (
