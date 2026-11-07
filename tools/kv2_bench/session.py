@@ -172,15 +172,19 @@ def quota(percent: int | None) -> Iterator[None]:
         bench.set_quota(None)
 
 
-def gate_g1_g2(s: Session, kv2: str, gates: set[str]) -> None:
+def gate_g1_g2(
+    s: Session, kv2: str, gates: set[str], configs: set[str]
+) -> None:
     for config in ("default", "owner_like", "owner_like_cd"):
+        if config not in configs:
+            continue
         for name in FAST_PROGRAMS:
             gate = "g1" if config == "default" and name != "arcs" else "g2"
             if gate in gates or "g2" in gates:
                 s.run(gate, "kv2", kv2, config, load_program(name), tap=True)
 
 
-def gate_g3(s: Session, kv2: str) -> None:
+def gate_g3(s: Session, kv2: str, configs: set[str]) -> None:
     conditions = [
         {},
         {"cpus": 1},
@@ -188,6 +192,8 @@ def gate_g3(s: Session, kv2: str) -> None:
         {"cpus": 1, "max_mhz": 1500},
     ]
     for config in ("owner_like", "owner_like_cd"):
+        if config not in configs:
+            continue
         for name, repeat in DENSE.items():
             prog = load_program(name, repeat)
             for host in conditions:
@@ -236,6 +242,11 @@ def gate_g4(s: Session, kv2: str, upstream: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gates", default="g1,g2,g3,g4")
+    parser.add_argument(
+        "--configs",
+        default="default,owner_like,owner_like_cd",
+        help="configs the g1-g3 rows run with",
+    )
     parser.add_argument("--kv2-ref", default="kv2/main")
     parser.add_argument("--upstream-ref", default=UPSTREAM)
     parser.add_argument("--lock-timeout", type=float, default=7200.0)
@@ -268,10 +279,11 @@ def main() -> None:
                 fw.elf, fw.version
             )
             session.save()
+            configs = set(args.configs.split(","))
             if gates & {"g1", "g2"}:
-                gate_g1_g2(session, kv2, gates)
+                gate_g1_g2(session, kv2, gates, configs)
             if "g3" in gates:
-                gate_g3(session, kv2)
+                gate_g3(session, kv2, configs)
             if "g4" in gates:
                 gate_g4(session, kv2, upstream)
         except BaseException as exc:

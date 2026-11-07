@@ -85,11 +85,18 @@ def run(
     bench.push_config(config)
     (run_dir / "printer.cfg").write_text(config.read_text())
     bench.ssh(f": > {bench.PI_LOG}")
-    summary["settled_after_restart"] = bench.restart_ready()
-    summary["klipper_cmdline"] = bench.klipper_cmdline()
-    summary["mcu_version"] = bench.mcu_version()
-    bench.upload(remote_name, program.text())
-    start_agent(remote_dir, tap)
+    try:
+        summary["settled_after_restart"] = bench.restart_ready()
+        summary["klipper_cmdline"] = bench.klipper_cmdline()
+        summary["mcu_version"] = bench.mcu_version()
+        bench.upload(remote_name, program.text())
+        start_agent(remote_dir, tap)
+    except BaseException as exc:
+        bench.pi.scp_from_pi(bench.PI_LOG, run_dir / "klippy.log")
+        summary["failure"] = f"before printing: {exc!r}"
+        (run_dir / "run.json").write_text(json.dumps(summary, indent=2))
+        exc.add_note(f"run dir {run_dir}")
+        raise
     capture = serval_capture.Capture(run_dir, both_edges_mask=0, events=True)
     failure: BaseException | None = None
     final: dict = {}
