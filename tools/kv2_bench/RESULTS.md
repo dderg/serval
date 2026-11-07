@@ -372,3 +372,74 @@ uv run python ~/Developer/kv2-bench-serval/tools/bench/lock.py hold -- \
   - counts of ≥ 20 ms events by toolhead state;
   - for each failure: shutdown time since print start, and the stalls in the 2 s before it, with overdue timer, toolhead state, main-thread stack and py-spy dump.
 - **Soak.** The soak rows judge the extruder too: `pi_agent` taps the toolhead and extruder trapqs, and the replay regenerates every tapped trapq.
+
+## Trials + soak on kv2/main 533396833 (session `~/bench/kv2/20261107-135731`)
+
+kv2/main 533396833 is merged into kv2/bench. It changed corner_deviation:
+- the per-junction limit is now in C;
+- the table is built in a nice-19 thread and cached as npz;
+- gcode is held until the table is published.
+
+Setup for this session:
+- The table cache is `/home/pi/.cache/kalico/corner_deviation`. The service user (`pi`) creates it and must be able to write it; the session checks this with `test -w`. The path is recorded in the kv2 deploy record `~/kv2/.kv2-deploy.json`, together with the commit, tree and firmware.
+- The first owner_like_cd trial started from an emptied cache. The `cleared_cache_files` it recorded show the cache was not already empty, because the g2 rows had warmed it.
+- The session ran detached under one lock hold and was restored at the end: `restoration.json` differences `[]`, `state.py`: printer ready, deployed 2a9597f4b, MCU serial present, capture present.
+
+### Single-pass rows: batch vs live (the C limiter keeps the identity)
+
+| config | program | tap = batch sequence | steps at the same clock | max departure | capture−batch / bound |
+|---|---|---|---|---|---|
+| owner_like | speed_ladder | yes | 81.9 % | 24.88 µs | 28.92 / 33.61 µs |
+| owner_like | voron_top_layers | yes | 100 % | 0 | 8.21 / 33.85 µs |
+| owner_like | arcs | yes | 93.2 % | 22.74 µs | 23.21 / 27.76 µs |
+| owner_like_cd | speed_ladder | yes | 81.6 % | 24.96 µs | 29.52 / 34.68 µs |
+| owner_like_cd | voron_top_layers | yes | 100 % | 0 | 6.73 / 32.36 µs |
+| owner_like_cd | arcs | yes | 90.0 % | 20.85 µs | 24.32 / 27.58 µs |
+
+The voron ×15 rows were judged by the live-trapq replay, extruder included. All checks passed:
+- owner_like: replay = tap at 98.8 % of steps, max 24.70 µs; capture 24.70 µs against a bound of 34.27 µs.
+- owner_like_cd: replay = tap at 98.3 % of steps, max 25.00 µs; capture 25.48 µs against a bound of 33.28 µs.
+
+### Trials: arcs_x30, 1 cpu / 1500 MHz, 10 per config, interleaved
+
+| config | runs | failures | per-run max lateness p50 / p90 / max | pooled lateness ≥ 2 ms: p99 / max | ≥ 20 ms events by toolhead state |
+|---|---|---|---|---|---|
+| owner_like | 10 | 0 | 26.4 / 76.1 / 79.1 ms | 74.9 / 79.1 ms | main 6 |
+| owner_like_cd, cold cache (trial 0) | 1 | 0 | 23.3 ms | 22.8 / 23.3 ms | main 1, NeedPrime 1 |
+| owner_like_cd, warm cache | 9 | 1 | 24.8 / 31.1 / 31.5 ms | 29.8 / 31.5 ms | main 6, NeedPrime 8 |
+
+- **Table build.** Cold build 1.30 s; warm cache load 0.19–0.20 s. Both were published 0.19 s (warm) and 1.30 s (cold) after klippy:ready, before the print started (gcode held).
+- **Lateness during the build.** The worst timer lateness while the build thread ran was 0 ms. The cold run's 23.3 ms maximum came later, at +0.11 s after print start (`webhooks._do_query`, toolhead main).
+- **corner_deviation is no longer worse than the default.**
+  - The largest lateness is now in the default config: 67–79 ms at +0.05–0.11 s after print start, in the print-start burst (`_do_query` overdue, toolhead main).
+  - With cd, gcode is held until the table is published, so the start burst is smaller: ≤ 31.5 ms.
+- **py-spy.** `--native` works on the Pi (`pyspy_native: true`).
+
+**The one failure (warm owner_like_cd, run `141954`): `MCU 'mcu' shutdown: Timer too close` at +6.74 s.**
+- The watchdog caught no stall. The run's maximum timer lateness was 13.3 ms, so the reactor was responsive, and there is no stall stack to give.
+- The shutdown arrived 1 ms after the host sent a `queue_step oid=3/0 interval=10500 count=2000` batch. That batch's first step (clock 2680927396) was ~4.6 ms before the MCU's shutdown clock 2681311075, so the step data arrived late. buffer_time was 2.0–3.0 s throughout.
+- The host's MCU clock estimate was wrong from klippy start:
+  - every Stats line from −3.5 s to +6.5 s shows `freq=83220190` (−0.93 %), frozen;
+  - passing runs show 84.006–84.007 MHz, updating;
+  - the shutdown dump reads `clock_est=(152830.558 … 83220190.983) pred_variance=1.49e10`.
+- The connect-time calibration (8 `get_clock` samples in `ClockSync.connect`) finished before the corner table build started (probe: build start at +0.875 s after process start, after connect). So the table thread cannot have skewed it in this run.
+- **Same pattern in the two earlier failures on 5d53e78f8.** All three `Timer too close` failures share the same signature:
+  - an estimate of 83.18 / 83.24 / 83.22 MHz, frozen;
+  - the shutdown 9.8 / 10.7 / 10.6 s after the estimate's last accepted sample (`time_avg`).
+- **[INFERENCE] mechanism.** That matches `_handle_clock`'s outlier filter: it ignores samples where `clock > exp_clock` for up to 10 s after the last accepted one. A low frequency estimate therefore stays frozen for 10 s while est_print_time falls behind the MCU, and the host transmits step data too late.
+- This is upstream clocksync code. The bad initial estimate is a calibration taken under 1-core load. All three failures were owner_like_cd runs, but the calibration precedes the table build, and with 3 failures in about 25 cd runs and 0 in about 25 default runs at 1 cpu, the link to corner_deviation is not established.
+
+### Soak: ~34 min dense print (corpus slices ×85 / ×76), judged by the live-trapq replay
+
+| config | host | X / Y / Z / E steps | replay = tap (sequence, ≤ 25 µs) | steps at the same clock | capture = replay sequence | capture−replay (single fit) / bound | MCU lateness, 10 s-window fit p99 / max | klippy CPU mean / peak | buffer_time min | timer lateness max | stalls ≥ 20 ms | fatal |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| owner_like | full | 19277326 / 16906296 / 2840000 / 4811225 | yes, 25.00 µs, offset 0 | 69.6 % | yes | 40.0 / 62.5 µs | 1.47 / 9.26 µs | 3.4 / 16 % | 1.80 s | 21.7 ms | 2 | 0 |
+| owner_like | 1 cpu / 1500 MHz | same | yes, 25.00 µs, offset 0 | 70.0 % | yes | 84.4 / 126.1 µs | 1.47 / 9.89 µs | 3.5 / 17 % | 1.39 s | 51.1 ms | 14 | 0 |
+| owner_like_cd | full | 17365162 / 15288134 / 2537600 / 4301853 | yes, 25.00 µs, offset 0 | 74.9 % | yes | 39.8 / 61.2 µs | 1.38 / 9.61 µs | 3.4 / 12 % | 1.17 s | 21.1 ms | 2 | 0 |
+| owner_like_cd | 1 cpu / 1500 MHz | same | yes, 25.00 µs, offset 0 | 74.9 % | yes | 48.2 / 78.6 µs | 1.38 / 8.90 µs | 3.4 / 12 % | 1.18 s | 36.2 ms | 4 | 0 |
+
+- All four soaks pass every replay-judge check.
+- The X/Y/Z/E step counts are identical between the two hosts for each config, so the live plan was the same at 1 cpu.
+- **Single-fit bounds are loose.** On a 34-minute run, one linear F407↔F401 clock fit absorbs no crystal wander. The "MCU lateness" term and bound of the single-fit check therefore grow to 36–101 µs (p50 13–31 µs).
+- **Windowed fits restore the short-run numbers.** Refitting capture vs live tap per 10 s window gives MCU lateness p50 0.52 µs, p99 1.4–1.5 µs, max 8.9–9.9 µs, the same as the short runs. The tight capture-vs-replay result with the same windows is below.
+- **Tight capture-vs-replay check.** With 10 s windows, capture vs replay is 28.27 / 27.57 / 28.18 / 26.56 µs (row order of the table). The bounds are 25 µs + window MCU lateness max + 0.1 µs = 34.36 / 34.99 / 34.71 / 34.00 µs, so all four pass with the tight bound too. Next tool change: make `replay.judge` and `compare.timeline` use windowed fits for runs longer than a few minutes; today the single fit only gives the loose bound above.
