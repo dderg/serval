@@ -6,7 +6,9 @@ import pytest
 
 from tools.motion_eval import fuzz
 
-SEEDS_FILE = pathlib.Path(__file__).with_name("fuzz_seeds.txt")
+HERE = pathlib.Path(__file__).parent
+SEEDS_FILE = HERE / "fuzz_seeds.txt"
+CASES_DIR = HERE / "fuzz_cases"
 
 
 def seeds():
@@ -20,4 +22,12 @@ def seeds():
 @pytest.mark.parametrize("seed", seeds())
 def test_random_gcode_holds_the_invariants(seed):
     result = fuzz.check(fuzz.generate(seed))
+    assert not result["violations"], result["violations"][:10]
+
+
+@pytest.mark.parametrize(
+    "path", sorted(CASES_DIR.glob("*.json")), ids=lambda p: p.stem
+)
+def test_fuzz_counterexample_stays_fixed(path):
+    result = fuzz.check(fuzz.load_case(path))
     assert not result["violations"], result["violations"][:10]
