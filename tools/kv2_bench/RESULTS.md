@@ -347,3 +347,28 @@ The two `Timer too close` failures on 5d53e78f8 (session `-124110`, `owner_like_
 - buffer_time read 1.5–2.9 s at the time, and Stats shows print_time jumping 1.5–1.7 s in the last interval before the shutdown.
 - Both logs dump `clocksync state` with an estimated MCU frequency of 83.18 / 83.24 MHz (−0.97 %, nominal 84 MHz). The estimate's `time_avg` is 4.8 s / 5.7 s before print start, and `pred_variance` is 1.4e10 / 1.3e9. So the host's clock estimate was stale and degraded when the late step batch was sent.
 - [INFERENCE] The failure mechanism is a mid-print (+5 s) reactor stall that delayed step generation/transmission, compounded by a degraded clock estimate. It is not the priming burst. The probe was not running in those two runs, so the stalled callback is not identified.
+
+## Trials session (prepared, not run)
+
+```
+uv run python ~/Developer/kv2-bench-serval/tools/bench/lock.py hold -- \
+    uv run python -m tools.kv2_bench.session --gates trials,soak --configs owner_like,owner_like_cd [--trials 10]
+```
+
+- **Matrix.** `arcs_x30` at 1 cpu / 1500 MHz, N = 10 per config, interleaved: owner_like_cd, owner_like, owner_like_cd, ...
+- **Judging.** Batch reference (arcs_x30 matched batch step for step on every earlier run).
+- **Probe.** `klippy_probe.py` now has a stall watchdog thread. Every 5 ms it checks the earliest requested timer waketime.
+  - Once a timer is 20 ms overdue, the stall is still in progress. The watchdog records:
+    - every thread's stack (`sys._current_frames`); the main thread's stack is the stalled reactor callback;
+    - the toolhead's queuing state (Priming / NeedPrime / main), lookahead queue length and print_time;
+    - the overdue timer.
+  - It then starts `sudo py-spy dump` of klippy, all threads, outside klippy's CPU affinity. It tries `--native` first and falls back without it; `pyspy_native` records which worked (py-spy 0.4.3 on the Pi's aarch64 lists the flag).
+  - Each timer more than 20 ms late is logged with the same toolhead state.
+  - All lateness of 2 ms or more is sampled, plus a histogram. Ready and shutdown are now timestamped by event handlers.
+  - `tests/test_klippy_probe.py` runs the probe on a stub klippy whose timer sleeps 150 ms. It checks that the stall's stack names the sleeping callback, and that the toolhead state is captured.
+- **Report.** `trials_report.py <session>` gives, per config:
+  - failure rate;
+  - per-run maximum lateness (p50/p90/max) and pooled lateness ≥ 2 ms;
+  - counts of ≥ 20 ms events by toolhead state;
+  - for each failure: shutdown time since print start, and the stalls in the 2 s before it, with overdue timer, toolhead state, main-thread stack and py-spy dump.
+- **Soak.** The soak rows judge the extruder too: `pi_agent` taps the toolhead and extruder trapqs, and the replay regenerates every tapped trapq.

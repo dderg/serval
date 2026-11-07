@@ -324,6 +324,29 @@ def gate_soak(s: Session, kv2: str, configs: set[str]) -> None:
     bench.restart_ready()
 
 
+TRIALS = 10
+TRIAL_CONFIGS = ("owner_like_cd", "owner_like")
+
+
+def gate_trials(s: Session, kv2: str, trials: int) -> None:
+    """arcs_x30 at 1 cpu / 1500 MHz, `trials` runs per config, interleaved,
+    with the stall-catching probe (stacks and py-spy dumps of stalls)."""
+    bench.ssh(f"{bench.PI_ENV}/bin/pip install -q py-spy")
+    bench.activate(s.trees["kv2"], CONFIGS / "owner_like.cfg", probe=True)
+    bench.restart_ready()
+    arcs = load_program("arcs", DENSE["arcs"])
+    with throttle.throttled(throttle.Throttle(1, 1500)):
+        for trial in range(trials):
+            for config in TRIAL_CONFIGS:
+                s.run(
+                    "trials", "kv2", kv2, config, arcs, tap=False,
+                    host={"cpus": 1, "max_mhz": 1500, "trial": trial},
+                    probe=True,
+                )  # fmt: skip
+    bench.activate(s.trees["kv2"], CONFIGS / "owner_like.cfg")
+    bench.restart_ready()
+
+
 def gate_investigate(s: Session, kv2: str, upstream: str) -> None:
     """Live-vs-batch trapq on the dense x15 case (upstream and kv2), and a
     probed, py-spy profiled arcs_x30 with and without corner_deviation."""
@@ -389,6 +412,7 @@ def main() -> None:
     parser.add_argument("--kv2-ref", default="kv2/main")
     parser.add_argument("--upstream-ref", default=UPSTREAM)
     parser.add_argument("--lock-timeout", type=float, default=7200.0)
+    parser.add_argument("--trials", type=int, default=TRIALS)
     args = parser.parse_args()
     if lock.TOKEN_ENV not in os.environ:
         raise SystemExit(
@@ -431,6 +455,8 @@ def main() -> None:
                 gate_g4(session, kv2, upstream)
             if "inv" in gates:
                 gate_investigate(session, kv2, upstream)
+            if "trials" in gates:
+                gate_trials(session, kv2, args.trials)
             if "soak" in gates:
                 gate_soak(session, kv2, set(args.configs.split(",")))
         except BaseException as exc:
