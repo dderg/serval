@@ -298,7 +298,7 @@ class CornerDeviation:
         self.window = 0.0
         self.smoothing = False
         self.reported_inactive = False
-        self.stats = {"limited": 0, "stopped_by_cap": 0, "step_limited": 0}
+        self.counters = {"limited": 0, "stopped_by_cap": 0, "step_limited": 0}
         self.printer.register_event_handler("klippy:connect", self._connect)
 
     def _connect(self):
@@ -352,7 +352,7 @@ class CornerDeviation:
 
     def get_status(self, eventtime):
         return dict(
-            self.stats,
+            self.counters,
             max_deviation=self.max_deviation,
             accel_margin=ACCEL_MARGIN,
         )
@@ -378,7 +378,7 @@ class CornerDeviation:
         if self.max_deviation is not None:
             level = self.max_deviation / accel
             if level < cell.g[0]:
-                self.stats["stopped_by_cap"] += 1
+                self.counters["stopped_by_cap"] += 1
                 w = room = 0.0
             else:
                 w = min(w, self.table.max_w(cell.g, level))
@@ -402,7 +402,7 @@ class CornerDeviation:
             speed = self._step_bound(prev_move, move, speed, dux, duy)
         v2 = min(cap_v2, speed * speed)
         if v2 < cap_v2:
-            self.stats["limited"] += 1
+            self.counters["limited"] += 1
         return v2
 
     def _step_bound(self, prev_move, move, speed, dux, duy):
@@ -432,7 +432,7 @@ class CornerDeviation:
             )
             bound = min(bound, own * max_accel / linear, curve)
         if bound < speed:
-            self.stats["step_limited"] += 1
+            self.counters["step_limited"] += 1
         return bound
 
 
