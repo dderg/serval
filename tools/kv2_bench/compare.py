@@ -39,6 +39,8 @@ CAPTURE_TICK_HZ = 84_000_000
 INSTRUMENT_SLACK_S = 0.1e-6
 REST_S = 0.020
 JUMP_S = 100e-6
+LONG_RUN_S = 120.0
+FIT_WINDOW_S = 10.0
 
 
 class CompareError(RuntimeError):
@@ -195,6 +197,28 @@ def fit(
     return slope, yc - slope * xc
 
 
+def fit_windows(
+    p: Paired, ids: np.ndarray, freq: float
+) -> tuple[float, np.ndarray]:
+    """y = slope[w] * x + offset[w] per FIT_WINDOW_S window within each
+    epoch: one slope over a long run cannot follow the two crystals' drift.
+    A window without spread in x takes the run's shared slope."""
+    shared, _ = fit(p, ids, None)
+    window = ((p.x - p.x[0]) // int(FIT_WINDOW_S * freq)).astype(np.int64)
+    groups = np.unique(
+        ids * (int(window.max()) + 1) + window, return_inverse=True
+    )[1]
+    x = p.x.astype(np.float64)
+    y = p.y.astype(np.float64)
+    count = np.bincount(groups)
+    xc = x - (np.bincount(groups, x) / count)[groups]
+    yc = y - (np.bincount(groups, y) / count)[groups]
+    sxx = np.bincount(groups, xc * xc)
+    sxy = np.bincount(groups, xc * yc)
+    slopes = np.where(sxx > 0.0, sxy / np.where(sxx > 0.0, sxx, 1.0), shared)
+    return float(np.median(slopes)), yc - slopes[groups] * xc
+
+
 def residual_stats(residual_s: np.ndarray, motor: np.ndarray) -> dict:
     out = {}
     for number, name in enumerate(CHANNELS):
@@ -217,16 +241,25 @@ def timeline(
     slope: float | None,
     single_epoch: bool,
 ) -> tuple[dict, Paired, np.ndarray]:
+    """Align executed to planned. With a free slope (two crystals), runs
+    longer than LONG_RUN_S are fitted per FIT_WINDOW_S window."""
     p = pair(planned, executed)
     ids, mid_motion = epochs(p, freq)
     if single_epoch:
         ids = np.zeros_like(ids)
-    fitted, residual = fit(p, ids, slope)
+    windowed = (
+        slope is None and len(p.x) and p.x[-1] - p.x[0] > LONG_RUN_S * freq
+    )
+    if windowed:
+        fitted, residual = fit_windows(p, ids, freq)
+    else:
+        fitted, residual = fit(p, ids, slope)
     residual_s = residual / freq
     worst = int(np.argmax(np.abs(residual_s)))
     return (
         {
             "epochs": int(ids.max() + 1) if len(ids) else 0,
+            "fit_window_s": FIT_WINDOW_S if windowed else None,
             "jumps_mid_motion": mid_motion,
             "slope_ppm": (fitted - 1.0) * 1e6,
             "per_motor": residual_stats(residual_s, p.motor),

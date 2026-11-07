@@ -164,3 +164,28 @@ def test_concat_enters_each_slice_at_its_start(tmp_path):
         "G90", "G1 X4.0 Y5.0 Z6.0 F6000", "G92 E0", "G90", "G1 Y7",
     )  # fmt: skip
     assert loaded.lines[2:] == cycle + cycle + ("M400",)
+
+
+def test_long_runs_fit_clock_drift_per_window():
+    ref = np.arange(0, 300_000) * int(0.001 * FREQ)
+    t = ref / FREQ
+    drift_ticks = (20e-6 * t + 0.5e-9 * t**2) * FREQ
+    cap = ref + drift_ticks.astype(np.int64) + 7_000
+    stats, _, residual = compare.timeline(
+        motors(stepper_x=steps(ref)),
+        motors(stepper_x=steps(cap)),
+        FREQ,
+        None,
+        True,
+    )
+    assert stats["fit_window_s"] == compare.FIT_WINDOW_S
+    assert stats["abs_max_us"] < 0.2
+    short = ref[:50_000]
+    stats, _, _ = compare.timeline(
+        motors(stepper_x=steps(short)),
+        motors(stepper_x=steps(cap[:50_000])),
+        FREQ,
+        None,
+        True,
+    )
+    assert stats["fit_window_s"] is None

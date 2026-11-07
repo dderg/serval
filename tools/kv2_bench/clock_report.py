@@ -22,14 +22,16 @@ SKEW_PPM = 1000.0
 
 
 def main_sync(probe: dict) -> dict:
+    """The main MCU's ClockSync of the last klippy start in the process (a
+    FIRMWARE_RESTART after a shutdown builds a new one)."""
     syncs = [
         log
         for name, log in probe["clocksync"].items()
-        if name.startswith("ClockSync@")
+        if name.startswith("ClockSync@") and log["connect"] is not None
     ]
-    if len(syncs) != 1:
-        raise ValueError(f"expected one main ClockSync, found {len(syncs)}")
-    return syncs[0]
+    if not syncs:
+        raise ValueError("no connected main ClockSync in the probe record")
+    return max(syncs, key=lambda log: log["connect"]["start"])
 
 
 def run_outcome(record: dict) -> dict:
