@@ -6,6 +6,8 @@ This procedure checks the offline findings of FINDINGS.md, "Owner operating poin
 2. **Ringing of the tuned mode does not grow with scv.** For an oscillator at the shaper frequency (ζ 0.05), the residual is 8–10 µm from scv 5 to 80. Untuned higher modes do grow: at 2.5× f the residual is 13 µm at scv 5, 21 µm at scv 50 and 15 µm with the bounded corner_deviation. At 4× f it is 1.7 → 3.5 µm.
 3. **The bounded corner_deviation is about 3% slower than scv 50** (+3.3% corpus time, FINDINGS.md). The unbounded floor default has no corpus figure yet; the printer_test spans below compare it file by file.
 
+The cap mode is removed from `[corner_deviation]`: on fuzzed corner clusters it rounded corners 5–17% beyond its deviation limit. Besides scv, the protocol therefore runs floor (the default, unbounded burst) and bounded (max_corner_accel 51500).
+
 The hardware answers what the harness cannot. Does the toolhead see the burst? Do real modes ring as the oscillator model says? Do the motors keep up with the burst, or skip?
 
 ## Files
@@ -23,7 +25,6 @@ The hardware answers what the harness cannot. Does the toolhead see the burst? D
 | `printer_test/corners_scv20.gcode` | scv 20 | travel only, Z 10 | 11.14 s |
 | `printer_test/corners_scv50.gcode` | scv 50 | travel only, Z 10 | 11.04 s |
 | `printer_test/corners_floor.gcode` | `[corner_deviation]` (unbounded default) | travel only, Z 10 | 11.07 s |
-| `printer_test/corners_cap0.07.gcode` | `[corner_deviation]` max_deviation 0.07 (unbounded) | travel only, Z 10 | 11.17 s |
 | `printer_test/corners_bounded.gcode` | `[corner_deviation]` max_corner_accel 51500 | travel only, Z 10 | 11.21 s |
 | `printer_test/stress_scv50.gcode` | scv 50 | **extrudes** reference marks; stress travel at Z 10 | 46.19 s |
 | `printer_test/stress_floor.gcode` | `[corner_deviation]` (unbounded default) | **extrudes** reference marks; stress travel at Z 10 | 47.71 s |
@@ -32,7 +33,7 @@ The hardware answers what the harness cannot. Does the toolhead see the burst? D
 Every file starts with `; motion_eval` headers:
 - `start`;
 - `setting`;
-- `corner_deviation`, which selects the replay config: `none`, `floor` (the section with no options), a max_deviation in mm such as `0.07`, or `bound<mm/s²>` for max_corner_accel, such as `bound51500`. Any other value fails;
+- `corner_deviation`, which selects the replay config: `none`, `floor` (the section with no options), or `bound<mm/s²>` for max_corner_accel, such as `bound51500`. Any other value fails;
 - `measured_moves`, the planned move range between the two accelerometer macros;
 - `sync_s`, the length of the opening sync motion.
 
@@ -60,7 +61,6 @@ Each leg cruises 1.5 × 48 ms, plus room to accelerate. The constant-velocity wi
 | corners_scv20 | 1.128 | 1.000 | 1.430 / 1.504 |
 | corners_scv50 | 1.418 | 1.072 | 1.651 / 1.858 |
 | corners_floor | **1.780** | 1.046 | 1.717 / **2.094** |
-| corners_cap0.07 | 1.264 | 1.000 | 1.414 / 1.374 |
 | corners_bounded | 1.005 | 1.000 | 1.414 / 1.323 |
 
 On corexy, motor a moves with x + y and motor b with x − y. A diagonal move at max_accel therefore already asks one motor for 1.41×, with no burst.
@@ -128,7 +128,6 @@ Unbounded floor mode drives the same circle at least as hard (2.23× X). The bou
 |---|---|---|
 | corners_scv5, corners_scv20, corners_scv50, stress_scv50 | no `[corner_deviation]` section (the file sets scv itself) | `FIRMWARE_RESTART` |
 | corners_floor, stress_floor | `[corner_deviation]` with no options (unbounded default) | `FIRMWARE_RESTART` |
-| corners_cap0.07 | `[corner_deviation]` plus `max_deviation: 0.07` | `FIRMWARE_RESTART` |
 | corners_bounded, stress_bounded | `[corner_deviation]` plus `max_corner_accel: 51500` | `FIRMWARE_RESTART` |
 
 `CORNER_DEVIATION_REPORT` and the `corner_accel_x/y` status (worst admitted burst) let you check on the printer that the bounded section is the one loaded.
@@ -161,7 +160,6 @@ uv run python -m tools.motion_eval.accel_residual \
     records/adxl345-corners_scv20.csv   tools/motion_eval/printer_test/corners_scv20.gcode \
     records/adxl345-corners_scv50.csv   tools/motion_eval/printer_test/corners_scv50.gcode \
     records/adxl345-corners_floor.csv   tools/motion_eval/printer_test/corners_floor.gcode \
-    records/adxl345-corners_cap0.07.csv tools/motion_eval/printer_test/corners_cap0.07.gcode \
     records/adxl345-corners_bounded.csv tools/motion_eval/printer_test/corners_bounded.gcode
 ```
 
@@ -208,7 +206,7 @@ Compare rows with each other rather than against the model's absolute µm. The o
 
 | finding | confirmed if | refuted if |
 |---|---|---|
-| burst reaches the toolhead (FINDINGS 1.) | the measured corner-accel max and p99 rank like the plan's: unbounded floor and scv 50 highest, then cap 0.07 and scv 20, then scv 5 ≈ bounded. The plan's maxima on X are 1.78 (floor), 1.42 (scv 50), 1.26 (cap 0.07), 1.13 (scv 20), 1.01 (scv 5), 1.005 (bounded); on Y, 1.07 (scv 50), 1.05 (floor), 1.00 for the rest. Absolute measured values carry the toolhead's modes (see the example above) | scv 50 and floor measure no higher than scv 5 and bounded: the burst does not reach the toolhead, because belts or motors filter it, or the steps skip (see the stress test) |
+| burst reaches the toolhead (FINDINGS 1.) | the measured corner-accel max and p99 rank like the plan's: unbounded floor and scv 50 highest, then scv 20, then scv 5 ≈ bounded. The plan's maxima on X are 1.78 (floor), 1.42 (scv 50), 1.13 (scv 20), 1.01 (scv 5), 1.005 (bounded); on Y, 1.07 (scv 50), 1.05 (floor), 1.00 for the rest. Absolute measured values carry the toolhead's modes (see the example above) | scv 50 and floor measure no higher than scv 5 and bounded: the burst does not reach the toolhead, because belts or motors filter it, or the steps skip (see the stress test) |
 | tuned-mode ringing flat in scv (FINDINGS 2.) | windows ringing near 200 Hz (X) or 130 Hz (Y): residual p50/p99 within run-to-run scatter across scv 5, 20, 50 and bounded. Offline: 8–10 µm at every scv for ζ 0.05 | residual at the shaper frequency rises steadily from scv 5 to scv 50 |
 | higher modes grow with the burst | if the fitted ring frequency is ≥ 2× the shaper frequency, residuals grow from scv 5 to scv 50 by about 1.6× (13 → 21 µm offline at 2.5× f), with bounded close to scv 5 (15 µm) | no growth, or bounded worse than scv 50 |
 
@@ -218,7 +216,6 @@ Finding 3, the time cost, is the planner's own arithmetic, and the hardware cann
 |---|---|---|
 | scv 50 | 11.04 s | 46.19 s |
 | floor (unbounded) | 11.07 s (+0.3%) | 47.71 s (+3.3%) |
-| cap 0.07 | 11.17 s (+1.2%) | — |
 | bounded | 11.21 s (+1.5%) | 51.68 s (+11.9%) |
 
 The bounded stress gap is larger than the corpus's +3.3% because the stress is all small circles and dense zigzags. That is where the bound slows the motion most.

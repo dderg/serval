@@ -41,9 +41,8 @@ printer_test.py):
 - setting: the row name.
 - corner_deviation: the replay config's [corner_deviation] section.
   `none` leaves it out (square_corner_velocity mode). `floor` is the
-  section with no options. `<mm>` (e.g. `0.07`) adds max_deviation.
-  `bound<mm/s^2>` (e.g. `bound51500`) adds max_corner_accel. Any other
-  value fails.
+  section with no options. `bound<mm/s^2>` (e.g. `bound51500`) adds
+  max_corner_accel. Any other value fails.
 - measured_moves: the trapq move range [first, end) that runs between the
   file's MOTION_EVAL_ACCEL_START and MOTION_EVAL_ACCEL_STOP.
 - sync_s: how long that range's opening sync motion lasts.
@@ -127,8 +126,7 @@ REQUIRED_HEADERS = (
 )
 AXES = "xy"
 CORNER_DEVIATION_HEADER = re.compile(
-    r"(?P<none>none)|(?P<floor>floor)"
-    r"|(?P<cap>[0-9]+\.[0-9]+)|bound(?P<bound>[0-9]+)"
+    r"(?P<none>none)|(?P<floor>floor)|bound(?P<bound>[0-9]+)"
 )
 START_MACRO = "MOTION_EVAL_ACCEL_START"
 STOP_MACRO = "MOTION_EVAL_ACCEL_STOP"
@@ -315,15 +313,12 @@ def corner_deviation_section(value):
     match = CORNER_DEVIATION_HEADER.fullmatch(value)
     if match is None:
         raise AccelResidualError(
-            "corner_deviation header %r is none of: none, floor, <mm> (a"
-            " max_deviation such as 0.07), bound<mm/s^2> (a"
-            " max_corner_accel such as bound51500)" % (value,)
+            "corner_deviation header %r is none of: none, floor,"
+            " bound<mm/s^2> (a max_corner_accel such as bound51500)" % (value,)
         )
     if match["none"]:
         return None
     section = "[corner_deviation]\n"
-    if match["cap"]:
-        section += "max_deviation: %s\n" % (float(match["cap"]),)
     if match["bound"]:
         section += "max_corner_accel: %d\n" % (int(match["bound"]),)
     return section

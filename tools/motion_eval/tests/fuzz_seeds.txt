@@ -4,5 +4,4 @@
 5
 6
 7
-356  # cap superposition at a decelerating zigzag: 1.4% over, within CAP_MARGIN
 1044  # SET_INPUT_SHAPER to a longer kernel right after motion

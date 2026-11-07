@@ -323,7 +323,6 @@ def test_bad_records_fail_loudly(case, tmp_path, kind, message):
     [
         ("none", None),
         ("floor", "[corner_deviation]\n"),
-        ("0.07", "[corner_deviation]\nmax_deviation: 0.07\n"),
         ("bound51500", "[corner_deviation]\nmax_corner_accel: 51500\n"),
     ],
 )
@@ -332,7 +331,8 @@ def test_corner_deviation_header(value, section):
 
 
 @pytest.mark.parametrize(
-    "value", ["", "Floor", "bound", "bound5e4", "cap0.07", "7", "0.07mm"]
+    "value",
+    ["", "Floor", "bound", "bound5e4", "cap", "0.07", "7", "0.07mm"],
 )
 def test_unknown_corner_deviation_header_fails(value):
     with pytest.raises(accel_residual.AccelResidualError, match="header"):

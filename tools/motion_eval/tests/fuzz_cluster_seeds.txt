@@ -1,0 +1,8 @@
+7  # floor: micro-move cluster rounded 1.10x the floor
+79  # floor: 1.07x
+111  # floor: 1.11x, mzv, 2-12 ms moves with accel-decel bumps
+143  # accel: executed 1.10x the isolated-corner bound
+170  # accel: 1.13x the isolated-corner bound; harness at 25 us
+202  # harness: smoother quadrature at a 25 us grid
+207  # floor: 1.01x
+250  # floor: 1.08x

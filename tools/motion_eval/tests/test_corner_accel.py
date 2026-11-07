@@ -120,7 +120,7 @@ def test_the_admitted_worst_is_reached_at_a_fast_shallow_corner():
     capture, peaks = _run(
         "[corner_deviation]\n", _fast_shallow_corner(MAX_ACCEL), START
     )
-    admitted_x, _ = model.worst(MAX_ACCEL, MAX_VELOCITY, None, None)
+    admitted_x, _ = model.worst(MAX_ACCEL, MAX_VELOCITY, None)
     assert capture["corner_deviation"]["corner_accel_x"] == admitted_x
     turn = math.radians(ALPHA_DEG + TURN_DEG)
     up_x, um_x = math.cos(math.radians(ALPHA_DEG)), math.cos(turn)
@@ -133,14 +133,10 @@ def test_the_admitted_worst_is_reached_at_a_fast_shallow_corner():
 
 def test_recommended_max_accel_keeps_the_worst_corner_within_the_motor():
     model, _ = _model()
-    recommended = model.recommended_max_accel(
-        MOTOR_ACCEL, MAX_VELOCITY, None, None
-    )
-    assert (
-        max(model.worst(recommended, MAX_VELOCITY, None, None)) <= MOTOR_ACCEL
-    )
+    recommended = model.recommended_max_accel(MOTOR_ACCEL, MAX_VELOCITY, None)
+    assert max(model.worst(recommended, MAX_VELOCITY, None)) <= MOTOR_ACCEL
     above = recommended * (1.0 + 10.0 * cd.RECOMMEND_TOLERANCE)
-    assert max(model.worst(above, MAX_VELOCITY, None, None)) > MOTOR_ACCEL
+    assert max(model.worst(above, MAX_VELOCITY, None)) > MOTOR_ACCEL
     _, peaks = _run(
         "[corner_deviation]\n", _fast_shallow_corner(recommended), START
     )
@@ -178,16 +174,14 @@ def test_report_states_the_worst_corner_and_the_recommended_max_accel():
     model, _ = _model()
     kx, ky = (cd.kernel_from_spec(s) for s in OWNER_SPECS)
     limiter = object.__new__(cd.CornerDeviation)
-    limiter.limit = cd.JunctionLimit(model.arrays, kx, ky, None, None)
+    limiter.limit = cd.JunctionLimit(model.arrays, kx, ky, None)
     limiter.toolhead = _Toolhead()
-    limiter.max_deviation = limiter.max_corner_accel = None
+    limiter.max_corner_accel = None
     limiter.corner_accel_key = limiter.corner_accel = None
     gcmd = _Gcmd(MOTOR_ACCEL)
     limiter.cmd_CORNER_DEVIATION_REPORT(gcmd)
-    worst = model.worst(MAX_ACCEL, MAX_VELOCITY, None, None)
-    recommended = model.recommended_max_accel(
-        MOTOR_ACCEL, MAX_VELOCITY, None, None
-    )
+    worst = model.worst(MAX_ACCEL, MAX_VELOCITY, None)
+    recommended = model.recommended_max_accel(MOTOR_ACCEL, MAX_VELOCITY, None)
     assert gcmd.responses == [
         "worst corner accel X %.0f Y %.0f mm/s^2 at max_accel %.0f\n"
         "recommended_max_accel %.0f for MOTOR_ACCEL %.0f"

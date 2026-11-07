@@ -35,7 +35,6 @@ def corpus_case(seed):
         "owner",
         text,
         tuple(sweep.case_start(text)),
-        None,
         tuple(sorted(rng.sample(range(len(move_lines)), rng.randint(1, 30)))),
         tuple(sorted(rng.sample(move_lines, rng.randint(1, 8)))),
     )

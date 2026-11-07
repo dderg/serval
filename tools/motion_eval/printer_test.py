@@ -4,8 +4,8 @@
 
 Writes, into tools/motion_eval/printer_test/ by default:
 - corners_<setting>.gcode: the corner/ringing pattern, one file per
-  setting (scv 5, 20, 50; [corner_deviation] floor, cap 0.07, and bounded
-  at max_corner_accel 1.03 x max_accel).
+  setting (scv 5, 20, 50; [corner_deviation] floor, and bounded at
+  max_corner_accel 1.03 x max_accel).
 - stress_<setting>.gcode: dense zigzags, polyline circles and reversals
   at scv 50, floor and bounded, between two printed reference marks.
 
@@ -57,7 +57,6 @@ CORNER_SETTINGS = {
     "scv20": (20.0, "none"),
     "scv50": (50.0, "none"),
     "floor": (None, "floor"),
-    "cap0.07": (None, "0.07"),
     "bounded": (None, "bound%d" % BOUNDED_CORNER_ACCEL),
 }
 STRESS_SETTINGS = ("scv50", "floor", "bounded")

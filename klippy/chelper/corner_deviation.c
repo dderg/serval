@@ -9,36 +9,24 @@
 
 #pragma GCC optimize ("fp-contract=off")
 
-struct cd_limiter {
-    int n_alpha, n_theta, n_w;
-    double alpha_step, theta_step;
-    double *w, *g, *floor, *w_floor;
-    double variance, window, max_deviation, max_corner_accel;
-    int has_cap, has_corner_bound;
-    double density_peak[2];
-    double min_direction_change, min_xy_share;
-    uint64_t limited, stopped_by_cap, step_limited, xy_stops;
+#define CD_STEPS 256
+
+struct cd_step {
+    double tau, dv[2], share[2];
 };
 
-static double
-max_w_within(const struct cd_limiter *l, const double *g, double level)
-{
-    const double *w = l->w;
-    if (level < g[0])
-        return 0.;
-    int lo = 0, hi = l->n_w - 1;
-    if (g[hi] <= level)
-        return w[hi];
-    while (hi - lo > 1) {
-        int mid = (lo + hi) / 2;
-        if (g[mid] <= level)
-            lo = mid;
-        else
-            hi = mid;
-    }
-    double frac = g[hi] > g[lo] ? (level - g[lo]) / (g[hi] - g[lo]) : 0.;
-    return w[lo] + frac * (w[hi] - w[lo]);
-}
+struct cd_limiter {
+    int n_alpha, n_theta;
+    double alpha_step, theta_step;
+    double *floor, *w_floor;
+    double variance, window, max_corner_accel, short_turn;
+    int has_corner_bound;
+    double density_peak[2];
+    double min_direction_change, min_xy_share;
+    uint64_t limited, step_limited, xy_stops;
+    struct cd_step steps[CD_STEPS];
+    int steps_len, steps_head;
+};
 
 static int
 clamped_index(double x, int last)
@@ -61,10 +49,10 @@ curve_speed(const struct cd_limiter *l, double prev_length
 
 static double
 corner_bound(struct cd_limiter *l, const double up[2], const double um[2]
-             , const double du[2], double prev_d, double move_d, double accel
-             , double speed)
+             , const double du[2], double accel, double speed
+             , const double window_dv[2]
+             , const double window_share[2])
 {
-    double rate = 1. / (move_d < prev_d ? move_d : prev_d);
     double bound = speed;
     int axis;
     for (axis = 0; axis < 2; axis++) {
@@ -74,25 +62,66 @@ corner_bound(struct cd_limiter *l, const double up[2], const double um[2]
         double linear = du[axis] * density_peak;
         double share = fabs(um[axis]) > fabs(up[axis])
                        ? fabs(um[axis]) : fabs(up[axis]);
-        double room = l->max_corner_accel - accel * share;
+        if (window_share[axis] > share)
+            share = window_share[axis];
+        double room = (l->max_corner_accel - accel * share
+                       - density_peak * window_dv[axis]);
         if (room <= 0.) {
             bound = 0.;
             continue;
         }
-        double curve = 2. * room / (linear + sqrt(
-            linear * linear + 4. * du[axis] * rate * room));
-        if (curve < bound)
-            bound = curve;
+        double own = room / linear;
+        if (own < bound)
+            bound = own;
     }
     if (bound < speed)
         l->step_limited++;
     return bound;
 }
 
-double __visible
-cd_junction_v2(struct cd_limiter *l, double upx, double upy
-               , double umx, double umy, double prev_d, double move_d
-               , double prev_accel, double move_accel, double cap_v2)
+static int
+window_steps(struct cd_limiter *l, double tau, double window_dv[2]
+             , double window_share[2])
+{
+    double elapsed = tau;
+    int i;
+    for (i = 0; i < l->steps_len; i++) {
+        if (elapsed > 2. * l->window)
+            return 1;
+        const struct cd_step *s = &l->steps[
+            (l->steps_head - 1 - i + CD_STEPS) % CD_STEPS];
+        int axis;
+        for (axis = 0; axis < 2; axis++) {
+            window_dv[axis] += s->dv[axis];
+            if (s->share[axis] > window_share[axis])
+                window_share[axis] = s->share[axis];
+        }
+        elapsed += s->tau;
+    }
+    return elapsed > 2. * l->window || l->steps_len < CD_STEPS;
+}
+
+static void
+note_step(struct cd_limiter *l, double tau, double v2, double upx
+          , double upy, double umx, double umy)
+{
+    struct cd_step *s = &l->steps[l->steps_head];
+    double v = sqrt(v2);
+    s->tau = tau;
+    s->dv[0] = v * fabs(umx - upx);
+    s->dv[1] = v * fabs(umy - upy);
+    s->share[0] = fabs(upx);
+    s->share[1] = fabs(upy);
+    l->steps_head = (l->steps_head + 1) % CD_STEPS;
+    if (l->steps_len < CD_STEPS)
+        l->steps_len++;
+}
+
+static double
+plan_junction(struct cd_limiter *l, double upx, double upy
+              , double umx, double umy, double prev_d, double move_d
+              , double prev_accel, double move_accel, double cap_v2
+              , const double window_dv[2], const double window_share[2])
 {
     double dux = fabs(umx - upx), duy = fabs(umy - upy);
     if (hypot(dux, duy) < l->min_direction_change)
@@ -117,21 +146,7 @@ cd_junction_v2(struct cd_limiter *l, double upx, double upy
                 * l->n_theta
                 + clamped_index((cell_turn + M_PI) / l->theta_step
                                 , l->n_theta - 1));
-    const double *g = &l->g[cell * l->n_w];
     double w = l->w_floor[cell], room = l->floor[cell];
-    if (l->has_cap) {
-        double level = l->max_deviation / accel;
-        if (level < g[0]) {
-            l->stopped_by_cap++;
-            w = room = 0.;
-        } else {
-            double capped_w = max_w_within(l, g, level);
-            if (capped_w < w)
-                w = capped_w;
-            if (level < room)
-                room = level;
-        }
-    }
     double speed = 0.;
     if (room > 0.) {
         speed = accel * w;
@@ -142,13 +157,39 @@ cd_junction_v2(struct cd_limiter *l, double upx, double upy
                 speed = curve;
         }
     }
+    double reach = speed * l->window;
+    if (speed > 0. && fabs(turn) > l->short_turn
+        && (prev_d * prev_xy < reach || move_d * move_xy < reach))
+        speed = 0.;
     if (l->has_corner_bound) {
         double up[2] = {upx, upy}, um[2] = {umx, umy}, du[2] = {dux, duy};
-        speed = corner_bound(l, up, um, du, prev_d, move_d, accel, speed);
+        speed = corner_bound(l, up, um, du, accel, speed, window_dv
+                             , window_share);
     }
     double v2 = speed * speed;
     if (cap_v2 <= v2)
         return cap_v2;
     l->limited++;
+    return v2;
+}
+
+double __visible
+cd_junction_v2(struct cd_limiter *l, double upx, double upy
+               , double umx, double umy, double prev_d, double move_d
+               , double prev_accel, double move_accel, double prev_max_v2
+               , double cap_v2)
+{
+    double window_dv[2] = {0., 0.}, window_share[2] = {0., 0.};
+    if (!l->has_corner_bound)
+        return plan_junction(l, upx, upy, umx, umy, prev_d, move_d
+                             , prev_accel, move_accel, cap_v2
+                             , window_dv, window_share);
+    double tau = prev_d * hypot(upx, upy) / sqrt(prev_max_v2);
+    double v2 = 0.;
+    if (window_steps(l, tau, window_dv, window_share))
+        v2 = plan_junction(l, upx, upy, umx, umy, prev_d, move_d
+                           , prev_accel, move_accel, cap_v2
+                           , window_dv, window_share);
+    note_step(l, tau, v2, upx, upy, umx, umy);
     return v2;
 }

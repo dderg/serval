@@ -34,13 +34,13 @@ class _Move:
         self.axes_r = (x, y, 0.0, 0.0)
         self.move_d = 10.0
         self.accel = 5000.0
+        self.max_cruise_v2 = 300.0**2
 
 
 def _limiter(cache_dir):
     limiter = object.__new__(cd.CornerDeviation)
     limiter.printer = _Printer()
     limiter.cache_dir = str(cache_dir)
-    limiter.max_deviation = None
     limiter.max_corner_accel = None
     limiter.toolhead = _Toolhead()
     limiter.corner_accel_key = limiter.corner_accel = None
@@ -51,9 +51,7 @@ def _limiter(cache_dir):
     limiter.ready = True
     limiter.holding_gcode = False
     limiter.gcode_mutex = _Mutex()
-    limiter.counters = dict.fromkeys(
-        ("limited", "stopped_by_cap", "step_limited", "xy_stops"), 0
-    )
+    limiter.counters = dict.fromkeys(("limited", "step_limited", "xy_stops"), 0)
     return limiter
 
 
@@ -115,7 +113,7 @@ def test_a_junction_planned_while_the_table_builds_shuts_down(tmp_path):
 
 def _bench_limit():
     kx, ky = (cd.kernel_from_spec(s) for s in BENCH_SPECS)
-    return cd.JunctionLimit(cd.build_table_arrays(kx, ky), kx, ky, None, None)
+    return cd.JunctionLimit(cd.build_table_arrays(kx, ky), kx, ky, None)
 
 
 def test_only_the_latest_build_is_published(tmp_path):

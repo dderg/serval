@@ -10,12 +10,15 @@ shaper floor F = |(sigma_x^2 * a_x, sigma_y^2 * a_y)| / 2, sigma^2 being
 the kernel's time variance and a_x, a_y the largest per-axis accelerations
 around the corner. Each junction runs at the highest speed whose isolated
 corner, after shaping, rounds no more than F: corners never round more than
-a stop already can. The optional max_deviation lowers junction speeds
-further so that corners round at most that much; it never lowers
-acceleration, so a corner whose stop alone rounds more than max_deviation
-just stops. The table models isolated corners; corners within one kernel
-reach of each other (a slow zigzag) can superpose slightly beyond it, and
-CAP_MARGIN is the stated allowance, checked by tools/motion_eval/fuzz.py.
+a stop already can. The table models isolated corners, legs at constant
+acceleration through the vertex. A move shorter than the distance covered
+within the kernel's reach can accelerate and decelerate between two
+corners inside one window, which rounds beyond any isolated corner: a
+junction next to such a move whose turn exceeds SHORT_MOVE_STOP_DEG stops
+(curves turn less per junction and keep the curve cap). A stop has no
+velocity step, so it rounds within the floor. There is no tighter
+deviation cap: lowering junction speeds cannot bound clusters below the
+floor, and acceleration is never lowered.
 
 The isolated corner is read from a table built from the active X/Y
 shapers, the worst over each leg decelerating or accelerating through the
@@ -28,18 +31,18 @@ Z move) stops.
 An input smoother turns a junction's velocity step dv into acceleration
 dv * density over its duration, on top of what the legs command. Like
 square_corner_velocity, the junction speed does not limit that burst by
-default: corner_accel() is the worst executed per-axis acceleration the
-planner admits, max_accel plus the larger of the biggest step burst
-(density_peak * dv, dv from the table at the shaper floor or cap and
-max_velocity) and the centripetal acceleration the curve cap allows; it
-is logged when a table is ready, reported in the status, and
+default: CornerAccel.worst is the worst executed per-axis acceleration
+the planner admits, the legs' acceleration plus the larger of the biggest
+step burst (density_peak * dv, dv from the table at the shaper floor and
+max_velocity) and the centripetal acceleration the curve cap allows, with
+CLUSTER_ACCEL_MARGIN for corners within one kernel reach; it is logged when a table is ready, reported in the status, and
 recommended_max_accel() inverts it for a motor's acceleration limit. The
-optional max_corner_accel bounds the burst instead: each junction's step
-and the steps of a curve continuing with the same spacing must fit, with
-the legs' acceleration along the axis, under max_corner_accel. Junctions
-with different direction changes nearby are not summed, so the bound is
-approximate: ACCEL_MARGIN is the stated allowance above it, checked by
-tools/motion_eval/fuzz.py.
+optional max_corner_accel bounds the burst instead: a junction's step,
+the steps of the junctions before it within twice the kernel's reach
+(timed at the moves' requested speeds, the fastest they can run), and the
+legs' acceleration along the axis must fit under max_corner_accel, each
+step counted at the kernel's peak density. ACCEL_MARGIN is the stated
+allowance above it, checked by tools/motion_eval/fuzz.py.
 
 With input shaping inactive on X or Y every direction change stops (as
 square_corner_velocity: 0).
@@ -58,6 +61,7 @@ import pathlib
 import tempfile
 import threading
 
+from .. import chelper
 from . import input_shaper
 
 TABLE_ALPHA_DEG = 15.0
@@ -70,8 +74,9 @@ SMOOTHER_NODES = 256
 MIN_DIRECTION_CHANGE = 1e-9
 MIN_XY_SHARE = 1e-6
 ACCEL_MARGIN = 0.05
-CAP_MARGIN = 0.05
+CLUSTER_ACCEL_MARGIN = 0.15
 RECOMMEND_TOLERANCE = 1e-6
+SHORT_MOVE_STOP_DEG = 60.0
 TABLE_CACHE_DIR = "~/.cache/kalico/corner_deviation"
 BUILD_POLL_S = 0.05
 BUILD_NICE = 19
@@ -230,25 +235,19 @@ class JunctionLimit:
     accel at w = v / accel, floor, the shaper floor per unit accel, and
     w_floor, the largest w whose corner stays within it."""
 
-    def __init__(self, arrays, kx, ky, max_deviation, max_corner_accel):
-        from .. import chelper
-
+    def __init__(self, arrays, kx, ky, max_corner_accel):
         ffi, lib = chelper.get_ffi()
         self.junction_v2 = lib.cd_junction_v2
         self.accel_model = CornerAccel(arrays, kx, ky)
         self.owned = []
         c = self.c = ffi.new("struct cd_limiter *")
-        c.n_alpha, c.n_theta, c.n_w = arrays["g"].shape
+        c.n_alpha, c.n_theta = arrays["w_floor"].shape
         c.alpha_step = math.radians(TABLE_ALPHA_DEG)
         c.theta_step = math.radians(TABLE_THETA_DEG)
-        c.w = self._doubles(ffi, arrays["w"])
-        c.g = self._doubles(ffi, arrays["g"].ravel())
         c.floor = self._doubles(ffi, arrays["floor"].ravel())
         c.w_floor = self._doubles(ffi, arrays["w_floor"].ravel())
         c.variance = max(kx.variance, ky.variance)
         c.window = max(kx.s_hi, ky.s_hi, -kx.s_lo, -ky.s_lo)
-        c.has_cap = max_deviation is not None
-        c.max_deviation = max_deviation or 0.0
         c.has_corner_bound = max_corner_accel is not None and bool(
             kx.density_peak or ky.density_peak
         )
@@ -257,6 +256,7 @@ class JunctionLimit:
         c.density_peak[1] = ky.density_peak
         c.min_direction_change = MIN_DIRECTION_CHANGE
         c.min_xy_share = MIN_XY_SHARE
+        c.short_turn = math.radians(SHORT_MOVE_STOP_DEG)
 
     def _doubles(self, ffi, values):
         array = ffi.new("double[]", [float(v) for v in values])
@@ -267,7 +267,6 @@ class JunctionLimit:
         c = self.c
         return {
             "limited": c.limited,
-            "stopped_by_cap": c.stopped_by_cap,
             "step_limited": c.step_limited,
             "xy_stops": c.xy_stops,
         }
@@ -292,7 +291,11 @@ class CornerAccel:
     |sin(turn/2)|, |du_y| = 2 |cos(alpha + turn/2)| |sin(turn/2)|. Both are
     bounded over each table cell. On a curve at the curve cap the
     tangential accel and the centripetal 2 * accel * room / sigma^2 are
-    perpendicular: at most their hypot along any axis."""
+    perpendicular: at most their hypot along any axis. The steps of
+    corners closer than the kernel's reach add up beyond both;
+    CLUSTER_ACCEL_MARGIN is the stated allowance for that, checked by
+    tools/motion_eval/fuzz.py on clustered corners. With max_corner_accel
+    the junctions bound that sum themselves."""
 
     def __init__(self, arrays, kx, ky):
         import numpy as np
@@ -327,33 +330,13 @@ class CornerAccel:
                 )
             )
 
-    def _cells(self, accel, max_deviation):
-        """w and room per unit accel of every cell at this accel."""
-        import numpy as np
-
-        w, room = self.arrays["w_floor"], self.arrays["floor"]
-        if max_deviation is None:
-            return w, room
-        level = max_deviation / accel
-        g, w_grid = self.arrays["g"], self.arrays["w"].tolist()
-        capped = np.array(
-            [
-                [_max_w(w_grid, cell.tolist(), level) for cell in row]
-                for row in g
-            ]
-        )
-        stopped = level < g[..., 0]
-        return (
-            np.where(stopped, 0.0, np.minimum(w, capped)),
-            np.where(stopped, 0.0, np.minimum(room, level)),
-        )
-
-    def worst(self, accel, max_velocity, max_deviation, max_corner_accel):
+    def worst(self, accel, max_velocity, max_corner_accel):
         """(x, y) worst executed acceleration at this max_accel; with
         max_corner_accel, within ACCEL_MARGIN of it."""
-        w, room = self._cells(accel, max_deviation)
-        speed = (accel * w).clip(max=max_velocity)
-        centripetal = 2.0 * accel * float(room.max()) / self.variance
+        speed = (accel * self.arrays["w_floor"]).clip(max=max_velocity)
+        centripetal = (
+            2.0 * accel * float(self.arrays["floor"].max()) / self.variance
+        )
         curve = math.hypot(accel, centripetal)
         out = []
         for density_peak, du_max, share_max in zip(
@@ -362,25 +345,21 @@ class CornerAccel:
             corner = float(
                 (accel * share_max + density_peak * speed * du_max).max()
             )
-            axis = max(corner, curve)
+            axis = (1.0 + CLUSTER_ACCEL_MARGIN) * max(corner, curve)
             if max_corner_accel is not None and density_peak:
                 axis = min(axis, max(max_corner_accel, accel))
             out.append(float(axis))
         return tuple(out)
 
     def recommended_max_accel(
-        self, motor_accel, max_velocity, max_deviation, max_corner_accel
+        self, motor_accel, max_velocity, max_corner_accel
     ):
         """The largest max_accel whose worst corner stays within motor_accel
         on both axes (worst grows with max_accel: bisection)."""
 
         def fits(accel):
             return (
-                max(
-                    self.worst(
-                        accel, max_velocity, max_deviation, max_corner_accel
-                    )
-                )
+                max(self.worst(accel, max_velocity, max_corner_accel))
                 <= motor_accel
             )
 
@@ -442,7 +421,6 @@ class CornerDeviation:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
-        self.max_deviation = config.getfloat("max_deviation", None, above=0.0)
         self.max_corner_accel = config.getfloat(
             "max_corner_accel", None, above=0.0
         )
@@ -479,7 +457,6 @@ class CornerDeviation:
         self.generation = 0
         self.counters = {
             "limited": 0,
-            "stopped_by_cap": 0,
             "step_limited": 0,
             "xy_stops": 0,
         }
@@ -512,7 +489,7 @@ class CornerDeviation:
             if gcmd.get("SQUARE_CORNER_VELOCITY", None) is not None:
                 raise gcmd.error(
                     "SQUARE_CORNER_VELOCITY has no effect with"
-                    " [corner_deviation]; set max_deviation instead"
+                    " [corner_deviation]"
                 )
             real_set_velocity_limit(gcmd)
 
@@ -546,6 +523,7 @@ class CornerDeviation:
         if not self.building:
             self._release_gcode()
             return
+        chelper.get_ffi()
         thread = threading.Thread(
             target=self._build,
             args=(self.generation, specs),
@@ -571,9 +549,7 @@ class CornerDeviation:
         try:
             kx, ky = (kernel_from_spec(s) for s in specs)
             arrays = table_arrays(specs, kx, ky, self.cache_dir)
-            limit = JunctionLimit(
-                arrays, kx, ky, self.max_deviation, self.max_corner_accel
-            )
+            limit = JunctionLimit(arrays, kx, ky, self.max_corner_accel)
             result = (limit, None)
         except Exception as e:
             logging.exception("corner_deviation: table build failed")
@@ -611,7 +587,6 @@ class CornerDeviation:
         corner_accel = self._corner_accel()
         return dict(
             counters,
-            max_deviation=self.max_deviation,
             max_corner_accel=self.max_corner_accel,
             accel_margin=ACCEL_MARGIN,
             table_ready=self.limit is not None,
@@ -630,7 +605,6 @@ class CornerDeviation:
             self.corner_accel = self.limit.accel_model.worst(
                 self.toolhead.max_accel,
                 self.toolhead.max_velocity,
-                self.max_deviation,
                 self.max_corner_accel,
             )
         return self.corner_accel
@@ -657,7 +631,6 @@ class CornerDeviation:
             recommended = self.limit.accel_model.recommended_max_accel(
                 motor_accel,
                 self.toolhead.max_velocity,
-                self.max_deviation,
                 self.max_corner_accel,
             )
             msg += "\nrecommended_max_accel %.0f for MOTOR_ACCEL %.0f" % (
@@ -692,6 +665,7 @@ class CornerDeviation:
             move.move_d,
             prev_move.accel,
             move.accel,
+            prev_move.max_cruise_v2,
             cap_v2,
         )
 

@@ -34,22 +34,6 @@ DEFAULT_FAMILY = {"bench": "mzv", "fast": "smooth_mzv"}
 FAMILIES = ("mzv", "smooth_mzv")
 SCV_VALUES = (1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 35.0)
 MCR_VALUES = (0.0, 0.25, 0.5)
-CAPS_MM = (
-    0.05,
-    0.07,
-    0.09,
-    0.1,
-    0.11,
-    0.12,
-    0.13,
-    0.14,
-    0.15,
-    0.16,
-    0.18,
-    0.2,
-    0.22,
-    0.25,
-)
 PARETO_CASES = (
     "voron_top_layers",
     "circles",
@@ -70,7 +54,6 @@ class Run:
     family: str
     scv: float
     mcr: float
-    max_deviation: float | None = None
     unlimited_extruder_corner: bool = False
     max_corner_accel: float | None = None
 
@@ -100,12 +83,6 @@ def plan(cases, configs):
                 runs.append(
                     Run("floor", case, config, family, BASE_SCV, BASE_MCR)
                 )
-                for cap in CAPS_MM:
-                    runs.append(
-                        Run(
-                            "cap", case, config, family, BASE_SCV, BASE_MCR, cap
-                        )
-                    )
             family = DEFAULT_FAMILY[config]
             for scv, mcr, icv in (
                 (UNLIMITED, BASE_MCR, False),
@@ -113,9 +90,7 @@ def plan(cases, configs):
                 (UNLIMITED, 0.0, False),
                 (UNLIMITED, 0.0, True),
             ):
-                runs.append(
-                    Run("decomp", case, config, family, scv, mcr, None, icv)
-                )
+                runs.append(Run("decomp", case, config, family, scv, mcr, icv))
     return runs
 
 
@@ -126,10 +101,8 @@ def _config_path(run, tmpdir):
         sections.append(
             "[extruder]\ninstantaneous_corner_velocity: %r\n" % (UNLIMITED,)
         )
-    if run.kind in ("floor", "cap"):
+    if run.kind == "floor":
         section = "[corner_deviation]\n"
-        if run.max_deviation is not None:
-            section += "max_deviation: %r\n" % (run.max_deviation,)
         if run.max_corner_accel is not None:
             section += "max_corner_accel: %r\n" % (run.max_corner_accel,)
         sections.append(section)
@@ -242,7 +215,6 @@ def _index(records):
             r["family"],
             r["scv"],
             r["mcr"],
-            r["max_deviation"],
             r["unlimited_extruder_corner"],
         ): r
         for r in records
@@ -250,7 +222,7 @@ def _index(records):
 
 
 def _baseline(idx, case, config, family):
-    return idx[("scv", case, config, family, BASE_SCV, BASE_MCR, None, False)]
+    return idx[("scv", case, config, family, BASE_SCV, BASE_MCR, False)]
 
 
 def decomposition_table(records, cases, configs):
@@ -267,9 +239,9 @@ def decomposition_table(records, cases, configs):
             base = _baseline(idx, case, config, family)
 
             def t(scv, mcr, icv=False):
-                return idx[
-                    ("decomp", case, config, family, scv, mcr, None, icv)
-                ]["print_time_s"]
+                return idx[("decomp", case, config, family, scv, mcr, icv)][
+                    "print_time_s"
+                ]
 
             tb = base["print_time_s"]
             no_scv, mcr0 = t(UNLIMITED, BASE_MCR), t(BASE_SCV, 0.0)
@@ -318,23 +290,14 @@ def _pareto_mask(times, devs):
     return keep
 
 
-def aggregate(records, cases, config, family, kind, knob):
+def aggregate(records, cases, config, family):
     idx = _index(records)
     rows = []
-    for value in sorted({r[knob] for r in records if r["kind"] == kind}):
+    for scv in sorted({r["scv"] for r in records if r["kind"] == "scv"}):
         for mcr in MCR_VALUES:
             per_case = []
             for case in cases:
-                key = (
-                    kind,
-                    case,
-                    config,
-                    family,
-                    value if knob == "scv" else BASE_SCV,
-                    mcr,
-                    value if knob == "max_deviation" else None,
-                    False,
-                )
+                key = ("scv", case, config, family, scv, mcr, False)
                 if key in idx:
                     per_case.append((case, idx[key]))
             if len(per_case) != len(cases):
@@ -348,7 +311,7 @@ def aggregate(records, cases, config, family, kind, knob):
             ]
             rows.append(
                 {
-                    knob: value,
+                    "scv": scv,
                     "mcr": mcr,
                     "rel_time": float(np.mean(rel)),
                     "total_time": sum(r["print_time_s"] for _, r in per_case),
@@ -365,21 +328,21 @@ def aggregate(records, cases, config, family, kind, knob):
     return rows
 
 
-def pareto_table(rows, knob):
+def pareto_table(rows):
     rows = sorted(rows, key=lambda r: r["corner_p99"])
     mask = _pareto_mask(
         [r["rel_time"] for r in rows], [r["corner_p99"] for r in rows]
     )
     lines = [
-        "| %s | mcr | time vs base | corpus s | corner p99 mm | corner max mm |"
-        " max jump mm/s | peak accel | pareto |" % knob,
+        "| scv | mcr | time vs base | corpus s | corner p99 mm | corner max mm |"
+        " max jump mm/s | peak accel | pareto |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
     for r, front in zip(rows, mask):
         lines.append(
             "| %g | %g | %.3f | %.1f | %.3f | %.3f | %.1f | %.0f | %s |"
             % (
-                r[knob],
+                r["scv"],
                 r["mcr"],
                 r["rel_time"],
                 r["total_time"],
@@ -394,62 +357,24 @@ def pareto_table(rows, knob):
 
 
 def _setting(r):
-    if r["kind"] == "scv":
-        knob = "scv %g" % r["scv"]
-    elif r["kind"] == "floor":
-        knob = "floor"
-    else:
-        knob = "floor+cap %g" % r["max_deviation"]
+    knob = "floor" if r["kind"] == "floor" else "scv %g" % r["scv"]
     return "%s, mcr %g" % (knob, r["mcr"])
 
 
-def _runs_by_setting(records, kind, config, family):
-    grouped = {}
-    for r in records:
-        if (
-            r["kind"] == kind
-            and r["config"] == config
-            and r["family"] == family
-        ):
-            grouped.setdefault(_setting(r), {})[r["case"]] = r
-    return grouped
-
-
-def _fastest_within(groups, case, metric, limit):
-    ok = [
-        g[case] for g in groups.values() if g[case]["corners"][metric] <= limit
-    ]
-    return min(ok, key=lambda r: r["print_time_s"], default=None)
-
-
-def _time_cell(reference, r):
-    if r is None:
-        return "none | | "
-    return "%s | %.2f | %s" % (
-        _setting(r).split(",")[0],
-        r["print_time_s"],
-        _pct(reference, r["print_time_s"]),
-    )
-
-
 def floor_tables(records, cases, configs):
-    """Default (scv 5, mcr 0.5) against floor mode and floor+cap, the
-    setting chosen as the fastest of floor and every cap whose corner max
-    (or p99) is within the default's in that case."""
+    """Default (scv 5, mcr 0.5) against floor mode, over the corpus and
+    per case."""
     idx = _index(records)
     per_case = [
         "| config | shaper | case | default s | max mm | p99 mm | floor s |"
-        " max mm | p99 mm | floor vs default | equal max: cap | s |"
-        " vs default | equal p99: cap | s | vs default | max step mm/s"
+        " max mm | p99 mm | floor vs default | max step mm/s"
         " default / floor | peak accel default / floor |",
-        "|" + "---|" * 18,
+        "|" + "---|" * 12,
     ]
     corpus = [
         "| config | shaper | default s | floor s | floor vs default |"
-        " cases where floor max <= default | single cap, equal max | s |"
-        " vs default | single cap, equal p99 | s | vs default |"
-        " per-case cap, equal max: s | vs default |",
-        "|" + "---|" * 13,
+        " cases where floor max <= default |",
+        "|" + "---|" * 6,
     ]
     for config in configs:
         for family in FAMILIES:
@@ -458,38 +383,16 @@ def floor_tables(records, cases, configs):
             }
             floor = {
                 case: idx[
-                    ("floor", case, config, family, BASE_SCV, BASE_MCR)
-                    + (None, False)
+                    ("floor", case, config, family, BASE_SCV, BASE_MCR, False)
                 ]
                 for case in cases
             }
-            caps = _runs_by_setting(records, "cap", config, family)
-            caps["floor, mcr %g" % BASE_MCR] = floor
-            best = {}
-            for metric in ("max_mm", "p99_mm"):
-                for case in cases:
-                    best[metric, case] = _fastest_within(
-                        caps, case, metric, default[case]["corners"][metric]
-                    )
-                feasible = {
-                    name: sum(g[c]["print_time_s"] for c in cases)
-                    for name, g in caps.items()
-                    if all(
-                        g[c]["corners"][metric] <= default[c]["corners"][metric]
-                        for c in cases
-                    )
-                }
-                best[metric] = min(
-                    feasible.items(),
-                    key=lambda kv: kv[1],
-                    default=("none", math.nan),
-                )
             for case in cases:
                 d, f = default[case], floor[case]
                 td = d["print_time_s"]
                 per_case.append(
                     "| %s | %s | %s | %.2f | %.3f | %.3f | %.2f | %.3f | %.3f"
-                    " | %s | %s | %s | %.1f / %.1f | %.0f / %.0f |"
+                    " | %s | %.1f / %.1f | %.0f / %.0f |"
                     % (
                         config,
                         family,
@@ -501,8 +404,6 @@ def floor_tables(records, cases, configs):
                         f["corners"]["max_mm"],
                         f["corners"]["p99_mm"],
                         _pct(td, f["print_time_s"]),
-                        _time_cell(td, best["max_mm", case]),
-                        _time_cell(td, best["p99_mm", case]),
                         d["max_jump_mm_s"],
                         f["max_jump_mm_s"],
                         d["peak_accel"],
@@ -515,13 +416,8 @@ def floor_tables(records, cases, configs):
                 floor[c]["corners"]["max_mm"] <= default[c]["corners"]["max_mm"]
                 for c in cases
             )
-            per_case_total = sum(
-                (best["max_mm", c] or default[c])["print_time_s"] for c in cases
-            )
-            (m_name, m_time), (p_name, p_time) = best["max_mm"], best["p99_mm"]
             corpus.append(
-                "| %s | %s | %.1f | %.1f | %s | %d of %d | %s | %.1f | %s | %s"
-                " | %.1f | %s | %.1f | %s |"
+                "| %s | %s | %.1f | %.1f | %s | %d of %d |"
                 % (
                     config,
                     family,
@@ -530,14 +426,6 @@ def floor_tables(records, cases, configs):
                     _pct(total, floor_total),
                     within,
                     len(cases),
-                    m_name.split(",")[0],
-                    m_time,
-                    _pct(total, m_time),
-                    p_name.split(",")[0],
-                    p_time,
-                    _pct(total, p_time),
-                    per_case_total,
-                    _pct(total, per_case_total),
                 )
             )
     return "\n".join(corpus), "\n".join(per_case)
@@ -578,7 +466,7 @@ def cpu_table(records, configs):
                 ]
             )
         )
-        floor_runs = [r for r in on_case if r["kind"] in ("floor", "cap")]
+        floor_runs = [r for r in on_case if r["kind"] == "floor"]
         floor_us = float(
             np.median([r["lookahead_us_per_move"] for r in floor_runs])
         )
@@ -617,7 +505,7 @@ def case_pareto_table(records, case, config, family):
             if r["case"] == case
             and r["config"] == config
             and r["family"] == family
-            and r["kind"] in ("scv", "floor", "cap")
+            and r["kind"] in ("scv", "floor")
         ),
         key=lambda r: r["corners"]["max_mm"],
     )
@@ -656,16 +544,12 @@ def tables(records, cases, configs):
     out.append(decomposition_table(records, cases, configs))
     for config in configs:
         for family in FAMILIES:
-            for kind, knob in (("scv", "scv"), ("cap", "max_deviation")):
-                out += [
-                    "",
-                    "## %s, %s, %s sweep" % (config, family, knob),
-                    "",
-                    pareto_table(
-                        aggregate(records, cases, config, family, kind, knob),
-                        knob,
-                    ),
-                ]
+            out += [
+                "",
+                "## %s, %s, scv sweep" % (config, family),
+                "",
+                pareto_table(aggregate(records, cases, config, family)),
+            ]
     corpus, per_case = floor_tables(records, cases, configs)
     out += [
         "",
@@ -677,7 +561,7 @@ def tables(records, cases, configs):
         "",
         corpus,
         "",
-        "## Per case: default vs floor vs floor+cap at equal max and equal p99",
+        "## Per case: default vs floor",
         "",
         per_case,
     ]
