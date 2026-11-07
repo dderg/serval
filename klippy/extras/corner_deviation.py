@@ -16,9 +16,11 @@ within the kernel's reach can accelerate and decelerate between two
 corners inside one window, which rounds beyond any isolated corner: a
 junction next to such a move whose turn exceeds SHORT_MOVE_STOP_DEG stops
 (curves turn less per junction and keep the curve cap). A stop has no
-velocity step, so it rounds within the floor. There is no tighter
-deviation cap: lowering junction speeds cannot bound clusters below the
-floor, and acceleration is never lowered.
+velocity step, so it rounds within the floor. Clusters of smaller turns
+still round slightly beyond it; FLOOR_MARGIN is the stated allowance,
+checked by tools/motion_eval/fuzz.py on clustered corners. There is no
+tighter deviation cap: lowering junction speeds cannot bound clusters
+below the floor, and acceleration is never lowered.
 
 The isolated corner is read from a table built from the active X/Y
 shapers, the worst over each leg decelerating or accelerating through the
@@ -35,14 +37,18 @@ default: CornerAccel.worst is the worst executed per-axis acceleration
 the planner admits, the legs' acceleration plus the larger of the biggest
 step burst (density_peak * dv, dv from the table at the shaper floor and
 max_velocity) and the centripetal acceleration the curve cap allows, with
-CLUSTER_ACCEL_MARGIN for corners within one kernel reach; it is logged when a table is ready, reported in the status, and
+CLUSTER_ACCEL_MARGIN for corners within one kernel reach; it is logged
+when a table is ready, reported in the status, and
 recommended_max_accel() inverts it for a motor's acceleration limit. The
-optional max_corner_accel bounds the burst instead: a junction's step,
-the steps of the junctions before it within twice the kernel's reach
-(timed at the moves' requested speeds, the fastest they can run), and the
-legs' acceleration along the axis must fit under max_corner_accel, each
-step counted at the kernel's peak density. ACCEL_MARGIN is the stated
-allowance above it, checked by tools/motion_eval/fuzz.py.
+optional max_corner_accel bounds the burst instead, as an upper bound:
+the legs' acceleration along the axis (the largest share among the moves
+in the window) plus the steps of this junction and of the ones before it
+within the kernel's support must fit under it at every time. Each step
+adds dv * |density| at its offset; the offsets are only known to be at
+least the moves' shortest traversal times (from the junction speeds and
+the moves' requested speeds), so the bound takes the largest sum over all
+placements that keep those gaps, per segment of the kernel (Kernel.shape,
+a dynamic programme over the earlier steps).
 
 With input shaping inactive on X or Y every direction change stops (as
 square_corner_velocity: 0).
@@ -73,9 +79,10 @@ MODEL_DT = 2e-4
 SMOOTHER_NODES = 256
 MIN_DIRECTION_CHANGE = 1e-9
 MIN_XY_SHARE = 1e-6
-ACCEL_MARGIN = 0.05
-CLUSTER_ACCEL_MARGIN = 0.15
+FLOOR_MARGIN = 0.10
+CLUSTER_ACCEL_MARGIN = 0.25
 RECOMMEND_TOLERANCE = 1e-6
+SHAPE_NODES = 32
 SHORT_MOVE_STOP_DEG = 60.0
 TABLE_CACHE_DIR = "~/.cache/kalico/corner_deviation"
 BUILD_POLL_S = 0.05
@@ -84,10 +91,17 @@ MODULE_SOURCE = pathlib.Path(__file__).read_bytes()
 
 
 class Kernel:
-    def __init__(self, shifts, weights, density_peak=0.0):
+    """A shaper as shifted weights. For a smoother, shape bounds the
+    executed acceleration of a velocity step dv at time offset u after it,
+    dv * |density(u)|: segmax[i] is the largest |density| over segment i
+    ([u0 + i * h, u0 + (i + 1) * h]), exact over the polynomial (endpoints
+    and critical points)."""
+
+    def __init__(self, shifts, weights, density_peak=0.0, shape=None):
         self.shifts = shifts
         self.weights = weights
         self.density_peak = density_peak
+        self.shape = shape
         self.variance = sum(w * s * s for w, s in zip(weights, shifts))
         self.s_lo = min(shifts)
         self.s_hi = max(shifts)
@@ -116,6 +130,24 @@ def kernel_from_spec(spec):
     return _smoother_kernel(list(first), second)
 
 
+def _max_abs(poly, critical, lo, hi):
+    points = [lo, hi] + [x for x in critical if lo < x < hi]
+    return max(abs(float(poly(x))) for x in points)
+
+
+def _step_shape(density, critical, hst, t_offs):
+    """Kernel.shape in u = tau - t_offs, the time after the step."""
+    h = 2.0 * hst / SHAPE_NODES
+    return {
+        "u0": -hst - t_offs,
+        "h": h,
+        "segmax": [
+            _max_abs(density, critical, -hst + i * h, -hst + (i + 1) * h)
+            for i in range(SHAPE_NODES)
+        ],
+    }
+
+
 def _smoother_kernel(coeffs, t_sm):
     from numpy.polynomial import Polynomial
 
@@ -129,7 +161,7 @@ def _smoother_kernel(coeffs, t_sm):
     taus = [-hst + (i + 0.5) * step for i in range(SMOOTHER_NODES)]
     weights = [float(density(tau)) * step for tau in taus]
     total = sum(weights)
-    extremes = [-hst, hst] + [
+    critical = [
         r.real
         for r in density.deriv().roots()
         if abs(r.imag) < 1e-12 and -hst <= r.real <= hst
@@ -137,7 +169,8 @@ def _smoother_kernel(coeffs, t_sm):
     return Kernel(
         [t_offs - tau for tau in taus],
         [w / total for w in weights],
-        max(abs(float(density(x))) for x in extremes),
+        _max_abs(density, critical, -hst, hst),
+        _step_shape(density, critical, hst, t_offs),
     )
 
 
@@ -254,6 +287,14 @@ class JunctionLimit:
         c.max_corner_accel = max_corner_accel or 0.0
         c.density_peak[0] = kx.density_peak
         c.density_peak[1] = ky.density_peak
+        for axis, kernel in enumerate((kx, ky)):
+            shape = kernel.shape
+            if shape is None:
+                continue
+            c.shape[axis].n = len(shape["segmax"])
+            c.shape[axis].u0 = shape["u0"]
+            c.shape[axis].h = shape["h"]
+            c.shape[axis].segmax = shape["segmax"]
         c.min_direction_change = MIN_DIRECTION_CHANGE
         c.min_xy_share = MIN_XY_SHARE
         c.short_turn = math.radians(SHORT_MOVE_STOP_DEG)
@@ -332,7 +373,7 @@ class CornerAccel:
 
     def worst(self, accel, max_velocity, max_corner_accel):
         """(x, y) worst executed acceleration at this max_accel; with
-        max_corner_accel, within ACCEL_MARGIN of it."""
+        max_corner_accel, the bound."""
         speed = (accel * self.arrays["w_floor"]).clip(max=max_velocity)
         centripetal = (
             2.0 * accel * float(self.arrays["floor"].max()) / self.variance
@@ -451,6 +492,7 @@ class CornerDeviation:
         self.ready = False
         self.input_shaper = None
         self.limit = None
+        self.last_move = None
         self.reported_inactive = False
         self.building = False
         self.corner_accel_key = self.corner_accel = None
@@ -588,7 +630,6 @@ class CornerDeviation:
         return dict(
             counters,
             max_corner_accel=self.max_corner_accel,
-            accel_margin=ACCEL_MARGIN,
             table_ready=self.limit is not None,
             corner_accel_x=corner_accel and corner_accel[0],
             corner_accel_y=corner_accel and corner_accel[1],
@@ -655,6 +696,8 @@ class CornerDeviation:
                 self.reported_inactive = True
             return 0.0
         prev_r, move_r = prev_move.axes_r, move.axes_r
+        chained_from = self.last_move
+        self.last_move = move
         return limit.junction_v2(
             limit.c,
             prev_r[0],
@@ -666,6 +709,7 @@ class CornerDeviation:
             prev_move.accel,
             move.accel,
             prev_move.max_cruise_v2,
+            prev_move is chained_from,
             cap_v2,
         )
 

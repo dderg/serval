@@ -99,7 +99,7 @@ def test_max_corner_accel_holds_the_burst():
     _, peaks = _run(
         "[corner_deviation]\nmax_corner_accel: %r\n" % (BOUND,), text, start
     )
-    assert max(peaks.values()) <= BOUND * (1.0 + cd.ACCEL_MARGIN)
+    assert max(peaks.values()) <= BOUND
 
 
 @pytest.mark.parametrize(

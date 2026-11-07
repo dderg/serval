@@ -30,8 +30,6 @@ import sys
 
 import numpy as np
 
-from klippy.extras.corner_deviation import ACCEL_MARGIN
-
 from . import accel_residual, evaluate
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -553,16 +551,14 @@ def generate(out):
                 % (name, peaks["x"], peaks["y"], STRESS_PEAK_EXPECTED)
             )
         bounded_limit = (
-            BOUNDED_CORNER_ACCEL
-            * (1.0 + ACCEL_MARGIN)
-            / raw.capture["settings"]["max_accel"]
+            BOUNDED_CORNER_ACCEL / raw.capture["settings"]["max_accel"]
         )
         if name in BOUNDED_FILES and (
             max(peaks["x"], peaks["y"]) > bounded_limit
         ):
             raise AssertionError(
                 "%s: executed peak x %.3f y %.3f of max_accel, above the"
-                " %.4f that max_corner_accel %d plus ACCEL_MARGIN allows"
+                " %.4f that max_corner_accel %d allows"
                 % (
                     name,
                     peaks["x"],

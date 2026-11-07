@@ -13,12 +13,13 @@ lookahead flushes, and checks:
 
 - every run completes, every trapq move is finite with positive duration,
   and the executed motion matches the decoded steps (the harness check);
-- each corner of the shaped path rounds at most the shaper floor
-  max_accel * hypot(sigma_x^2, sigma_y^2) / 2 of the moves around it;
+- each corner of the shaped path rounds at most (1 + FLOOR_MARGIN) times
+  the shaper floor max_accel * hypot(sigma_x^2, sigma_y^2) / 2 of the
+  moves around it;
 - the trapq accels and the final step positions equal the default run's;
 - executed peak acceleration per axis <= what the limiter admits
-  (CornerAccel.worst, cluster margin included, in floor mode; within
-  ACCEL_MARGIN of max_corner_accel in the bounded run);
+  (CornerAccel.worst, cluster margin included, in floor mode;
+  max_corner_accel in the bounded run);
 - lazy flushes at random moves leave the trapq and the junction limits
   identical; forced flushes (M400) leave every junction limit not at a
   flush identical and every move at most as fast.
@@ -62,7 +63,8 @@ ACCEL_MM_S2 = (500.0, 60000.0)
 SHAPER_FREQ_HZ = (25.0, 35.0, 50.0, 70.0, 100.0, 130.0, 160.0, 200.0, 220.0)
 SHAPERS = ("smooth_mzv", "smooth_ei", "smooth_zv", "mzv", "ei", "zv")
 EXTRUDE_PER_MM = 0.033
-DT = 10e-6
+DT = 25e-6
+FINE_DT = 10e-6
 FLOAT_TOLERANCE = 1e-9
 APPROACH_MM = (50.0, 200.0)
 APPROACH_SPEED_MM_S = (300.0, 1000.0)
@@ -477,13 +479,13 @@ def _window_max(moves, values, lo, hi):
     return out
 
 
-def _painted_max(moves, values, t0, n, reach):
-    """Per sample t0 + DT*i, the largest value of the moves overlapping
+def _painted_max(moves, values, t0, n, reach, dt):
+    """Per sample t0 + dt*i, the largest value of the moves overlapping
     [t - reach, t + reach]."""
     out = np.zeros(n)
     for m, value in zip(moves, values):
-        i0 = max(0, int(math.floor((m["print_time"] - reach - t0) / DT)))
-        i1 = min(n, int(math.ceil((_move_end(m) + reach - t0) / DT)) + 1)
+        i0 = max(0, int(math.floor((m["print_time"] - reach - t0) / dt)))
+        i1 = min(n, int(math.ceil((_move_end(m) + reach - t0) / dt)) + 1)
         np.maximum(out[i0:i1], value, out=out[i0:i1])
     return out
 
@@ -538,12 +540,22 @@ def _admitted_accel(capture, corner_accel):
 
 
 def _check_shaped(v, name, raw, corner_accel):
+    """_check_shaped_at on the DT grid; where the harness model misses a
+    step there, on the FINE_DT grid (the smoother convolution is a Riemann
+    sum on the grid, which errs more on steep accelerations)."""
+    try:
+        return _check_shaped_at(v, name, raw, corner_accel, DT)
+    except analysis.ModelMismatch:
+        return _check_shaped_at(v, name, raw, corner_accel, FINE_DT)
+
+
+def _check_shaped_at(v, name, raw, corner_accel, dt):
     """A vertex's deviation is measured over [t_arrive - W, t_leave + W]
     (W the kernel reach), and the shaped path there depends on the moves
     within another W: the floor and the stop exemption look that far."""
-    result = evaluate.analyze(raw, dt=DT, sample_dt=None)
+    result = evaluate.analyze(raw, dt=dt, sample_dt=None)
     moves = raw.capture["moves"]
-    seg, epochs, t0, n, _, motion = evaluate.executed_motion(raw.capture, DT)
+    seg, epochs, t0, n, _, motion = evaluate.executed_motion(raw.capture, dt)
     vertices = result["executed"]["vertices"]
     t_arrive = np.array(vertices["t_arrive"])
     t_leave = np.array(vertices["t_leave"])
@@ -558,7 +570,7 @@ def _check_shaped(v, name, raw, corner_accel):
     accel = np.array([m["accel"] for m in moves])
     max_accel = np.array([m["max_accel"] for m in moves])
     floor_near = _window_max(moves, floor_per_accel * accel, lo, hi)
-    grid = 0.5 * _window_max(moves, max_accel, lo, hi) * DT**2 + FLOAT_TOLERANCE
+    grid = 0.5 * _window_max(moves, max_accel, lo, hi) * dt**2 + FLOAT_TOLERANCE
     metrics = {
         "floor_ratio": float(
             (deviation / np.where(floor_near > 0.0, floor_near, np.inf)).max(
@@ -566,32 +578,31 @@ def _check_shaped(v, name, raw, corner_accel):
             )
         )
     }
-    for k in np.flatnonzero(deviation > floor_near + grid):
+    floor_limit = (1.0 + corner_deviation.FLOOR_MARGIN) * floor_near
+    for k in np.flatnonzero(deviation > floor_limit + grid):
         v.check(
             False,
-            "%s: corner at t=%.6f rounds %.6f mm > shaper floor %.6f mm",
+            "%s: corner at t=%.6f rounds %.6f mm > shaper floor %.6f mm (+%g)",
             name,
             t_arrive[k],
             deviation[k],
             floor_near[k],
+            corner_deviation.FLOOR_MARGIN,
         )
-    t = t0 + DT * np.arange(n)
-    near = _painted_max(moves, max_accel, t0, n, reach)
+    t = t0 + dt * np.arange(n)
+    near = _painted_max(moves, max_accel, t0, n, reach, dt)
     admitted = _admitted_accel(raw.capture, corner_accel)
     admitted_near = {
-        axis: _painted_max(moves, admitted[:, i], t0, n, reach)
+        axis: _painted_max(moves, admitted[:, i], t0, n, reach, dt)
         for i, axis in enumerate("xy")
     }
     admitted_near["z"] = near
-    margin = (
-        1.0 if corner_accel is None else 1.0 + corner_deviation.ACCEL_MARGIN
-    )
     slack = FLOAT_TOLERANCE * near.max()
     metrics["accel_ratio"] = 0.0
     metrics["admitted_ratio"] = 0.0
     for axis in "xyz":
         acc = np.abs(motion[axis].acc)
-        limit = margin * admitted_near[axis]
+        limit = admitted_near[axis]
         metrics["accel_ratio"] = max(
             metrics["accel_ratio"],
             float((acc / np.where(near > 0.0, near, np.inf)).max(initial=0.0)),

@@ -45,6 +45,7 @@ def _limiter(cache_dir):
     limiter.toolhead = _Toolhead()
     limiter.corner_accel_key = limiter.corner_accel = None
     limiter.limit = None
+    limiter.last_move = None
     limiter.building = False
     limiter.generation = 0
     limiter.reported_inactive = False
