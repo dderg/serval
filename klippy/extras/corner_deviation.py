@@ -47,6 +47,7 @@ TABLE_THETA_DEG = 7.5
 TABLE_W_POINTS = 48
 TABLE_W_MIN = 1e-5
 TABLE_W_MAX = 2.0
+TABLE_THETA_SLICE = 7
 MODEL_DT = 2e-4
 SMOOTHER_NODES = 256
 MIN_DIRECTION_CHANGE = 1e-9
@@ -164,7 +165,11 @@ class Cell:
 
 
 class CornerTable:
-    def __init__(self, kx, ky):
+    """Built in slices; pause() runs between them so the reactor keeps
+    serving heaters, clock sync and the API while a new shaper's table is
+    computed (several seconds for low-frequency smoothers)."""
+
+    def __init__(self, kx, ky, pause):
         import numpy as np
 
         alphas = np.radians(np.arange(0.0, 90.0 + 1e-9, TABLE_ALPHA_DEG))
@@ -175,15 +180,17 @@ class CornerTable:
         )
         reach = max(abs(kx.s_lo), abs(kx.s_hi), abs(ky.s_lo), abs(ky.s_hi))
         t = np.arange(-reach - MODEL_DT, reach + 2 * MODEL_DT, MODEL_DT)
-        legs = [
-            [
-                np.stack(
-                    [_leg_offsets(np, t, k, w, side, s) for k in (kx, ky)], -1
+        legs = []
+        for side in (-1.0, 1.0):
+            legs.append([])
+            for s in (1.0, -1.0):
+                legs[-1].append(
+                    np.stack(
+                        [_leg_offsets(np, t, k, w, side, s) for k in (kx, ky)],
+                        -1,
+                    )
                 )
-                for s in (1.0, -1.0)
-            ]
-            for side in (-1.0, 1.0)
-        ]
+                pause()
         isotropic = kx.shifts == ky.shifts and kx.weights == ky.weights
         g, floor = [], []
         for alpha in alphas:
@@ -192,7 +199,15 @@ class CornerTable:
             if isotropic and g:
                 g.append(g[0])
             else:
-                dev = _corner_deviation(np, u1, u2, legs)
+                devs = []
+                for lo in range(0, len(thetas), TABLE_THETA_SLICE):
+                    devs.append(
+                        _corner_deviation(
+                            np, u1, u2[lo : lo + TABLE_THETA_SLICE], legs
+                        )
+                    )
+                    pause()
+                dev = np.concatenate(devs)
                 g.append(np.maximum.accumulate(dev, axis=-1))
             share_x = np.maximum(abs(u1[0]), np.abs(u2[:, 0]))
             share_y = np.maximum(abs(u1[1]), np.abs(u2[:, 1]))
@@ -209,6 +224,7 @@ class CornerTable:
                 cf = min(float(floor[a][b]) for a, b in corners)
                 row.append(Cell(cg, cf, self.max_w(cg, cf)))
             self.cells.append(row)
+            pause()
         self.alpha_step = math.radians(TABLE_ALPHA_DEG)
         self.theta_step = math.radians(TABLE_THETA_DEG)
         self.alpha_max = len(alphas) - 2
@@ -351,11 +367,13 @@ class CornerDeviation:
         if kx is None or ky is None:
             self.kernels = self.table = None
             return
-        self.kernels = (kx, ky)
-        self.table = CornerTable(kx, ky)
+        self.kernels = self.table = None
+        reactor = self.printer.get_reactor()
+        table = CornerTable(kx, ky, lambda: reactor.pause(reactor.monotonic()))
         self.window = max(kx.s_hi, ky.s_hi, -kx.s_lo, -ky.s_lo)
         self.variance = max(kx.variance, ky.variance)
         self.smoothing = bool(kx.density_peak or ky.density_peak)
+        self.kernels, self.table = (kx, ky), table
         self.reported_inactive = False
 
     def get_status(self, eventtime):
