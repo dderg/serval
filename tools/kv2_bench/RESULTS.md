@@ -443,3 +443,57 @@ The voron ×15 rows were judged by the live-trapq replay, extruder included. All
 - **Single-fit bounds are loose.** On a 34-minute run, one linear F407↔F401 clock fit absorbs no crystal wander. The "MCU lateness" term and bound of the single-fit check therefore grow to 36–101 µs (p50 13–31 µs).
 - **Windowed fits restore the short-run numbers.** Refitting capture vs live tap per 10 s window gives MCU lateness p50 0.52 µs, p99 1.4–1.5 µs, max 8.9–9.9 µs, the same as the short runs. The tight capture-vs-replay result with the same windows is below.
 - **Tight capture-vs-replay check.** With 10 s windows, capture vs replay is 28.27 / 27.57 / 28.18 / 26.56 µs (row order of the table). The bounds are 25 µs + window MCU lateness max + 0.1 µs = 34.36 / 34.99 / 34.71 / 34.00 µs, so all four pass with the tight bound too. Next tool change: make `replay.judge` and `compare.timeline` use windowed fits for runs longer than a few minutes; today the single fit only gives the loose bound above.
+
+## Frozen clock estimate → `Timer too close`: root cause and fix (kv2/clocksync)
+
+### Reproduction (session `~/bench/kv2/20261107-172702`, kv2/main 713e70c9d, 1 cpu / 1500 MHz)
+
+Each trial is a klippy start plus 15 s, either printing arcs ×15 or idle, interleaved, 30 of each. The probe records every clocksync sample: send and receive time, MCU clock, decision, and the estimate after it.
+
+| kind | runs | `Timer too close` | connect calibration ≈ −1 % (−9.6k…−10.6k ppm) | calibration range |
+|---|---|---|---|---|
+| owner_like_cd print | 30 | 1 | 6 | −10366 … +2241 ppm |
+| owner_like print | 30 | 4 | 7 | −10626 … +2012 ppm |
+| owner_like idle | 30 | 0 | 4 | −10627 … +2156 ppm |
+
+- **Rates.** 17 of 90 starts (19 %) calibrate about 1 % low, independent of corner_deviation and of motion. Of the 13 low starts that printed, 5 shut down with `Timer too close` (8 % of printing starts).
+- **Every low start freezes.** It ignores 9–10 consecutive samples, then resets.
+- **Every failure had a low start.**
+
+### Mechanism
+
+`ClockSync.connect` seeds its regression with the `get_uptime` reply, then adds 8 `get_clock` samples 50 ms apart with DECAY = 1/30, so the uptime anchor keeps ~76 % weight.
+
+- The uptime reply follows identify and its latency is not checked. In every −1 % start it read the MCU clock 3.2–3.6 ms later than the 8 `get_clock` samples' line predicts. In good starts the gap is −0.1…−0.6 ms.
+- Over the 0.36 s calibration span that skews the slope to −1 %. A least-squares fit over the 8 samples alone gives −157 and +1130 ppm for the two worst runs.
+- A low estimate predicts too small a clock, so every later sample appears to lead the prediction. `_handle_clock` ignores leading samples for 10 s after the last accepted one, on the assumption that they were sent late. The estimate therefore freezes.
+- est_print_time falls 0.93 % behind the MCU: ~93 ms at 10 s. The serialqueue releases step messages late, and the MCU shuts down with `Timer too close` 9.8–10.7 s after the last accepted sample.
+- All four earlier bench failures fit: 83.18–83.24 MHz estimates, frozen, failing at about 10 s.
+
+Klipper master and Kalico main have the same code: no upstream fix to port.
+
+### Fix (kv2/clocksync, 2 commits on 713e70c9d)
+
+`klippy/clocksync.py` +68 −30, `klippy/mcu.py` ±1, test +150, data +100.
+
+1. **Calibration.** `get_uptime` only extends the clock to 64 bits. The estimate is seeded with a least-squares fit of the 8 `get_clock` samples, whose round trips are measured.
+2. **Outlier filter.** A sample may lead the prediction by at most its own round trip, because a late send reads the clock at most that late. A larger lead means the estimate is wrong: the prediction variance is reset and the sample is used instead of ignored. A low estimate can no longer freeze.
+3. **Loud failure.** A calibration more than 5 % off CLOCK_FREQ raises `ClockSyncError` ("MCU clock measured at … Hz, …% off its CLOCK_FREQ …"). `mcu.py` turns it into an MCU connect error. 5 % leaves room for internal RC oscillators, which run ±1–3 %.
+4. **SecondarySync** inherits connect and `_handle_clock`, so it gets all three; covered by a test.
+
+**Tests.** `test/test_clocksync.py` replays the recorded failing start, `test/data/clocksync_late_uptime.json` (late uptime, 8 calibration samples, 10 samples after), into ClockSync. All four tests fail on the old code:
+- calibration −10428 ppm vs the bound of 3000;
+- prediction error growing to 10.3 ms vs the bound of 5 ms;
+- no `ClockSyncError`.
+
+They pass on the fix: calibration +1063 ppm, prediction error ≤ 1.55 ms, a clear error for an 8 %-off clock, secondary MCU within bound. Gate: `PASS kv2-gate: pytest[230 passed, 4 xfailed]`.
+
+### Verification (session `~/bench/kv2/20261107-180624`, kv2/clocksync 82f014e79, same trial set)
+
+| kind | runs | `Timer too close` | calibration range | samples ignored after connect |
+|---|---|---|---|---|
+| owner_like_cd print | 30 | 0 | −567 … +1306 ppm | 0 |
+| owner_like print | 30 | 0 | −501 … +1316 ppm | 0 |
+| owner_like idle | 30 | 0 | −558 … +1366 ppm | 0 |
+
+Worst estimate error after connect over all 90 starts: max 1411 ppm, median 594 ppm. The baseline was max 9904 ppm, median 1464 ppm, with 17 runs ignoring up to 10 samples.
