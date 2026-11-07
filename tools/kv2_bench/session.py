@@ -182,6 +182,9 @@ def gate_g1_g2(
             gate = "g1" if config == "default" and name != "arcs" else "g2"
             if gate in gates or "g2" in gates:
                 s.run(gate, "kv2", kv2, config, load_program(name), tap=True)
+        if config != "default" and "g2" in gates:
+            dense = load_program("voron_top_layers", DENSE["voron_top_layers"])
+            s.run("g2", "kv2", kv2, config, dense, tap=True)
 
 
 def gate_g3(s: Session, kv2: str, configs: set[str]) -> None:
@@ -247,6 +250,9 @@ def main() -> None:
         default="default,owner_like,owner_like_cd",
         help="configs the g1-g3 rows run with",
     )
+    parser.add_argument(
+        "--g3-configs", help="configs of the g3 rows (default: --configs)"
+    )
     parser.add_argument("--kv2-ref", default="kv2/main")
     parser.add_argument("--upstream-ref", default=UPSTREAM)
     parser.add_argument("--lock-timeout", type=float, default=7200.0)
@@ -283,7 +289,11 @@ def main() -> None:
             if gates & {"g1", "g2"}:
                 gate_g1_g2(session, kv2, gates, configs)
             if "g3" in gates:
-                gate_g3(session, kv2, configs)
+                gate_g3(
+                    session,
+                    kv2,
+                    set((args.g3_configs or args.configs).split(",")),
+                )
             if "g4" in gates:
                 gate_g4(session, kv2, upstream)
         except BaseException as exc:
