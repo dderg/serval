@@ -1,11 +1,15 @@
-"""Run klippy in batch mode and record what the planner produced.
+"""Run klippy (batch mode, or live with a real MCU) and record what the
+planner produced.
 
-Invoked as a subprocess by run.py:
+Invoked as a subprocess by run.py and live.py:
     python -m tools.motion_eval.capture CAPTURE_JSON <klippy args...>
 
 ToolHead is wrapped (not modified) so that every move appended to the
-toolhead trapq, the stepper geometry and the input shaper parameters are
-written to CAPTURE_JSON once klippy exits.
+toolhead trapq, the stepper geometry, the input shaper parameters in force
+for each move and the junction limiter's results are written to
+CAPTURE_JSON once klippy exits. MOTION_EVAL_LAZY_FLUSH_AT (comma separated
+add_move indices) makes the lookahead flush lazily after those moves, as it
+does when its flush time runs out. MOTION_EVAL_EXIT ends a live run.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 import collections
 import json
 import math
+import os
 import sys
 import time
 
@@ -138,10 +143,18 @@ class Capture:
         self.moves = []
         self.linear_maps = {}
         self.steppers = None
-        self.shaper = None
+        self.shapers = []
         self.settings = None
         self.undrained_serial = False
         self.history = None
+        self.added = 0
+        self.junctions = []
+        self.flushes = []
+        self.lazy_flush_at = frozenset(
+            int(i)
+            for i in os.environ.get("MOTION_EVAL_LAZY_FLUSH_AT", "").split(",")
+            if i
+        )
 
     def attach(self, toolhead_obj):
         self.toolhead = toolhead_obj
@@ -159,8 +172,11 @@ class Capture:
 
         def flush(lazy=False):
             moves = real_flush(lazy=lazy)
+            self.flushes.append([self.added, lazy, len(moves)])
             requested.extend(
-                math.sqrt(m.max_cruise_v2) for m in moves if m.is_kinematic_move
+                (math.sqrt(m.max_cruise_v2), m.motion_eval_max_accel)
+                for m in moves
+                if m.is_kinematic_move
             )
             return moves
 
@@ -174,7 +190,8 @@ class Capture:
                         " (drip/homing move)"
                     )
                 move = dict(zip(TRAPQ_APPEND_FIELDS, args))
-                move["max_cruise_v"] = requested.popleft()
+                move["max_cruise_v"], move["max_accel"] = requested.popleft()
+                move["shaper_epoch"] = len(self.shapers) - 1
                 self.moves.append(move)
             return real_append(tq, *args)
 
@@ -189,17 +206,59 @@ class Capture:
         toolhead_obj.trapq_append = trapq_append
         toolhead_obj.set_position = set_position
         toolhead_obj.lookahead.flush = flush
-        toolhead_obj.lookahead.add_move = self._timed(
+        real_add_move = self._timed(
             toolhead_obj.lookahead.add_move, "lookahead_s"
         )
-        self.printer.register_event_handler("klippy:ready", self._time_limiter)
 
-    def _time_limiter(self):
+        def add_move(move):
+            move.motion_eval_max_accel = toolhead_obj.max_accel
+            index = self.added
+            self.added += 1
+            want_flush = real_add_move(move)
+            return want_flush or index in self.lazy_flush_at
+
+        toolhead_obj.lookahead.add_move = add_move
+        self.printer.register_event_handler("klippy:ready", self._on_ready)
+
+    def _on_ready(self):
+        self.printer.lookup_object("gcode").register_command(
+            "MOTION_EVAL_EXIT", self._cmd_exit
+        )
+        self._note_shaper()
+        shaper_obj = self.printer.lookup_object("input_shaper", None)
+        if shaper_obj is not None:
+            real_update = shaper_obj._update_input_shaping
+
+            def update_input_shaping(*args, **kwargs):
+                self.toolhead.flush_step_generation()
+                try:
+                    real_update(*args, **kwargs)
+                finally:
+                    self._note_shaper()
+
+            shaper_obj._update_input_shaping = update_input_shaping
         limiter = getattr(self.toolhead, "junction_limiter", None)
-        if limiter is not None:
-            self.toolhead.junction_limiter = self._timed(
-                limiter, "junction_limiter_s"
-            )
+        if limiter is None:
+            return
+        timed = self._timed(limiter, "junction_limiter_s")
+
+        def logged(prev_move, move, max_start_v2):
+            v2 = timed(prev_move, move, max_start_v2)
+            self.junctions.append([self.added - 1, max_start_v2, v2])
+            return v2
+
+        self.toolhead.junction_limiter = logged
+
+    def _cmd_exit(self, gcmd):
+        self.toolhead.wait_moves()
+        self.printer.request_exit("exit")
+
+    def _note_shaper(self):
+        """Start a new epoch when the shaper changed. Called after the
+        toolhead flushed every move planned under the previous one."""
+        state = _shaper_state(self.printer)
+        if not self.shapers or self.shapers[-1] != state:
+            self.shapers.append(state)
 
     def _timed(self, func, key):
         timing = self.timing
@@ -222,7 +281,6 @@ class Capture:
             "square_corner_velocity": th.square_corner_velocity,
             "minimum_cruise_ratio": th.min_cruise_ratio,
         }
-        self.shaper = _shaper_state(self.printer)
         self.steppers = {}
         for stepper in th.get_kinematics().get_steppers():
             mcu = stepper.get_mcu()
@@ -249,8 +307,6 @@ class Capture:
             )
         if not self.history.pulled_at_disconnect:
             raise UnsupportedRun("step history was not read at disconnect")
-        if _shaper_state(self.printer) != self.shaper:
-            raise UnsupportedRun("input shaper changed after motion started")
         for stepper in self.toolhead.get_kinematics().get_steppers():
             name = stepper.get_name()
             self.steppers[name]["final_mcu_position"] = (
@@ -261,7 +317,10 @@ class Capture:
         return {
             "moves": self.moves,
             "steppers": self.steppers,
-            "shaper": self.shaper,
+            "shapers": self.shapers,
+            "junctions": self.junctions,
+            "flushes": self.flushes,
+            "added_moves": self.added,
             "settings": self.settings,
             "timing": self.timing,
             "corner_deviation": None

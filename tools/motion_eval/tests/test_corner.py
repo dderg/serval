@@ -78,7 +78,7 @@ def test_executed_accel_bounded_by_configured_accel(case):
     max_accel = result["settings"]["max_accel"]
     for axis, cmd in result["commanded"]["per_axis"].items():
         executed = result["executed"]["per_axis"][axis]
-        kernel = result["shaper"][axis]["model"]
+        kernel = result["shapers"][0][axis]["model"]
         assert cmd["peak_accel_mm_s2"] <= max_accel * (1 + FLOAT_EPS)
         accel_bound = kernel["l1_norm"] * cmd["peak_accel_mm_s2"]
         jumps = cmd["total_velocity_jump_mm_s"]

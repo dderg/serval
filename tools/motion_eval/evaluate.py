@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -86,30 +87,102 @@ def kernel_support(kernels):
     )
 
 
+@dataclasses.dataclass
+class Epoch:
+    """Moves [first, last) planned under one input shaper setting, its
+    per-axis kernels, and the span of time its moves reach through them."""
+
+    kernels: dict
+    first: int
+    last: int
+    window: tuple
+
+
+def shaper_epochs(cap):
+    moves = cap["moves"]
+    epochs = []
+    first = 0
+    for i in range(1, len(moves) + 1):
+        if (
+            i < len(moves)
+            and moves[i]["shaper_epoch"] == moves[first]["shaper_epoch"]
+        ):
+            continue
+        state = cap["shapers"][moves[first]["shaper_epoch"]]
+        kernels = {
+            axis: analysis.Kernel.from_shaper(state.get(axis))
+            for axis in analysis.AXES
+        }
+        shift_lo, shift_hi = kernel_support(kernels)
+        last = moves[i - 1]
+        end = (
+            last["print_time"]
+            + last["accel_t"]
+            + last["cruise_t"]
+            + last["decel_t"]
+        )
+        epochs.append(
+            Epoch(
+                kernels,
+                first,
+                i,
+                (moves[first]["print_time"] - shift_hi, end - shift_lo),
+            )
+        )
+        first = i
+    for a, b in zip(epochs, epochs[1:]):
+        if b.window[0] < a.window[1]:
+            raise analysis.ModelMismatch(
+                "shaped motion of moves %d-%d (until %r) overlaps that of"
+                " moves %d-%d (from %r) across an input shaper change"
+                % (a.first, a.last, a.window[1], b.first, b.last, b.window[0])
+            )
+    return epochs
+
+
 def executed_motion(cap, dt):
-    """Commanded segments, per-axis kernels, sample grid start and count,
-    and the executed (shaped) motion of every axis on that grid."""
+    """Commanded segments, shaper epochs, sample grid start and count, and
+    the executed (shaped) motion of every axis on that grid. Between epochs
+    the toolhead is at rest, so each sample takes the motion of the epoch
+    whose window holds it, or the commanded position."""
     seg = analysis.Segments.from_moves(cap["moves"])
-    kernels = {
-        axis: analysis.Kernel.from_shaper(cap["shaper"].get(axis))
-        for axis in analysis.AXES
-    }
-    shift_lo, shift_hi = kernel_support(kernels)
-    t_start = seg.t0[0] - shift_hi - dt
-    n = int(math.ceil((seg.end[-1] - shift_lo + dt - t_start) / dt)) + 1
-    jump_t, jump_v = seg.velocity_jumps()
+    epochs = shaper_epochs(cap)
+    t_start = epochs[0].window[0] - dt
+    n = int(math.ceil((epochs[-1].window[1] + dt - t_start) / dt)) + 1
+    t = t_start + dt * np.arange(n)
+    pos, _, _ = seg.eval(t)
     motion = {
-        axis: analysis.executed_axis(
-            seg, kernels[axis], i, t_start, dt, n, jump_t, jump_v
+        axis: analysis.AxisMotion(
+            pos[:, i].copy(), np.zeros(n), np.zeros(n), [], []
         )
         for i, axis in enumerate(analysis.AXES)
     }
-    return seg, kernels, t_start, n, jump_v, motion
+    for epoch in epochs:
+        part = analysis.Segments.from_moves(
+            cap["moves"][epoch.first : epoch.last]
+        )
+        jump_t, jump_v = part.velocity_jumps()
+        inside = (t >= epoch.window[0]) & (t <= epoch.window[1])
+        for i, axis in enumerate(analysis.AXES):
+            m = analysis.executed_axis(
+                part, epoch.kernels[axis], i, t_start, dt, n, jump_t, jump_v
+            )
+            out = motion[axis]
+            out.pos[inside] = m.pos[inside]
+            out.vel[inside] = m.vel[inside]
+            out.acc[inside] = m.acc[inside]
+            out.jump_times.append(m.jump_times)
+            out.jumps.append(m.jumps)
+    for out in motion.values():
+        out.jump_times = np.concatenate(out.jump_times)
+        out.jumps = np.concatenate(out.jumps)
+    _, jump_v = seg.velocity_jumps()
+    return seg, epochs, t_start, n, jump_v, motion
 
 
 def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
     cap = raw.capture
-    seg, kernels, t_start, n, jump_v, motion = executed_motion(cap, dt)
+    seg, epochs, t_start, n, jump_v, motion = executed_motion(cap, dt)
     t = t_start + dt * np.arange(n)
     exec_pos = np.stack([motion[a].pos for a in analysis.AXES], axis=-1)
     exec_vel = np.stack([motion[a].vel for a in analysis.AXES], axis=-1)
@@ -147,7 +220,7 @@ def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
     steps_xyz = analysis.xyz_from_steppers(steppers, zoh)
     steps_final = analysis.xyz_from_steppers(steppers, final_stepper_pos)[0]
 
-    window = max(abs(s) for s in kernel_support(kernels)) + dt
+    window = max(abs(s) for e in epochs for s in kernel_support(e.kernels)) + dt
     exec_xy = exec_pos[:, :2]
     to_cmd = analysis.distance_to_commanded(seg, t, exec_xy, window)
     steps_to_cmd = analysis.distance_to_commanded(
@@ -173,10 +246,18 @@ def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
         "timing": cap["timing"],
         "moves_planned": len(cap["moves"]),
         "corner_deviation": cap["corner_deviation"],
-        "shaper": {
-            axis: dict(cap["shaper"].get(axis, {}), model=k.describe())
-            for axis, k in kernels.items()
-        },
+        "shapers": [
+            {
+                axis: dict(
+                    cap["shapers"][cap["moves"][e.first]["shaper_epoch"]].get(
+                        axis, {}
+                    ),
+                    model=k.describe(),
+                )
+                for axis, k in e.kernels.items()
+            }
+            for e in epochs
+        ],
         "commanded": {
             "moves": cap["moves"],
             "segments": int(len(seg.t0)),
@@ -195,6 +276,12 @@ def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
                 steps_to_cmd, t, steps_xyz[:, :2]
             ),
             "corners": corners,
+            "vertices": {
+                "t_arrive": vertices["t_arrive"].tolist(),
+                "t_leave": vertices["t_leave"].tolist(),
+                "speed_mm_s": vertices["speed"].tolist(),
+                "deviation_mm": corner_dev.tolist(),
+            },
         },
         "steppers": {
             name: dict(

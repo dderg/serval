@@ -113,7 +113,9 @@ def execute(run_):
         )
     cap = raw.capture
     std = evaluate.analyze(raw, dt=DT, sample_dt=None)
-    seg, kernels, t0, n, _, motion = evaluate.executed_motion(cap, DT)
+    seg, epochs, t0, n, _, motion = evaluate.executed_motion(cap, DT)
+    (epoch,) = epochs
+    kernels = epoch.kernels
     max_accel = cap["settings"]["max_accel"]
     vertices = seg.vertices()["t_arrive"]
     windows = oscillator.constant_velocity_windows(
