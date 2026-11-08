@@ -189,3 +189,24 @@ def test_long_runs_fit_clock_drift_per_window():
         True,
     )
     assert stats["fit_window_s"] is None
+
+
+def test_capture_cut_inside_an_edge_free_block_is_accepted(
+    tmp_path, monkeypatch
+):
+    class Channel:
+        step_ticks = np.array([10, 20], np.int64)
+
+        def step_signs(self):
+            return np.array([1, 1], np.int8)
+
+    class Events:
+        channels = [Channel()] * 4
+        truncated_tail_bytes = 3
+
+    monkeypatch.setattr(compare.capture_events, "load", lambda run_dir: Events)
+    (tmp_path / "events.bin").write_bytes(b"\x00\x00\x80\x01\x02")
+    assert compare.load_capture(tmp_path)["stepper_x"].net == 2
+    (tmp_path / "events.bin").write_bytes(b"\x00\x00\x81\x01\x02")
+    with pytest.raises(compare.CompareError, match="with edges"):
+        compare.load_capture(tmp_path)

@@ -1,5 +1,49 @@
 # kv2 on the hardware bench: results
 
+## Release candidate 7a0b875d4
+
+**Verdict: PASS.** kv2/main 7a0b875d4 passes every gate on the bench. One locked, detached session (`~/bench/kv2/20261107-214845`) ran 174 runs: G1, G2, G4, 30 trials, 90 clock trials and 4 soaks of ~34 min. Each run in it was checked by every check the harness enforces.
+
+7a0b875d4 includes:
+- the clocksync fix;
+- the C limiter with the kernel-shaped `max_corner_accel` bound;
+- cap mode removed;
+- the 60° short-move stop rule.
+
+Firmware is stock Kalico built from the same commit (`v2026.04.00-366-g7a0b875d4`). Corner tables are cached in `/home/pi/.cache/kalico/corner_deviation`, recorded in `~/kv2/.kv2-deploy.json`. `owner_like_cd_bounded` = `owner_like_cd` + `max_corner_accel: 81000`.
+
+| gate | config | result | key number |
+|---|---|---|---|
+| G1 live print | default | PASS | 2 runs, worst capture−ref 27.2 / bound 33.8 µs |
+| G2 executed = planned | default | PASS | 1 runs, worst capture−ref 1.9 / bound 27.5 µs |
+| G2 executed = planned | owner_like | PASS | 4 runs, worst capture−ref 28.7 / bound 33.7 µs |
+| G2 executed = planned | owner_like_cd | PASS | 4 runs, worst capture−ref 29.2 / bound 34.9 µs |
+| G2 executed = planned | owner_like_cd_bounded | PASS | 4 runs, worst capture−ref 29.1 / bound 33.7 µs |
+| Soak (replay judge) | owner_like_cd | PASS | 1 runs, worst capture−ref 26.9 / bound 34.9 µs |
+| Soak (replay judge) | owner_like_cd 1 cpu/1500 | PASS | 1 runs, worst capture−ref 27.2 / bound 34.7 µs |
+| Soak (replay judge) | owner_like_cd_bounded | PASS | 1 runs, worst capture−ref 27.8 / bound 34.8 µs |
+| Soak (replay judge) | owner_like_cd_bounded 1 cpu/1500 | PASS | 1 runs, worst capture−ref 27.7 / bound 34.6 µs |
+| G4 upstream identity | owner_like arcs | PASS | batch messages identical |
+| G4 upstream identity | owner_like speed_ladder | PASS | batch messages identical |
+| G4 upstream identity | owner_like voron_top_layers | PASS | batch messages identical |
+| Trials arcs_x30 1 cpu/1500 | owner_like_cd (cold table cache) | PASS | 0/1 failed, lateness p99 11.1 ms max 11.2 ms |
+| Trials arcs_x30 1 cpu/1500 | owner_like | PASS | 0/10 failed, lateness p99 35.4 ms max 53.5 ms |
+| Trials arcs_x30 1 cpu/1500 | owner_like_cd_bounded | PASS | 0/10 failed, lateness p99 26.7 ms max 28.4 ms |
+| Trials arcs_x30 1 cpu/1500 | owner_like_cd (warm table cache) | PASS | 0/9 failed, lateness p99 10.0 ms max 10.1 ms |
+| Clock trials 1 cpu/1500 | owner_like_cd-print | PASS | 0/30 failed, calibration -471…+1331 ppm |
+| Clock trials 1 cpu/1500 | owner_like-print | PASS | 0/30 failed, calibration -452…+1232 ppm |
+| Clock trials 1 cpu/1500 | owner_like-idle | PASS | 0/30 failed, calibration -491…+1344 ppm |
+| Restoration | serval state | PASS | differences [] |
+
+How each row is judged:
+- **G1 / G2.** Batch-mode reference on this box; event capture; net steps exact, every step paired, capture−reference ≤ 25 µs + the run's MCU lateness + 0.1 µs; the MCU executed every step of the live queue_step tap. Single-pass rows: the live tap equals the batch step sequence. The voron ×15 rows use the live-trapq replay.
+- **G4.** corner_deviation off: upstream 1ee39ff2c and kv2 send identical decoded host→MCU message streams in batch mode, produce identical captured step sequences on the bench, and the upstream rows pass the same G2 checks.
+- **Trials.** 1 cpu / 1500 MHz, interleaved; lateness is the probe's timer lateness during the print. The first owner_like_cd trial built its corner table from an empty cache.
+- **Clock trials.** Klippy start + 15 s at 1 cpu / 1500 MHz. Calibration is the frequency estimate after connect, relative to CLOCK_FREQ. No sample was ignored after connect.
+- **Soaks.** Replay judge, extruder included, 10 s windowed clock fit, all four checks. Replay = tap at 72.9–73.3 % of steps on the identical clock, max 25.00 µs; MCU lateness max 9.5–9.8 µs.
+
+One harness fix during the analysis. The capture of `g2 owner_like speed_ladder` ends 9 bytes into an anchor-only block (mask 0x80), where the capture stop cut the stream. The analyzer used to refuse any cut tail. It now accepts a cut block only when the block carries no edges, and fails otherwise (`compare.load_capture`, with a test). Re-analyzed, that run passes all checks: capture−reference 28.73 µs against a bound of 33.69 µs, and step counts equal to the plan.
+
 ## Conclusion
 
 - **G1 pass.** kv2 klippy runs live on the Pi 5 against stock Kalico F401 firmware built from kv2. It printed `speed_ladder.gcode` and the corpus cases `voron_top_layers` and `arcs` with no error, on the default, owner-like and owner-like + `[corner_deviation]` configs.

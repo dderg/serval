@@ -48,11 +48,20 @@ class CompareError(RuntimeError):
 
 
 def load_capture(run_dir: Path) -> dict[str, Steps]:
+    """Every captured step. Stopping the capture can cut the stream inside
+    its last block; that is harmless only when the cut block carries no
+    edges (its mask names no channel, e.g. an anchor-only block), so any
+    other truncation fails."""
     events = capture_events.load(run_dir)
     if events.truncated_tail_bytes:
-        raise CompareError(
-            f"event capture has {events.truncated_tail_bytes} truncated bytes"
-        )
+        data = (run_dir / "events.bin").read_bytes()
+        mask = data[len(data) - events.truncated_tail_bytes]
+        if mask & capture_events.CHANNEL_BITS:
+            raise CompareError(
+                f"event capture ends in a cut block of "
+                f"{events.truncated_tail_bytes} bytes with edges "
+                f"(mask {mask:#04x})"
+            )
     return {
         name: Steps(channel.step_ticks.astype(np.int64), channel.step_signs())
         for name, channel in zip(CHANNELS, events.channels)

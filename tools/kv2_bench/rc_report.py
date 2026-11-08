@@ -55,9 +55,9 @@ def g4_row(
     by_program = collections.defaultdict(dict)
     for r in records:
         if (
-            r["config"] == "owner_like"
+            r.get("config") == "owner_like"
             and r.get("tap")
-            and r["gate"] in ("g2", "g4")
+            and r.get("gate") in ("g2", "g4")
         ):
             by_program[r["program"]].setdefault(r["tree"], r)
     from . import compare
