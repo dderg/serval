@@ -2,7 +2,7 @@
 
 ## Release candidate 7a0b875d4
 
-**Verdict: PASS.** kv2/main 7a0b875d4 passes every gate on the bench. One locked, detached session (`~/bench/kv2/20261107-214845`) ran 174 runs: G1, G2, G4, 30 trials, 90 clock trials and 4 soaks of ~34 min. Each run in it was checked by every check the harness enforces.
+**Verdict: PASS.** kv2/main 7a0b875d4 passes every gate on the bench. One locked, detached session (`~/bench/kv2/20261107-214845`) ran 142 runs: G1 2, G2 13, G4 3, 30 trials, 90 clock trials and 4 soaks of ~34 min. Each run in it was checked by every check the harness enforces.
 
 7a0b875d4 includes:
 - the clocksync fix;
