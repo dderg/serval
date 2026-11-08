@@ -32,6 +32,9 @@ class Drive:
     t0: float
     n: int
     reference: np.ndarray
+    z: np.ndarray
+    extruder_steps: tuple | None
+    support: tuple
     windows: list
     step_times: tuple
     step_positions: tuple
@@ -88,27 +91,42 @@ def _check_corexy(steppers):
             )
 
 
+def held_steps(st, trace):
+    """(step times, positions before the first and after each step)."""
+    after = analysis.stepper_positions_mm(st, trace)
+    return (
+        trace.clocks / st["clock_freq"],
+        np.concatenate([[st["commanded_pos_at_mcu_zero"]], after]),
+    )
+
+
 def from_gcode(text, printer_cfg, pole_pairs) -> Drive:
-    raw = accel_residual.replay(text, printer_cfg)
+    return from_run(
+        accel_residual.replay(text, printer_cfg), printer_cfg, pole_pairs
+    )
+
+
+def from_run(raw, printer_cfg, pole_pairs) -> Drive:
     cap = raw.capture
     steppers = cap["steppers"]
     _check_corexy(steppers)
     seg, epochs, t_start, n, _, motion = evaluate.executed_motion(cap, DT)
     settle = int(math.ceil(SETTLE_S / DT))
-    xy = np.stack([motion["x"].pos, motion["y"].pos], axis=-1)
-    reference = np.concatenate([xy, np.repeat(xy[-1:], settle, axis=0)])
+    xyz = np.stack([motion[a].pos for a in "xyz"], axis=-1)
+    xyz = np.concatenate([xyz, np.repeat(xyz[-1:], settle, axis=0)])
     support = (
         min(evaluate.kernel_support(e.kernels)[0] for e in epochs),
         max(evaluate.kernel_support(e.kernels)[1] for e in epochs),
     )
-    step_times, step_positions = [], []
-    for name in MOTORS:
-        st, trace = steppers[name], raw.traces[name]
-        after = analysis.stepper_positions_mm(st, trace)
-        step_times.append(trace.clocks / st["clock_freq"])
-        step_positions.append(
-            np.concatenate([[st["commanded_pos_at_mcu_zero"]], after])
-        )
+    step_times, step_positions = zip(
+        *(held_steps(steppers[name], raw.traces[name]) for name in MOTORS)
+    )
+    extruders = cap.get("extruders", {})
+    if len(extruders) > 1:
+        raise DriveError("more than one extruder: %s" % sorted(extruders))
+    extruder_steps = None
+    for name, st in extruders.items():
+        extruder_steps = held_steps(st, raw.traces[name])
     distances = {
         float(accel_residual.config_option(printer_cfg, m, "rotation_distance"))
         for m in MOTORS
@@ -118,7 +136,10 @@ def from_gcode(text, printer_cfg, pole_pairs) -> Drive:
     return Drive(
         t0=t_start - DT,
         n=n + settle,
-        reference=reference,
+        reference=xyz[:, :2],
+        z=xyz[:, 2],
+        extruder_steps=extruder_steps,
+        support=support,
         windows=oscillator.constant_velocity_windows(seg, support),
         step_times=tuple(step_times),
         step_positions=tuple(step_positions),

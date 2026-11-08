@@ -39,15 +39,18 @@ class Electrical:
 
     @classmethod
     def from_parts(cls, parts: parts_mod.Parts) -> Electrical:
-        m = parts.motor
+        return cls.of(parts.motor, parts.driver)
+
+    @classmethod
+    def of(cls, m: parts_mod.Motor, driver: parts_mod.Driver) -> Electrical:
         return cls(
             resistance=m.resistance,
             inductance=m.inductance,
             torque_constant=m.torque_constant,
             pole_pairs=m.pole_pairs,
             detent_torque=m.detent_torque,
-            supply_voltage=parts.driver.supply_voltage,
-            current_amplitude=parts.driver.current_amplitude,
+            supply_voltage=driver.supply_voltage,
+            current_amplitude=driver.current_amplitude,
             rotor_inertia=m.rotor_inertia,
         )
 

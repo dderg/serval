@@ -106,10 +106,18 @@ HISTORY_END_CLOCK = (1 << 63) - 1
 
 class StepHistory:
     def __init__(self, steppers):
-        self.steppers = steppers
-        self.entries = {s.get_name(): [] for s in steppers}
-        self.newest_first_clock = {s.get_name(): -1 for s in steppers}
+        self.steppers = []
+        self.entries = {}
+        self.newest_first_clock = {}
         self.pulled_at_disconnect = False
+        for stepper in steppers:
+            self.add(stepper)
+
+    def add(self, stepper):
+        name = stepper.get_name()
+        self.steppers.append(stepper)
+        self.entries[name] = []
+        self.newest_first_clock[name] = -1
 
     def pull(self, *_flush_times):
         for stepper in self.steppers:
@@ -143,6 +151,8 @@ class Capture:
         self.moves = []
         self.linear_maps = {}
         self.steppers = None
+        self.extruders = {}
+        self.extruder_steppers = []
         self.shapers = []
         self.settings = None
         self.undrained_serial = False
@@ -231,6 +241,9 @@ class Capture:
         self.printer.lookup_object("gcode").register_command(
             "MOTION_EVAL_EXIT", self._cmd_exit
         )
+        for _, extruder in self.printer.lookup_objects("extruder"):
+            for es in getattr(extruder, "extruder_steppers", ()):
+                self._add_extruder_stepper(es.stepper)
         corner_deviation = self.printer.lookup_object("corner_deviation", None)
         self.reactor_meter = ReactorMeter(
             self.printer.get_reactor(),
@@ -260,6 +273,19 @@ class Capture:
             return v2
 
         self.toolhead.junction_limiter = logged
+
+    def _add_extruder_stepper(self, stepper):
+        mcu = stepper.get_mcu()
+        self.history.add(stepper)
+        self.extruder_steppers.append(stepper)
+        self.extruders[stepper.get_name()] = {
+            "oid": stepper.get_oid(),
+            "mcu": mcu.get_name(),
+            "clock_freq": mcu.get_constant_float("CLOCK_FREQ"),
+            "step_dist": stepper.get_step_dist(),
+            "invert_dir": bool(stepper.get_dir_inverted()[0]),
+            "commanded_pos_at_mcu_zero": stepper.mcu_to_commanded_position(0),
+        }
 
     def _cmd_exit(self, gcmd):
         self.toolhead.wait_moves()
@@ -325,10 +351,17 @@ class Capture:
                 stepper.get_mcu_position()
             )
             self.steppers[name]["step_history"] = self.history.entries[name]
+        for stepper in self.extruder_steppers:
+            name = stepper.get_name()
+            self.extruders[name]["final_mcu_position"] = (
+                stepper.get_mcu_position()
+            )
+            self.extruders[name]["step_history"] = self.history.entries[name]
         limiter = self.printer.lookup_object("corner_deviation", None)
         return {
             "moves": self.moves,
             "steppers": self.steppers,
+            "extruders": self.extruders,
             "shapers": self.shapers,
             "junctions": self.junctions,
             "flushes": self.flushes,

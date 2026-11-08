@@ -132,3 +132,106 @@ int ps_run(const struct ps_system *sys, struct ps_state *st, double dt,
     }
     return 0;
 }
+
+struct ps_extruder {
+    struct ps_motor motor;
+    double inertia, lever, stiffness, time_constant, max_rate;
+};
+
+struct ps_extruder_state {
+    double theta, omega, e_out;
+    double current[2];
+};
+
+/* One extruder: rotor driven by its motor against the filament spring
+ * (stiffness, N/m of compression lever * theta - e_out), the melt
+ * draining the compression with time_constant at most max_rate (m/s of
+ * filament). motor.ideal holds the rotor on the command. Per sample
+ * writes e_out, load angle, its largest magnitude and the filament
+ * force. */
+int ps_extruder_run(const struct ps_extruder *ex, struct ps_extruder_state *st,
+                    double dt, int substeps, int n_samples, const double *cmd,
+                    const double *cmd_rate, double *e_out, double *delta,
+                    double *delta_absmax, double *force)
+{
+    const struct ps_motor *mo = &ex->motor;
+    double p = mo->pole_pairs;
+    for (int s = 0; s < n_samples; s++) {
+        double absmax = 0.0, f = 0.0;
+        for (int sub = 0; sub < substeps; sub++) {
+            long k = (long)s * substeps + sub;
+            if (mo->ideal) {
+                st->omega = (cmd[k + 1] - cmd[k]) / (p * dt);
+                st->theta = cmd[k + 1] / p;
+            } else {
+                double lead = mo->lead_time * (cmd_rate[k] - p * st->omega);
+                double tau = motor_step(mo, st->current, p * st->theta,
+                                        st->omega, cmd[k] + lead, dt);
+                f = ex->stiffness * (ex->lever * st->theta - st->e_out);
+                st->omega += dt * (tau - f * ex->lever) / ex->inertia;
+                st->theta += dt * st->omega;
+            }
+            double rate = (ex->lever * st->theta - st->e_out) / ex->time_constant;
+            st->e_out += dt * clamp(rate, ex->max_rate);
+            double d = fabs(cmd[k + 1] - p * st->theta);
+            if (d > absmax)
+                absmax = d;
+        }
+        long end = (long)(s + 1) * substeps;
+        e_out[s] = st->e_out;
+        delta[s] = cmd[end] - p * st->theta;
+        delta_absmax[s] = absmax;
+        force[s] = ex->stiffness * (ex->lever * st->theta - st->e_out);
+    }
+    return 0;
+}
+
+/* Spread volume dv[i] (mm^3) evenly over the grid cells whose centres lie
+ * within width[i] / 2 of the segment (x[i], y[i]) - (x[i+1], y[i+1]); a
+ * footprint that catches no centre goes to the nearest cell. Returns -1
+ * if a footprint leaves the grid. */
+int ps_deposit(double *grid, int nx, int ny, double x0, double y0, double dx,
+               int n, const double *x, const double *y, const double *dv,
+               const double *width)
+{
+    for (int i = 0; i + 1 < n; i++) {
+        if (dv[i] <= 0.0)
+            continue;
+        double ax = x[i], ay = y[i], bx = x[i + 1], by = y[i + 1];
+        double r = 0.5 * width[i];
+        double ex = bx - ax, ey = by - ay, len2 = ex * ex + ey * ey;
+        int i0 = (int)floor((fmin(ax, bx) - r - x0) / dx);
+        int i1 = (int)ceil((fmax(ax, bx) + r - x0) / dx);
+        int j0 = (int)floor((fmin(ay, by) - r - y0) / dx);
+        int j1 = (int)ceil((fmax(ay, by) + r - y0) / dx);
+        if (i0 < 0 || j0 < 0 || i1 >= nx || j1 >= ny)
+            return -1;
+        long count = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            double h = pass ? dv[i] / (count * dx * dx) : 0.0;
+            for (int j = j0; j <= j1; j++) {
+                double cy = y0 + (j + 0.5) * dx;
+                for (int ii = i0; ii <= i1; ii++) {
+                    double cx = x0 + (ii + 0.5) * dx;
+                    double u = len2 > 0.0
+                        ? ((cx - ax) * ex + (cy - ay) * ey) / len2 : 0.0;
+                    u = u < 0.0 ? 0.0 : (u > 1.0 ? 1.0 : u);
+                    double qx = ax + u * ex - cx, qy = ay + u * ey - cy;
+                    if (qx * qx + qy * qy > r * r)
+                        continue;
+                    if (pass)
+                        grid[(long)j * nx + ii] += h;
+                    else
+                        count++;
+                }
+            }
+            if (!pass && !count) {
+                int ci = (int)floor((0.5 * (ax + bx) - x0) / dx);
+                int cj = (int)floor((0.5 * (ay + by) - y0) / dx);
+                grid[(long)cj * nx + ci] += dv[i] / (dx * dx);
+                break;
+            }
+        }
+    }
+    return 0;
+}

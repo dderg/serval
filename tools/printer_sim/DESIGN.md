@@ -7,22 +7,55 @@ change ring, bulge or skip" can be answered without the owner's printer.
 The chain is:
 
 ```
-gcode -> klippy (motion_eval capture) -> step stream per motor
+gcode -> klippy (motion_eval capture) -> step streams (X, Y and extruder)
       -> stepper + driver (2) -> rotor -> belts, carriage, gantry, toolhead (1)
-      -> nozzle path -> [extruder + melt (3)] -> bead deposition, height field (4)
+      -> nozzle path
+      -> extruder stepper -> filament + melt -> flow out of the nozzle (3)
+      -> bead along the nozzle path, per-layer height field (4)
+      -> wall / corner / width / shift / size metrics, PNG renders
 ```
 
-Phase 1 (this commit) is modules 1 and 2, with validation tests and an
-end-to-end table. Modules 3 and 4 are specified here and not built yet.
-Module 5, validation, is a rule rather than a module: no number below is
-claimed unless an analytic case behind it passes.
+Phase 1 built modules 1 and 2; phase 2 built 3 and 4, the metrics and the
+renders. Module 5, validation, is a rule rather than a module: no number
+below is claimed unless an analytic case behind it passes.
 
-Code: `parts.py` (parts list), `mechanics.py` (module 1), `motor.py`
-(module 2, analytic side), `kernel.c` + `native.py` + `sim.py`
-(integration), `drive.py` (gcode to commands), `report.py` (end-to-end).
-Tests are in `tests/`. Run them with
-`PYTHONPATH=. uv run pytest tools/printer_sim/tests` and the table with
-`PYTHONPATH=. uv run python -m tools.printer_sim.report`.
+Code:
+
+| file | role |
+|---|---|
+| `parts.py` | parts list |
+| `mechanics.py` | module 1 |
+| `motor.py` | module 2, analytic side |
+| `extrusion.py` | module 3 |
+| `deposition.py` | module 4 |
+| `surface.py` | metrics |
+| `render.py` | PNGs |
+| `kernel.c` + `native.py` + `sim.py` | integration and rasterization |
+| `drive.py` | klippy capture to commands |
+| `gcodemoves.py` | slicer tags, matched to the planned moves |
+| `gcodegen.py` | the test prints |
+| `printjob.py` | one print end to end |
+| `report.py` | phase-1 table |
+| `printcompare.py` | phase-2 table |
+
+Tests are in `tests/`. Commands:
+
+```
+PYTHONPATH=. uv run pytest tools/printer_sim/tests
+PYTHONPATH=. uv run python -m tools.printer_sim print <gcode> --parts <cfg> --printer <printer.cfg> [--out DIR]
+PYTHONPATH=. uv run python -m tools.printer_sim.report
+PYTHONPATH=. uv run python -m tools.printer_sim.printcompare
+```
+
+The `print` command writes `report.json`, `wall.png` and `top.png`. It
+needs:
+
+- the first G0/G1 to give X, Y and Z, which is the start position;
+- `;TYPE:WALL-OUTER` and `;LAYER:` tags (what `gcodegen` writes);
+- even layers and convex outer walls, for the corner metric.
+
+`motion_eval.capture` now also records the extruder's step stream
+(`capture["extruders"]`).
 
 ## Inputs
 
@@ -229,49 +262,69 @@ and cached by source hash), because the hot spot was measured:
 | Python loop (a throwaway timing script, 4 DOF) | 7.4 µs | 3.0 s | ~45 min of one core |
 | C kernel | — | 0.06 s | 71 s wall with 6 jobs, klippy replays included |
 
-## Module 3 (planned): extrusion
+## Module 3: extrusion
 
-The extruder stepper is module 2 again, through the gear ratio
-(rotation_distance 22.68, 50:10). It drives filament length e_m.
+- **Extruder rotor.** The motor of module 2 (LDO-36STH20 pancake, 0.5 A,
+  24 V) drives the rotor through lever = rotation_distance / gear_ratio /
+  2π (filament per radian; CW2 22.68 at 50:10). Its command is the
+  extruder's recorded step stream, so Kalico's pressure advance and its
+  `pressure_advance_smooth_time` smoothing are already in it.
+- **Filament and melt.** They form one spring compressed by
+  c = u − e_out. Its stiffness is k = back_pressure · A_f / τ, where
+  back_pressure is the steady filament force per unit volumetric flow.
+- **Nozzle.** It passes filament at ė_out = c / τ, capped at
+  max_flow / A_f. With the rotor on its command this is exactly the
+  first-order lag pressure advance assumes:
 
-- Solid filament between the gear and the melt is a spring
-  k_f = E·A/L_f (PLA 8.66 kN·L_f⁻¹). It is far stiffer than the melt, per
-  printer-params §5.
-- The melt chamber stores compliance C, and the nozzle passes
-  Q = p / R_h. Together they give the first-order model Klipper's
-  pressure advance assumes:
+$$u = e_{out} + \tau\,\dot e_{out}$$
 
-$$e_{cmd} = e_{out} + K_{PA}\,\dot e_{out},\qquad K_{PA} = R_h C$$
+  Serval's `flow_metric.melted` makes the same lag (re-implemented, not
+  imported).
+- **Rotor load.** The filament force k·c loads the rotor. When the rotor
+  cannot follow, it slips like an XY motor (pole slips, load angle).
+- **Integration.** C (`ps_extruder_run`), on the XY grid.
+- **Defaults.** The planning config's `pressure_advance` is set to the
+  parts' τ (0.03 s). back_pressure (1 N per mm³/s) and the pancake's
+  inertia are assumptions, flagged in the parts files.
 
-  This is the same discretization as serval's `flow_metric.melted`
-  (re-implemented, not imported). The volumetric flow out is
-  Q = A_f ė_out.
-- The melt limit is the hotend's maximum flow (Revo 13–32 mm³/s at
-  0.4 mm). It caps Q, and the excess raises pressure, which raises the
-  extruder load torque F·r_gear and can slip the extruder in module 2.
-- Validation: steady flow equals the commanded flow; the step response
-  time constant equals K_PA; the volume integral is conserved.
+## Module 4: deposition
 
-## Module 4 (planned): deposition
+**Bead.** The nozzle path (module 1) is cut into pieces at least half a
+cell long. Each piece carries the volume the nozzle passed meanwhile
+(module 3), so its bead is A = V / L in cross-section, flattened to the
+layer height h. Width:
 
-- **Bead.** Along the simulated nozzle path with speed v, the bead
-  cross-section is A = Q / v. Width follows the stadium model
-  A = (w − h)h + πh²/4 at layer height h.
-- **Height field.** Accumulated per layer on a 10–20 µm grid. Each
-  sample's volume Q·dt is spread over its stadium footprint.
-- **Metrics**, computed against the slicer's intended outline (the
-  commanded path offset by half the nominal width):
-  - wall waviness: amplitude and spatial frequency along the arc length;
-  - corner bulge and under-fill: edge excursion near vertices;
-  - line-width variation;
-  - layer shift: edge offset between layers;
-  - dimensional error.
-- **Renders.** The outer-wall offset unrolled over (s, z), which reads
-  like a ringing-tower photo, and a shaded top surface, both as PNG.
-- **Validation:** deposited volume equals extruded volume to float
-  precision; a straight line at constant flow gives constant width; a
-  synthetic sinusoidal path offset of known amplitude and wavelength is
-  recovered by the waviness metric.
+$$w = A/h$$
+
+w is capped at max_width (1 mm) where the nozzle all but stops, giving a
+blob taller than h.
+
+**Rasterization.** `ps_deposit` spreads each piece's volume evenly over
+the grid cells (20 µm) within w/2 of it.
+
+- A line's cross-section comes out half-elliptical: 4h/π at the centre,
+  with edges at ±w/2.
+- The grid holds exactly the volume laid.
+- Layers are assigned by the executed z and laid at their nominal height,
+  with no interaction between layers.
+- The top surface is, per cell, the base of the highest covering layer
+  plus that layer's bead.
+
+**Metrics** (`surface.py`), against the slicer's intent: the commanded
+outer-wall line plus w_nominal/2.
+
+| metric | definition |
+|---|---|
+| Ghosting | On every straight outer wall, with corner zones of two widths cut off: the nozzle's normal offset n·(p − a), resampled every 10 µm and linearly detrended. Amplitude √2·rms; spatial frequency from the Hann-windowed spectrum peak. |
+| Line width | w = flow / (speed · h) along the same walls: mean, relative std, p1/p99. |
+| Layer shift / size error | Per layer, the walls' mean edge offsets fit a translation plus a uniform outline offset. Layer shift is the largest translation from layer 0; size error is twice the mean outline offset. |
+| Corner bulge / under-fill | On every fifth layer and the top, within 1.5 mm of each outer vertex: material outside the intended outline (bulge, mm³), and uncovered cells of the outer bead's band × h (under-fill). An exact capsule bead already rounds a 90° corner. |
+
+**Renders.**
+
+- `wall.png`: the outer edge offset (bead width included) unrolled along
+  the perimeter versus height.
+- `top.png`: the shaded surface height relative to the nominal top.
 
 ## Module 5: validation
 
@@ -289,7 +342,14 @@ $$e_{cmd} = e_{out} + K_{PA}\,\dot e_{out},\qquad K_{PA} = R_h C$$
 | slip speed lies in the voltage-limited torque bracket | `test_motor` | α·(1/f_n + L/R) speed lag |
 | a slip leaves whole electrical cycles (4 full steps) lost | `test_motor` | e⁻¹⁰ settle |
 | step command holds each step; stays within ½ step (1 near SDS-filtered reversals) of the motion | `test_drive` | stepcompress bounds |
-| bead volume conserved | module 4 | planned |
+| ideal-rotor melt equals the analytic first-order lag u = e_out + τ ė_out | `test_extrusion` | Richardson |
+| steady flow equals commanded flow with the real motor; steady force = back_pressure · flow | `test_extrusion` | 1e-3 |
+| flow never exceeds the hotend cap | `test_extrusion` | exact |
+| net volume out equals the filament commanded, up to the detent's static error | `test_extrusion` | asin(T_d/KI)/p |
+| deposited volume equals the volume the nozzle passed | `test_deposition` | 1e-12 |
+| steady straight line has width flow/(v h) | `test_deposition` | one cell |
+| feed step: width follows the analytic first-order transient with τ | `test_deposition` | one cell + footprint blur |
+| injected sinusoid A sin(2πft) reads back as ghosting A at f/v | `test_deposition` | 1/(πN) bias, half a frequency bin |
 
 ## Not modeled, so it still needs hardware
 
@@ -318,8 +378,24 @@ $$e_{cmd} = e_{out} + K_{PA}\,\dot e_{out},\qquad K_{PA} = R_h C$$
 - **Air drag and cable chain or umbilical forces.**
 - **The accelerometer's own mount and its 3.2 kHz sampling.** The sim
   reports the sensor coordinate directly.
-- **Z, the bed, the extruder, melt and deposition.** Modules 3 and 4 are
-  planned.
+- **Z and the bed.** Z moves are taken as executed; the bed is flat and
+  rigid.
+- **Extrusion.**
+  - The melt is linear, while real polymer melts shear-thin: R_h falls
+    with flow, so the right pressure advance changes with speed.
+  - No temperature or heater limits. The hotend's flow limit is a hard
+    cap, not melting capacity.
+  - No die swell, no gear slip on the filament, no grinding, and no
+    Bowden tube.
+  - back_pressure, which sets the extruder load, is assumed.
+- **Deposition.**
+  - Beads do not interact: no spreading into neighbours, no squish
+    against the previous layer, no sag, no surface tension, no cooling
+    shrink.
+  - Each layer is laid at its nominal height, so under- or
+    over-extrusion does not propagate up the part.
+  - Oozing in travel is only what the melt lag passes; there is no
+    stringing, no wipe and no retraction physics.
 
 ## Validating against the real printer (once)
 
@@ -340,9 +416,15 @@ $$e_{cmd} = e_{out} + K_{PA}\,\dot e_{out},\qquad K_{PA} = R_h C$$
    compared with the sim's first pole slip at that ACCEL, validates the
    torque curve where it matters. One run at a lowered run_current gives
    a second point.
-5. **Prints, for modules 3 and 4.** A ringing tower and a corner test.
-   Compare measured wave amplitude, wavelength and corner bulge with the
-   deposition metrics.
+5. **Prints, for modules 3 and 4.** Print `gcodegen`'s tower and cube
+   with the same printer.cfg (`printcompare` writes them next to each
+   result). Compare with the metrics:
+   - wall waviness and wavelength, from a profilometer or a raking-light
+     photo;
+   - corner bulge;
+   - size, measured with calipers against `size_error_mm`;
+   - the predicted under-extrusion at wall ends from
+     `pressure_advance_smooth_time` (phase 2 results).
 
 ## Phase 1 results
 
@@ -429,3 +511,72 @@ The same A-48 V runs driven by the continuous executed motion (`--continuous`): 
 | stress_floor | 2.8 / 12.8 / 14.1 | 4.3 / 21.7 / 25.6 | 40 / 40 |
 | stress_bounded | 2.8 / 12.8 / 14.1 | 4.4 / 21.5 / 25.3 | 40 / 40 |
 | stress_bounded81000 | 2.8 / 12.8 / 14.1 | 4.3 / 21.7 / 25.6 | 40 / 40 |
+
+## Phase 2 results
+
+Prints from `gcodegen`:
+
+- **cube**: 20 mm, 30 layers, 3 perimeters, outer walls 300 mm/s, inner
+  walls and ±45° fill 450 mm/s (25% sparse, solid bottom and top).
+- **tower**: a hollow 40 mm square, 45 layers, 2 perimeters, outer walls
+  300 / 450 / 600 mm/s in thirds of the height.
+
+All prints use 0.2 mm layers and 0.45 mm lines, and owner.cfg at
+50 000 mm/s² with smooth_mzv 200/130 Hz. Pressure advance is 0.03 s (the
+parts' melt τ) at Kalico's default 0.04 s smoothing. Settings: scv 50,
+`[corner_deviation]` default (floor), `max_corner_accel: 81000`, scv 5.
+Renders and per-run reports are under
+`tools/printer_sim/.build/prints/<print>/<parts>/<setting>/` (`wall.png`,
+`top.png`, `report.json`, plus the gcode and printer.cfg used).
+
+| print | parts | setting | print time s | ghosting µm median / max by outer-wall speed | corner bulge / under-fill mm³ (mean) | line width rel. std | layer shift mm | size error mm | slips A / B / E |
+|---|---|---|---|---|---|---|---|---|---|
+| cube | A-48 V | scv50 | 54.03 | 300 mm/s: 2.7 / 4.9 | 0.0275 / 0.0115 | 0.070 | 0.000 | -0.019 | 0 / 0 / 0 |
+| cube | A-48 V | floor | 55.00 | 300 mm/s: 3.3 / 5.0 | 0.0282 / 0.0114 | 0.071 | 0.000 | -0.019 | 0 / 0 / 0 |
+| cube | A-48 V | bounded81000 | 55.00 | 300 mm/s: 3.3 / 5.0 | 0.0282 / 0.0114 | 0.071 | 0.000 | -0.019 | 0 / 0 / 0 |
+| cube | A-48 V | scv5 | 56.01 | 300 mm/s: 1.6 / 4.3 | 0.0340 / 0.0148 | 0.081 | 0.000 | -0.022 | 0 / 0 / 0 |
+| cube | B-48 V | scv50 | 54.03 | lost steps: laid 707 mm outside the part | — | — | — | — | 12561 / 10289 / 0 |
+| cube | B-48 V | floor | 55.00 | lost steps: laid 593 mm outside the part | — | — | — | — | 12926 / 10025 / 0 |
+| cube | B-48 V | bounded81000 | 55.00 | lost steps: laid 593 mm outside the part | — | — | — | — | 12926 / 10025 / 0 |
+| cube | B-48 V | scv5 | 56.01 | lost steps: laid 470 mm outside the part | — | — | — | — | 12186 / 10080 / 0 |
+| tower | A-48 V | scv50 | 44.15 | 300 mm/s: 2.0 / 3.5, 450 mm/s: 2.1 / 3.4, 600 mm/s: 1.8 / 3.6 | 0.0514 / 0.0061 | 0.069 | 0.001 | -0.015 | 0 / 0 / 0 |
+| tower | A-48 V | floor | 44.86 | 300 mm/s: 2.2 / 3.7, 450 mm/s: 2.5 / 4.9, 600 mm/s: 2.1 / 3.9 | 0.0524 / 0.0061 | 0.069 | 0.001 | -0.015 | 0 / 0 / 0 |
+| tower | A-48 V | bounded81000 | 44.86 | 300 mm/s: 2.2 / 3.7, 450 mm/s: 2.5 / 4.9, 600 mm/s: 2.1 / 3.9 | 0.0524 / 0.0061 | 0.069 | 0.001 | -0.015 | 0 / 0 / 0 |
+| tower | A-48 V | scv5 | 45.29 | 300 mm/s: 1.1 / 2.5, 450 mm/s: 1.5 / 4.4, 600 mm/s: 2.0 / 3.7 | 0.0572 / 0.0076 | 0.074 | 0.001 | -0.017 | 0 / 0 / 0 |
+| tower | B-48 V | scv50 | 44.15 | lost steps: laid 238 mm outside the part | — | — | — | — | 2995 / 1710 / 0 |
+| tower | B-48 V | floor | 44.86 | lost steps: laid 437 mm outside the part | — | — | — | — | 2810 / 1577 / 0 |
+| tower | B-48 V | bounded81000 | 44.86 | lost steps: laid 460 mm outside the part | — | — | — | — | 3020 / 1829 / 0 |
+| tower | B-48 V | scv5 | 45.29 | lost steps: laid 318 mm outside the part | — | — | — | — | 3006 / 1437 / 0 |
+
+Reading it:
+
+- **B-48 V loses thousands of steps on every print**, as in phase 1: its
+  1.78 kg Y mass cannot be accelerated at 50 000 mm/s² by 0.389 N·m.
+  This is a consistency check against the parts set, not a planner
+  result.
+- **Under A-48 V nothing slips**, the extruder included (load angle ≤ 61°
+  at 54 mm³/s on the tower's 600 mm/s band).
+- **Ghosting is 1–5 µm under every setting.** The shaper sits exactly on
+  this model's modes. scv 5 rings least (1.1–2.0 µm median) and corner
+  deviation most (2.1–3.3 µm), and the max differs by at most 1.5 µm.
+- **Print time.** corner_deviation costs 1.6% (tower) and 1.8% (cube)
+  against scv 50, and scv 5 costs 2.6% / 3.7%.
+- **Corner bulge.** scv 5 bulges more at corners (0.034 against 0.028 mm³
+  on the cube, 0.057 against 0.051–0.052 on the tower) because it stops
+  longer in each corner while the melt keeps flowing.
+- **floor and max_corner_accel 81000 plan identically here.** Junction
+  speeds are equal on every move (checked); 90° corners at 300–600 mm/s
+  never reach the 81 000 bound.
+- **The dominant wall artifact is not ringing.** It is under-extrusion at
+  every wall's ends: the edge sits up to 60 µm inside over 5–8 mm, and
+  line widths reach p1 0.34 mm against 0.45 mm. The extruder's motion is
+  smoothed over `pressure_advance_smooth_time` (0.04 s, 12–24 mm at
+  these speeds) while XY follows the 5 ms shaper, so flow lags the
+  nozzle's acceleration and deceleration. It is the same under every
+  corner setting.
+- **Lowering that smoothing to 0.005 s is worse in this model.** The
+  pressure-advance spikes then exceed the pancake motor: 1838 extruder
+  pole slips on the tower, and 30% of the volume missing. So the
+  prediction to check on the printer is: wall-end under-extrusion at
+  0.04 s, and extruder skipping well below it.
+

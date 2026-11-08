@@ -59,6 +59,34 @@ class Driver:
 
 
 @dataclasses.dataclass(frozen=True)
+class Extrusion:
+    """Module 3. lever: metres of filament per radian of the extruder
+    rotor (printer.cfg rotation_distance / gear_ratio). The melt drains its
+    compression with time_constant (what pressure advance compensates); in
+    steady flow the filament pushes with back_pressure * flow (N per
+    mm^3/s), so the filament-plus-melt spring is back_pressure *
+    filament_area / time_constant. max_flow caps the volumetric flow
+    (mm^3/s); max_bead_width caps the bead where the nozzle all but stops."""
+
+    motor: Motor
+    driver: Driver
+    damping_ratio: float
+    lever: float
+    filament_area: float
+    time_constant: float
+    back_pressure: float
+    max_flow: float
+    max_bead_width: float
+
+    @property
+    def stiffness(self) -> float:
+        """N per metre of filament compression."""
+        return (
+            self.back_pressure * self.filament_area / self.time_constant * 1e3
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class Local:
     """Interpretation B: the toolhead sits on a local spring (hotend and
     mount compliance, gantry twist) on a belt-driven carriage, and the
@@ -82,6 +110,7 @@ class Parts:
     resonance_x: float
     resonance_y: float
     damping_ratio: float
+    extrusion: Extrusion | None
     sources: dict
 
     @property
@@ -153,19 +182,7 @@ def load(path, printer_cfg) -> Parts:
             " distance %r); the corexy model needs identical A/B drives"
             % (printer_cfg, steps, distances)
         )
-    if steps[0] % 4:
-        raise PartsError("full_steps_per_rotation %r is not 4k" % (steps[0],))
-    motor = Motor(
-        resistance=_float(cfg, "motor", "resistance", path),
-        inductance=_float(cfg, "motor", "inductance", path),
-        holding_torque=_float(cfg, "motor", "holding_torque", path),
-        rated_current=_float(cfg, "motor", "rated_current", path),
-        detent_torque=cfg.getfloat("motor", "detent_torque"),
-        rotor_inertia=_float(cfg, "motor", "rotor_inertia", path),
-        full_steps_per_rotation=int(steps[0]),
-    )
-    if motor.detent_torque < 0.0:
-        raise PartsError("%s: detent_torque must not be negative" % (path,))
+    motor = _motor(cfg, "motor", path, steps[0])
     toolhead_mass = _optional(cfg, "toolhead", "mass", path)
     belt_stiffness = _optional(cfg, "belts", "stiffness", path)
     gantry_mass = _optional(cfg, "gantry", "mass", path)
@@ -213,5 +230,69 @@ def load(path, printer_cfg) -> Parts:
             printer_cfg, "input_shaper", "shaper_freq_y"
         ),
         damping_ratio=_float(cfg, "calibration", "damping_ratio", path),
+        extrusion=_extrusion(cfg, path, printer_cfg),
         sources=sources,
+    )
+
+
+def _motor(cfg, section, path, full_steps):
+    if full_steps % 4:
+        raise PartsError("full_steps_per_rotation %r is not 4k" % (full_steps,))
+    detent = cfg.getfloat(section, "detent_torque")
+    if detent < 0.0:
+        raise PartsError(
+            "%s: [%s] detent_torque must not be negative" % (path, section)
+        )
+    return Motor(
+        resistance=_float(cfg, section, "resistance", path),
+        inductance=_float(cfg, section, "inductance", path),
+        holding_torque=_float(cfg, section, "holding_torque", path),
+        rated_current=_float(cfg, section, "rated_current", path),
+        detent_torque=detent,
+        rotor_inertia=_float(cfg, section, "rotor_inertia", path),
+        full_steps_per_rotation=int(full_steps),
+    )
+
+
+def _gear_ratio(text):
+    if text is None:
+        return 1.0
+    ratio = 1.0
+    for pair in text.split(","):
+        driven, driver = (float(v) for v in pair.split(":"))
+        ratio *= driven / driver
+    return ratio
+
+
+def _extrusion(cfg, path, printer_cfg):
+    if not cfg.has_section("melt"):
+        return None
+    full_steps = float(
+        accel_residual.config_option(
+            printer_cfg, "extruder", "full_steps_per_rotation"
+        )
+        or KLIPPER_DEFAULT_FULL_STEPS
+    )
+    rotation_distance = _printer_option(
+        printer_cfg, "extruder", "rotation_distance"
+    )
+    ratio = _gear_ratio(
+        accel_residual.config_option(printer_cfg, "extruder", "gear_ratio")
+    )
+    diameter = _printer_option(printer_cfg, "extruder", "filament_diameter")
+    return Extrusion(
+        motor=_motor(cfg, "extruder_motor", path, full_steps),
+        driver=Driver(
+            supply_voltage=_float(
+                cfg, "extruder_driver", "supply_voltage", path
+            ),
+            run_current=_float(cfg, "extruder_driver", "run_current", path),
+        ),
+        damping_ratio=_float(cfg, "extruder_motor", "damping_ratio", path),
+        lever=rotation_distance / ratio * 1e-3 / (2.0 * math.pi),
+        filament_area=math.pi * (diameter / 2.0) ** 2,
+        time_constant=_float(cfg, "melt", "time_constant", path),
+        back_pressure=_float(cfg, "melt", "back_pressure", path),
+        max_flow=_float(cfg, "melt", "max_flow", path),
+        max_bead_width=_float(cfg, "bead", "max_width", path),
     )

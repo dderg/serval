@@ -39,6 +39,21 @@ int ps_run(const struct ps_system *sys, struct ps_state *st, double dt,
            int substeps, int n_samples, const double *cmd,
            const double *cmd_rate, double *out, double *delta,
            double *delta_absmax, double *torque, double *current);
+struct ps_extruder {
+    struct ps_motor motor;
+    double inertia, lever, stiffness, time_constant, max_rate;
+};
+struct ps_extruder_state {
+    double theta, omega, e_out;
+    double current[2];
+};
+int ps_extruder_run(const struct ps_extruder *ex, struct ps_extruder_state *st,
+                    double dt, int substeps, int n_samples, const double *cmd,
+                    const double *cmd_rate, double *e_out, double *delta,
+                    double *delta_absmax, double *force);
+int ps_deposit(double *grid, int nx, int ny, double x0, double y0, double dx,
+               int n, const double *x, const double *y, const double *dv,
+               const double *width);
 """ % {
     "dof": MAX_DOF,
     "dof2": MAX_DOF * MAX_DOF,
