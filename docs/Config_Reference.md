@@ -2262,9 +2262,16 @@ that corner already can. Acceleration is never changed.
 - While input shaping is disabled on X or Y, every change of direction
   stops, the same as `square_corner_velocity: 0`.
 
-Requires [input_shaper]. Setting `square_corner_velocity` in [printer],
-or `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=`, is an error while this
-section is present. The corner table for each shaper configuration is
+Requires [input_shaper]. Setting `square_corner_velocity` in [printer]
+is an error while this section is present. `SET_VELOCITY_LIMIT
+SQUARE_CORNER_VELOCITY=` (which slicers emit per feature from their jerk
+settings) is ignored: the command's other parameters still apply, and a
+warning naming `max_corner_accel` (the setting that limits corners) is
+shown on the console and logged once per print (again after each print
+start or `SDCARD_RESET_FILE`, which reset print_stats). The
+`square_corner_velocity` reported by the toolhead status and by
+`SET_VELOCITY_LIMIT` keeps the [printer] default (5) and is not used for
+planning. The corner table for each shaper configuration is
 computed once in a background thread (one to several seconds of CPU at
 low priority) and stored in `table_cache_dir`; later starts load it in
 milliseconds. Klipper becomes ready without waiting for it; G-code

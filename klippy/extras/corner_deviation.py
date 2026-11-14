@@ -523,23 +523,6 @@ class CornerDeviation:
         self._refresh_kernels()
         self.toolhead = self.printer.lookup_object("toolhead")
         self.toolhead.set_junction_limiter(self.junction_v2)
-        real_set_velocity_limit = gcode.register_command(
-            "SET_VELOCITY_LIMIT", None
-        )
-
-        def cmd_SET_VELOCITY_LIMIT(gcmd):
-            if gcmd.get("SQUARE_CORNER_VELOCITY", None) is not None:
-                raise gcmd.error(
-                    "SQUARE_CORNER_VELOCITY has no effect with"
-                    " [corner_deviation]"
-                )
-            real_set_velocity_limit(gcmd)
-
-        gcode.register_command(
-            "SET_VELOCITY_LIMIT",
-            cmd_SET_VELOCITY_LIMIT,
-            desc="Set printer velocity limits",
-        )
         gcode.register_command(
             "CORNER_DEVIATION_REPORT",
             self.cmd_CORNER_DEVIATION_REPORT,

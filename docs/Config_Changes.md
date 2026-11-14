@@ -8,6 +8,14 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261114: `SET_VELOCITY_LIMIT ACCEL_TO_DECEL=`, unsupported since
+20250811 and until now ignored silently, now warns once per print. Slicers
+that emit it (e.g. OrcaSlicer's "accel_to_decel") no longer set the
+cruise ratio; set `minimum_cruise_ratio` (or `MINIMUM_CRUISE_RATIO`) to
+1 - ACCEL_TO_DECEL / ACCEL to keep the old behaviour. With
+`[corner_deviation]`, `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=` is now
+ignored with a warning once per print instead of being a command error.
+
 20261021: The temporary acceleration and velocity limits applied during
 `TEST_RESONANCES` and `SHAPER_CALIBRATE` are now derived from the actual
 test sequence instead of only the configured `accel_per_hz`. Previously an

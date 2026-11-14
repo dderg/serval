@@ -2085,7 +2085,13 @@ printer config file. See the
 [printer config section](Config_Reference.md#printer) for a
 description of each parameter.
 X_VELOCITY, X_ACCEL, Y_VELOCITY, Y_ACCEL, Z_VELOCITY and Z_ACCEL are only
-available if the kinematic supports it.
+available if the kinematic supports it. ACCEL_TO_DECEL is no longer
+supported: it is ignored, with a warning once per print (use
+MINIMUM_CRUISE_RATIO = 1 - ACCEL_TO_DECEL / ACCEL). With a
+[corner_deviation](Config_Reference.md#corner_deviation) section,
+SQUARE_CORNER_VELOCITY is likewise ignored with a warning once per print,
+and the reported square_corner_velocity does not change. "Once per
+print" means once until the next print start or SDCARD_RESET_FILE.
 
 ### RESET_VELOCITY_LIMIT
 `RESET_VELOCITY_LIMIT`: This command resets the velocity limits to the values
