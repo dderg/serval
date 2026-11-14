@@ -160,6 +160,7 @@ class Capture:
         self.added = 0
         self.junctions = []
         self.flushes = []
+        self.console = []
         self.flush_work = []
         self.reactor_meter = None
         self.lazy_flush_at = frozenset(
@@ -238,9 +239,9 @@ class Capture:
         self.printer.register_event_handler("klippy:ready", self._on_ready)
 
     def _on_ready(self):
-        self.printer.lookup_object("gcode").register_command(
-            "MOTION_EVAL_EXIT", self._cmd_exit
-        )
+        gcode = self.printer.lookup_object("gcode")
+        gcode.register_output_handler(self.console.append)
+        gcode.register_command("MOTION_EVAL_EXIT", self._cmd_exit)
         for _, extruder in self.printer.lookup_objects("extruder"):
             for es in getattr(extruder, "extruder_steppers", ()):
                 self._add_extruder_stepper(es.stepper)
@@ -365,6 +366,7 @@ class Capture:
             "shapers": self.shapers,
             "junctions": self.junctions,
             "flushes": self.flushes,
+            "console": self.console,
             "flush_work": self.flush_work,
             "reactor": self.reactor_meter.summary(),
             "added_moves": self.added,
