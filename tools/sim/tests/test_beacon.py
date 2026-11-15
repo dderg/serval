@@ -131,6 +131,7 @@ def _contact_offsets(world, samples):
     return [r - p for r, p in zip(reported, physical)]
 
 
+@pytest.mark.expected_seconds(27)
 def test_contact_auto_calibrate_with_mesh_active(sim_world):
     world = sim_world(_cfg(bed_mesh=True), beacon=True)
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)

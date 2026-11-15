@@ -17,6 +17,7 @@ GCODE = (
 )
 
 
+@pytest.mark.expected_seconds(32)
 def test_voron_first_layers_print(sim_world):
     world = sim_world(
         lambda w: configs.neptune_print_config(w.h7_pty, str(w.gcode_dir)),

@@ -38,6 +38,7 @@ def read_track(world, line: int) -> int:
     return int(kv["steps"])
 
 
+@pytest.mark.expected_seconds(13)
 def test_ident_stroke_dwell_boundaries_hold_position(sim_world):
     world = sim_world(
         lambda w: configs.corexy_tracked_config(w.h7_pty, str(w.gcode_dir)),

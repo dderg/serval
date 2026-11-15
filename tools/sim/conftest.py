@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import pathlib
 import sys
 
@@ -10,6 +11,27 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.sim.world import UNBOUNDED_VTIME_SPEED, SimWorld  # noqa: E402
+
+
+def _expected_seconds(item) -> float:
+    mark = item.get_closest_marker("expected_seconds")
+    return mark.args[0] if mark else 0.0
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(items):
+    """Longest tests first, each followed by a short one: an xdist worker
+    holds the next test while it runs one (run.sh sends one at a time), so
+    the second test a long one keeps waiting must not be long too."""
+    long = sorted(
+        (item for item in items if _expected_seconds(item)),
+        key=_expected_seconds,
+        reverse=True,
+    )
+    short = [item for item in items if not _expected_seconds(item)]
+    pairs = itertools.zip_longest(long, short[: len(long)])
+    paired = [item for pair in pairs for item in pair if item is not None]
+    items[:] = paired + short[len(long) :]
 
 
 @pytest.hookimpl(hookwrapper=True)

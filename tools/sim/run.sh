@@ -227,6 +227,9 @@ case "$MODE" in
         elif [[ "${SIM_TEST_JOBS:-4}" != 0 ]]; then
             XDIST_ARGS=(-n "${SIM_TEST_JOBS:-4}")
         fi
+        # One test per dispatch keeps conftest's longest-first order: a
+        # chunk would queue a second long test behind the first.
+        [[ ${#XDIST_ARGS[@]} -gt 0 ]] && XDIST_ARGS+=(--maxschedchunk=1)
         # Every SimWorld lives in a pytest tmp dir that dies with the
         # container, taking klippy.log, the MCU logs and the structured
         # events/*.jsonl store with it. --keep-logs puts pytest's basetemp on
