@@ -2,6 +2,8 @@
 
     uv run python -m tools.kv2_bench.cube_report plans PLANS_DIR
     uv run python -m tools.kv2_bench.cube_report session SESSION_DIR PLANS_DIR
+    uv run python -m tools.kv2_bench.cube_report tables SESSION_DIR PLANS_DIR
+    uv run python -m tools.kv2_bench.cube_report stripped SESSION_DIR
 
 The span is the real-printer comparison's: from the end of the line before
 the first extrusion of layer 1 to the end of original-file line 39601
@@ -583,6 +585,50 @@ def plans_report(plans: Path) -> dict:
     return out
 
 
+def cube_phases(g: Gcode, run_dir: Path) -> list[dict]:
+    phases = live_phases(run_dir, "toolhead")
+    first = next(
+        k for k, p in enumerate(phases) if on_segment(p, segments(g)[0])
+    )
+    return phases[first:]
+
+
+def live_identity(a: list[dict], b: list[dict]) -> dict:
+    """Two live toolhead trapqs from the first travel on: phases with equal
+    geometry, accel, speed and duration, and where their start times,
+    relative to the first travel, step apart."""
+    same = sum(
+        p["start"] == q["start"] and p["axes"] == q["axes"] and p["a"] == q["a"]
+        and p["v0"] == q["v0"] and p["dur"] == q["dur"]
+        for p, q in zip(a, b)
+    )  # fmt: skip
+    offset = np.array(
+        [(p["t"] - a[0]["t"]) - (q["t"] - b[0]["t"]) for p, q in zip(a, b)]
+    )
+    steps = np.nonzero(np.abs(np.diff(offset)) > 1e-9)[0] + 1
+    return {
+        "phases": [len(a), len(b)],
+        "identical_phases": int(same),
+        "start_time_steps": [
+            {"phase": int(k), "t_from_first_travel_s": float(a[k]["t"] - a[0]["t"]),
+             "step_ms": float((offset[k] - offset[k - 1]) * 1e3)}
+            for k in steps
+        ],
+    }  # fmt: skip
+
+
+def stock_vs_stripped(session: Path) -> dict:
+    """Run C (unedited file) against run D (`_cd` file), same config."""
+    record = json.loads((session / "session.json").read_text())
+    runs = {e["run"]: e for e in record["runs"] if "run_dir" in e}
+    gs = gcodes()
+    phases = [
+        cube_phases(gs[runs[n]["gcode"]], Path(runs[n]["run_dir"]))
+        for n in ("C", "D")
+    ]
+    return live_identity(*phases)
+
+
 def session_report(session: Path, plans: Path) -> dict:
     record = json.loads((session / "session.json").read_text())
     dictionary = firmware.FW_WORKTREE / firmware.OUT / "klipper.dict"
@@ -613,6 +659,13 @@ def session_report(session: Path, plans: Path) -> dict:
             "trapq": {
                 **timing_of_durations(g, durations),
                 "whole_s": whole[1] - whole[0],
+                "max_cumulative_diff_to_plan_s": float(
+                    np.abs(
+                        np.cumsum(
+                            (durations - lines["D"])[g.start + 1 : g.end + 1]
+                        )
+                    ).max()
+                ),
             },
             "judge": verdict,
             "health": health(g, run_dir, rows),
@@ -738,7 +791,9 @@ def tables(report: dict, plans: dict) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("plans", "session", "tables"))
+    parser.add_argument(
+        "action", choices=("plans", "session", "tables", "stripped")
+    )
     parser.add_argument("dirs", type=Path, nargs="+")
     args = parser.parse_args()
     if args.action == "tables":
@@ -749,6 +804,9 @@ def main() -> None:
     if args.action == "plans":
         result = plans_report(args.dirs[0])
         path = args.dirs[0] / "plans_report.json"
+    elif args.action == "stripped":
+        result = stock_vs_stripped(args.dirs[0])
+        path = args.dirs[0] / "unedited_vs_stripped.json"
     else:
         result = session_report(args.dirs[0], args.dirs[1])
         path = args.dirs[0] / "cube_report.json"
