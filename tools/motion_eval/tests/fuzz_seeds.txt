@@ -5,3 +5,4 @@
 6
 7
 1044  # SET_INPUT_SHAPER to a longer kernel right after motion
+26  # bounded: motor above cap/1.41 at a stop junction, X and Y kernels seeing different moves
