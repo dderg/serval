@@ -18,6 +18,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+
 import tomllib
 
 ROOT_FILES = ("Cargo.toml", "Cargo.lock")
