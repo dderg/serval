@@ -38,6 +38,8 @@ proptest = "1"
 libm = { version = "0.2", default-features = false }
 host-rt = { path = "../host-rt", features = ["test-harness"] }
 motion-core = { path = ".", features = ["test-support"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [lints]
 workspace = true

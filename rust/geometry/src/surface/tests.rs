@@ -507,3 +507,51 @@ fn non_finite_segments_fail_loudly() {
         Err(SurfaceTransitionError::NonFiniteSegment)
     );
 }
+
+fn three_by_three(fade: Option<(f64, f64, f64)>, zero_reference: (f64, f64)) -> ProbedMesh {
+    ProbedMesh {
+        grid: MeshGridSpec {
+            x_min: 80.0,
+            y_min: 80.0,
+            dx: 30.0,
+            dy: 30.0,
+            nx: 3,
+            ny: 3,
+            tension: TENSION,
+        },
+        points: vec![0.10, 0.00, -0.10, 0.05, 0.02, -0.05, -0.10, 0.00, 0.10],
+        fade,
+        zero_reference,
+    }
+}
+
+#[test]
+fn an_activated_profile_is_zero_at_its_reference_point() {
+    let surface = SurfaceTransform::activate(three_by_three(None, (110.0, 110.0))).unwrap();
+    assert!(surface.mesh().sample(110.0, 110.0).z.abs() < 1e-12);
+    assert!(surface.fade().is_disabled());
+}
+
+#[test]
+fn a_zero_reference_off_the_grid_is_refused() {
+    assert_eq!(
+        SurfaceTransform::activate(three_by_three(None, (10.0, 110.0))).unwrap_err(),
+        MeshActivationError::ZeroReferenceOutside {
+            x: 10.0,
+            y: 110.0,
+            x_range: (80.0, 140.0),
+            y_range: (80.0, 140.0),
+        }
+    );
+}
+
+#[test]
+fn a_fade_band_no_wider_than_the_mesh_is_refused() {
+    let narrow_fade = Some((1.0, 1.1, 0.0));
+    let error =
+        SurfaceTransform::activate(three_by_three(narrow_fade, (110.0, 110.0))).unwrap_err();
+    assert!(
+        matches!(error, MeshActivationError::FadeBandTooNarrow { band, mesh_span } if band <= mesh_span),
+        "{error}"
+    );
+}

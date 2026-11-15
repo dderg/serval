@@ -447,3 +447,33 @@ fn the_extrusion_ratio_bound_is_the_steepest_extrusion_per_millimetre_of_travel(
     ];
     assert_eq!(extrusion_ratio_bound(&waypoints), 0.05);
 }
+
+#[test]
+fn a_trace_names_the_line_of_every_waypoint_including_the_anchor() {
+    let trace = trace_gcode(
+        "G90\nSET_KINEMATIC_POSITION X=5 Y=2\n; comment\nG1 X10 F6000\nG1 X10\nG1 Y4\n",
+        &limits(),
+        GcodePos([0.0; 3]),
+    )
+    .unwrap();
+    assert_eq!(trace.lines, vec![2, 4, 6]);
+    assert_eq!(trace.waypoints.len(), trace.lines.len());
+}
+
+#[test]
+fn a_trace_from_a_rebased_start_keeps_its_z_until_a_move_names_z() {
+    let trace = trace_gcode(
+        "G1 X10 Y10 F6000\nG91\nG1 X1\nG1 Z0.2\n",
+        &limits(),
+        GcodePos([0.0, 0.0, -0.1]),
+    )
+    .unwrap();
+    let z: Vec<f64> = trace.waypoints.iter().map(|w| w.position[2]).collect();
+    assert_eq!(z, vec![-0.1, -0.1, -0.1 + 0.2]);
+}
+
+#[test]
+fn only_errors_klippy_raises_stop_the_live_print() {
+    assert!(parse_err("G1 X10 F6000\nM84\nG1 Y5\n").stops_the_live_print());
+    assert!(!parse_err("G1 X10 F6000\nG28\n").stops_the_live_print());
+}
