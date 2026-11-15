@@ -1,5 +1,40 @@
 # kv2 on the hardware bench: results
 
+## voron0 cube A/B reproduced on the bench (2026-11-15, kv2/main 95b409a49)
+
+**Verdict: reproduced.**
+- One locked, detached session: `~/bench/kv2/20261115-100302-cube`.
+- 7 whole-file live prints of the real voron0 cube; tools `cube.py` and `cube_report.py`; config `configs/voron0.cfg`, which is voron0-motion.cfg at 16 microsteps.
+- Span: the real comparison's, from the first extrusion of layer 1 to the end of original line 39601.
+- With cap 21000 the bench measures +10.06 s / +2.58 %. The real printer measured +10.09 s / +2.58 %.
+- Per feature, the bench gives outer wall −14.4 s, inner wall +12.3 s and infill +11.9 s. The real printer gave −14.6 / +12.2 / +11.8 s.
+
+| run | setting | bench span (live trapq) | Stats print_time | capture | offline plan | real printer | Δ vs A | whole file |
+|---|---|---|---|---|---|---|---|---|
+| A | stock, mcr 0.2 | 390.54 | 390.54 | 390.51 | 390.54 | 390.52 | — | 679.39 |
+| B | stock, mcr 0.1 | 389.55 | 389.56 | 389.53 | 389.55 | | −0.25 % | 677.85 |
+| C | unedited, cap 21000 | 400.60 | 400.61 | 400.57 | 400.60 | 400.61 | +2.58 % | 696.40 |
+| D | `_cd`, cap 21000 | 400.60 | 400.61 | 400.57 | 400.60 | 400.61 | +2.58 % | 696.41 |
+| E | unedited, cap 24000 | 382.89 | 382.90 | 382.87 | 382.89 | | −1.96 % | 664.26 |
+| F | unedited, cap 28000 | 372.68 | 372.69 | 372.66 | 372.68 | | −4.57 % | 646.78 |
+| G | unedited, no cap | 365.60 | 365.60 | 365.57 | 365.60 | | −6.39 % | 635.74 |
+
+- **Judge, every run passes.**
+  - Net steps are exact.
+  - The capture equals the live queue_step tap step for step.
+  - The replay of the live trapq equals the tap, apart from one extruder ±1 reversal pair in A and one in B (listed).
+  - Capture − replay is 24.9–28.9 µs against a bound of 35.2–36.0 µs.
+  - MCU lateness max is 10.1–10.9 µs.
+  - Peak step rates are 67.9 k/s per motor, 43.6 k on E and 98.3 k aggregate.
+- **The unedited file under `[corner_deviation]` (runs C, E, F, G)** logged exactly one SCV warning and one ACCEL_TO_DECEL warning per print. Every print completed with no error.
+- **Runs C and D** produced identical live trapqs: all 117 055 phases. They differ only by 1.8 ms in PRINT_END after its M400.
+- **The live trapq equals the batch plan** to < 1 ns cumulative over the span.
+- **Health.** buffer_time stayed ≥ 1.99 s, print_stall was 0, and mcu_awake max was ≤ 0.055.
+- **Restoration.** differences `[]`.
+- **Planning does not depend on microsteps.** The batch trapq on this config equals voron0-motion.cfg's (64 µsteps) in 49 045 of 49 048 toolhead entries, exactly. The 3 that differ are PRINT_END moves after its M400.
+- **Harness fix.** `replay_capture.py` replays timed scripts. The cube's `SET_PRESSURE_ADVANCE ADVANCE=0.03` is applied at its live print_time. Without it, the extruder replay was wrong: 3.4 M steps vs 5.0 M.
+- Full method, the list of dropped and stubbed lines, and the per-feature tables are in `~/Developer/kv2-notes/bench-cube-repro.md`.
+
 ## Release candidate 7a0b875d4
 
 **Verdict: PASS.** kv2/main 7a0b875d4 passes every gate on the bench. One locked, detached session (`~/bench/kv2/20261107-214845`) ran 142 runs: G1 2, G2 13, G4 3, 30 trials, 90 clock trials and 4 soaks of ~34 min. Each run in it was checked by every check the harness enforces.
