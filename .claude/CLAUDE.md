@@ -126,7 +126,7 @@ Nested calls under a held slot do not take a second one.
 # Starting and shipping a change
 
 Start in a warm worktree: `scripts/wt.sh new <topic>` prints the path of an idle pool
-worktree (`~/Developer/serval-pool-N`, detached and clean) switched to a new branch cut
+worktree (`~/Developer/serval/.worktrees/serval-pool-N`, detached and clean) switched to a new branch cut
 from `origin/main`, creating one only when none is idle. A fresh worktree's first
 `ci.sh quick` is ~250-310 s of cold compile; a reused pool worktree with a one-crate
 edit took 131 s under load 60 (cold 310 s on the same box), and ~40 s when nothing
@@ -261,7 +261,7 @@ allowed so old ones can be dropped.
 
 `~/Developer/serval` is the shared checkout: it stays on `main` tracking `origin/main`
 and `land-pr.sh` fast-forwards it. Do not edit, commit, build or switch branches
-there; create a worktree (`git worktree add ~/Developer/serval-<topic> -b <branch>
+there; create a worktree (`git worktree add ~/Developer/serval/.worktrees/<topic> -b <branch>
 origin/main`) and work in that. Run the tools from your worktree, or from
 `~/Developer/serval/scripts/` when you have none: they are current there.
 

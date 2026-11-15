@@ -5,6 +5,7 @@ from pathlib import Path
 WT = Path(__file__).with_name("wt.sh")
 LAND = Path(__file__).with_name("land-pr.sh")
 USERS = Path(__file__).with_name("worktree_users.sh")
+GUARD = Path(__file__).with_name("guard-main-checkout.sh")
 
 
 def git(cwd, *args):
@@ -180,3 +181,37 @@ def test_an_untracked_file_makes_a_worktree_busy(tmp_path):
     release(first)
     second = Path(wt(repo, tmp_path, "new", "topic-b").stdout.strip())
     assert second == tmp_path / "serval-pool-2"
+
+
+def wt_default_pool(cwd, *args):
+    env = {k: v for k, v in os.environ.items() if k != "WT_POOL_DIR"}
+    return subprocess.run(
+        ["bash", str(WT), *args],
+        cwd=cwd,
+        env={**env, "GUARD_ANY": "1"},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_the_default_pool_is_made_inside_the_read_only_main_checkout(tmp_path):
+    repo = make_repo(tmp_path)
+    subprocess.run(
+        ["bash", str(GUARD), "apply", str(repo)],
+        env={**os.environ, "GUARD_ANY": "1"},
+        check=True,
+    )
+    result = wt_default_pool(repo, "new", "topic-a")
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()) == repo / ".worktrees" / "serval-pool-1"
+    assert not os.access(repo, os.W_OK)
+
+
+def test_the_default_pool_belongs_to_the_main_checkout_from_any_worktree(
+    tmp_path,
+):
+    repo = make_repo(tmp_path)
+    first = Path(wt_default_pool(repo, "new", "topic-a").stdout.strip())
+    result = wt_default_pool(first, "new", "topic-b")
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()) == repo / ".worktrees" / "serval-pool-2"
