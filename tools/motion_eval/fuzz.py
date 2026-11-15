@@ -569,24 +569,31 @@ def _stepper_rows(capture):
 
 
 def _admitted_stepper_accel(capture, corner_accel, rows):
-    """Per move and stepper row, the guarantee of max_corner_accel: under
-    smoothers on X and Y, max(max_corner_accel, the move's own demand
-    accel * sum_a |row_a * u_a|); otherwise the floor-mode per-axis worst
-    through the row."""
+    """(cap, demand): per move and stepper row, max_corner_accel under
+    smoothers on X and Y, otherwise the floor-mode per-axis worst through
+    the row; and per move and axis its own acceleration accel * |u_a|.
+    The guarantee near a time is the larger of the cap and sum_a |row_a|
+    times the largest axis demand of the moves near it: the axis kernels
+    differ, so across a direction change one axis can still see one move
+    and the other the next."""
     moves = capture["moves"]
     models = _epoch_models(capture)
     floor = _admitted_accel(capture)
-    out = np.zeros((len(moves), len(rows)))
+    cap = np.zeros((len(moves), len(rows)))
+    demand = np.zeros((len(moves), 2))
     for i, m in enumerate(moves):
         bounded = models[m["shaper_epoch"]][1]
-        u = (m["axes_r_x"], m["axes_r_y"])
+        demand[i] = (
+            m["accel"] * abs(m["axes_r_x"]),
+            m["accel"] * abs(m["axes_r_y"]),
+        )
         for k, (_, row) in enumerate(rows):
-            if bounded:
-                own = m["accel"] * sum(abs(r * c) for r, c in zip(row, u))
-                out[i, k] = max(corner_accel, own)
-            else:
-                out[i, k] = sum(abs(r) * w for r, w in zip(row, floor[i]))
-    return out
+            cap[i, k] = (
+                corner_accel
+                if bounded
+                else sum(abs(r) * w for r, w in zip(row, floor[i]))
+            )
+    return cap, demand
 
 
 def _check_shaped(v, name, raw, corner_accel):
@@ -649,10 +656,16 @@ def _check_shaped_at(v, name, raw, corner_accel, dt):
             series.append((axis, np.abs(motion[axis].acc), limit))
     else:
         rows = _stepper_rows(raw.capture)
-        admitted = _admitted_stepper_accel(raw.capture, corner_accel, rows)
+        cap, demand = _admitted_stepper_accel(raw.capture, corner_accel, rows)
+        legs = [
+            _painted_max(moves, demand[:, a], t0, n, reach, dt) for a in (0, 1)
+        ]
         for k, (stepper, row) in enumerate(rows):
             acc = np.abs(row[0] * motion["x"].acc + row[1] * motion["y"].acc)
-            limit = _painted_max(moves, admitted[:, k], t0, n, reach, dt)
+            limit = np.maximum(
+                _painted_max(moves, cap[:, k], t0, n, reach, dt),
+                abs(row[0]) * legs[0] + abs(row[1]) * legs[1],
+            )
             series.append((stepper, acc, limit))
     slack = FLOAT_TOLERANCE * near.max()
     metrics["accel_ratio"] = max(
