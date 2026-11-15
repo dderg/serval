@@ -245,6 +245,15 @@ class LookAheadQueue:
 
 BUFFER_TIME_HIGH = 2.0
 BUFFER_TIME_START = 0.250
+SCV_IGNORED_WARNING = (
+    "SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY is ignored: [corner_deviation]"
+    " sets the corner speeds; max_corner_accel is the setting that limits"
+    " corners"
+)
+ACCEL_TO_DECEL_IGNORED_WARNING = (
+    "SET_VELOCITY_LIMIT ACCEL_TO_DECEL is ignored (no longer supported);"
+    " use MINIMUM_CRUISE_RATIO = 1 - ACCEL_TO_DECEL / ACCEL instead"
+)
 
 
 # Main code to track events (and their timing) on the printer toolhead
@@ -336,6 +345,10 @@ class ToolHead:
         # Register handlers
         self.printer.register_event_handler(
             "klippy:shutdown", self._handle_shutdown
+        )
+        self.warned_this_print = set()
+        self.printer.register_event_handler(
+            "print_stats:reset", self.warned_this_print.clear
         )
 
     def get_active_rails_for_axis(self, axis):
@@ -511,6 +524,14 @@ class ToolHead:
         if self.junction_limiter is not None:
             raise self.printer.config_error("junction limiter already set")
         self.junction_limiter = limiter
+
+    def warn_once_per_print(self, msg):
+        if msg in self.warned_this_print:
+            return
+        self.warned_this_print.add(msg)
+        logging.warning(msg)
+        gcode = self.printer.lookup_object("gcode")
+        gcode.respond_info("WARNING: " + msg, log=False)
 
     def move(self, newpos, speed):
         move = Move(self, self.commanded_pos, newpos, speed)
@@ -750,17 +771,29 @@ class ToolHeadCommandHelper:
     cmd_SET_VELOCITY_LIMIT_help = "Set printer velocity limits"
 
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
+        if gcmd.get("ACCEL_TO_DECEL", None) is not None:
+            self.toolhead.warn_once_per_print(ACCEL_TO_DECEL_IGNORED_WARNING)
         max_velocity = gcmd.get_float("VELOCITY", None, above=0.0)
         max_accel = gcmd.get_float("ACCEL", None, above=0.0)
         square_corner_velocity = gcmd.get_float(
             "SQUARE_CORNER_VELOCITY", None, minval=0.0
         )
+        applied_square_corner_velocity = square_corner_velocity
+        if (
+            square_corner_velocity is not None
+            and self.toolhead.junction_limiter is not None
+        ):
+            self.toolhead.warn_once_per_print(SCV_IGNORED_WARNING)
+            applied_square_corner_velocity = None
         min_cruise_ratio = gcmd.get_float(
             "MINIMUM_CRUISE_RATIO", None, minval=0.0, below=1.0
         )
         kin = self.toolhead.get_kinematics()
         mv, ma, scv, mcr = self.toolhead.set_max_velocities(
-            max_velocity, max_accel, square_corner_velocity, min_cruise_ratio
+            max_velocity,
+            max_accel,
+            applied_square_corner_velocity,
+            min_cruise_ratio,
         )
         msg = [
             "max_velocity: %.6f" % mv,

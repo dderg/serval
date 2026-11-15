@@ -4,10 +4,12 @@
 
 Writes, into tools/motion_eval/printer_test/ by default:
 - corners_<setting>.gcode: the corner/ringing pattern, one file per
-  setting (scv 5, 20, 50; [corner_deviation] floor, and bounded at
-  max_corner_accel 1.03 x max_accel).
+  setting (scv 5, 20, 50; [corner_deviation] floor, bounded at
+  max_corner_accel 1.03 x max_accel, and bounded81000 at the burst scv 50
+  already demands on the owner corpus).
 - stress_<setting>.gcode: dense zigzags, polyline circles and reversals
-  at scv 50, floor and bounded, between two printed reference marks.
+  at scv 50, floor, bounded and bounded81000, between two printed
+  reference marks.
 
 Every file is replanned through run_klippy on configs/owner.cfg under its
 own setting. The generator asserts that:
@@ -50,15 +52,22 @@ BOUNDED_CORNER_ACCEL = round(
     BOUNDED_RATIO
     * float(accel_residual.config_option(CONFIG, "printer", "max_accel"))
 )
+SCV50_CORPUS_CORNER_ACCEL = 81000
+CORNER_ACCEL_BOUNDS = {
+    "bounded": BOUNDED_CORNER_ACCEL,
+    "bounded81000": SCV50_CORPUS_CORNER_ACCEL,
+}
 CORNER_SETTINGS = {
     "scv5": (5.0, "none"),
     "scv20": (20.0, "none"),
     "scv50": (50.0, "none"),
     "floor": (None, "floor"),
-    "bounded": (None, "bound%d" % BOUNDED_CORNER_ACCEL),
+    **{
+        setting: (None, "bound%d" % accel)
+        for setting, accel in CORNER_ACCEL_BOUNDS.items()
+    },
 }
-STRESS_SETTINGS = ("scv50", "floor", "bounded")
-BOUNDED_FILES = ("corners_bounded", "stress_bounded")
+STRESS_SETTINGS = ("scv50", "floor", "bounded", "bounded81000")
 LOWEST_MODE_RATIO = 0.8
 RING_PERIODS = 5.0
 CRUISE_MARGIN = 1.5
@@ -524,6 +533,17 @@ def block_peaks(setting):
     return out
 
 
+def _check_corner_accel_bound(name, setting, peaks, cap):
+    bound = CORNER_ACCEL_BOUNDS[setting]
+    limit = bound / cap["settings"]["max_accel"]
+    if max(peaks["x"], peaks["y"]) > limit:
+        raise AssertionError(
+            "%s: executed peak x %.3f y %.3f of max_accel, above the"
+            " %.4f that max_corner_accel %d allows"
+            % (name, peaks["x"], peaks["y"], limit, bound)
+        )
+
+
 def generate(out):
     out.mkdir(parents=True, exist_ok=True)
     freqs = accel_residual.shaper_freqs(CONFIG)
@@ -550,26 +570,11 @@ def generate(out):
                 " %.2f it is meant to reach"
                 % (name, peaks["x"], peaks["y"], STRESS_PEAK_EXPECTED)
             )
-        bounded_limit = (
-            BOUNDED_CORNER_ACCEL / raw.capture["settings"]["max_accel"]
-        )
-        if name in BOUNDED_FILES and (
-            max(peaks["x"], peaks["y"]) > bounded_limit
-        ):
-            raise AssertionError(
-                "%s: executed peak x %.3f y %.3f of max_accel, above the"
-                " %.4f that max_corner_accel %d allows"
-                % (
-                    name,
-                    peaks["x"],
-                    peaks["y"],
-                    bounded_limit,
-                    BOUNDED_CORNER_ACCEL,
-                )
-            )
+        if setting in CORNER_ACCEL_BOUNDS:
+            _check_corner_accel_bound(name, setting, peaks, raw.capture)
         (out / (name + ".gcode")).write_text(text)
         report.append(
-            "%-18s %6.2f s  corners %4d  windows %4d  sync %.2f/%.2f  peak"
+            "%-20s %6.2f s  corners %4d  windows %4d  sync %.2f/%.2f  peak"
             " x %.3f y %.3f motor a %.3f b %.3f"
             % (
                 name,
@@ -587,7 +592,7 @@ def generate(out):
     for setting in STRESS_SETTINGS:
         for block, peaks in block_peaks(setting).items():
             report.append(
-                "stress_%-11s %-14s peak x %.3f y %.3f motor a %.3f b %.3f"
+                "stress_%-12s %-14s peak x %.3f y %.3f motor a %.3f b %.3f"
                 % (
                     setting,
                     block,

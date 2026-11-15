@@ -88,7 +88,7 @@ def run_klippy(
                 )
             )
         capture = json.loads(capture_path.read_text())
-        steppers = capture["steppers"]
+        steppers = {**capture["steppers"], **capture["extruders"]}
         foreign = sorted(n for n, s in steppers.items() if s["mcu"] != MAIN_MCU)
         if foreign:
             raise KlippyRunError(
