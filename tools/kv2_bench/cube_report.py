@@ -336,7 +336,10 @@ def health(g: Gcode, run_dir: Path, rows: list[dict]) -> dict:
     """Errors over the whole log; Stats over the span (first extrusion to
     line 39601), as the real-printer comparison reports them."""
     log = (run_dir / "klippy.log").read_text()
-    printing = [r for r in rows if pc.find(r, "sd_pos") is not None]
+    samples, sample_lines = pc.printing_samples(rows, g.lines, g.ends)
+    span = [
+        rows[i] for i, n in zip(samples, sample_lines) if g.start <= n <= g.end
+    ]
 
     def peak(key: str, fn=max) -> float:
         return fn(pc.find(r, key) for r in span)
@@ -351,9 +354,7 @@ def health(g: Gcode, run_dir: Path, rows: list[dict]) -> dict:
         "scv_ignored_warnings": log.count("SQUARE_CORNER_VELOCITY is ignored"),
         "accel_to_decel_warnings": log.count("ACCEL_TO_DECEL is ignored"),
         "toolhead_limit_lines": sum(
-            1
-            for line in log.splitlines()
-            if line.startswith("toolhead: max_velocity")
+            line.startswith("toolhead: max_velocity") for line in lines
         ),
         "span_samples": len(span),
         "buffer_time_min_s": peak("buffer_time", min),
@@ -361,21 +362,154 @@ def health(g: Gcode, run_dir: Path, rows: list[dict]) -> dict:
         "mcu_awake_max": peak("mcu_awake"),
         "mcu_task_avg_max": peak("mcu_task_avg"),
         "corner_table": [
-            line
-            for line in log.splitlines()
-            if "corner_deviation: table ready" in line
+            line for line in lines if "corner_deviation: table ready" in line
         ],
     }
 
 
-def judge(run_dir: Path, kv2: str, dictionary: Path) -> dict:
-    out = run_dir / "replay" / "replay_judgement.json"
-    if not out.exists():
-        firmware.checkout(firmware.FW_WORKTREE, kv2)
-        reference = replay.build(
-            run_dir, firmware.FW_WORKTREE, dictionary, run_dir / "replay"
+def pressure_advance_script(g: Gcode, phases: list[dict]) -> tuple[float, str]:
+    """The program's one SET_PRESSURE_ADVANCE comes after PRINT_START and
+    before the first travel: live, its lookahead callback ran at the end of
+    PRINT_START's last move, the toolhead phase just before the first travel."""
+    commands = [
+        i
+        for i, r in enumerate(g.lines)
+        if r["text"].startswith("SET_PRESSURE_ADVANCE")
+    ]
+    print_start = next(
+        i for i, r in enumerate(g.lines) if r["text"].startswith("PRINT_START")
+    )
+    if len(commands) != 1 or not print_start < commands[0] < g.first:
+        raise ValueError(
+            f"SET_PRESSURE_ADVANCE lines {commands}, expected one before line {g.first + 1}"
         )
-        out.write_text(json.dumps(replay.judge(run_dir, reference), indent=2))
+    first_travel = next(
+        k for k, p in enumerate(phases) if on_segment(p, segments(g)[0])
+    )
+    before = phases[first_travel - 1]
+    return before["t"] + before["dur"], g.lines[commands[0]]["text"].split(";")[
+        0
+    ].strip()
+
+
+def reversal_pair_at(
+    signs: np.ndarray, i: int, other: np.ndarray, j: int
+) -> bool:
+    """signs[i:i+2] is a step and its undo, and after it the two sequences
+    agree again for REVERSAL_CONTEXT steps (or to their ends)."""
+    if i + 1 >= len(signs) or signs[i] != -signs[i + 1]:
+        return False
+    after = signs[i + 2 : i + 2 + REVERSAL_CONTEXT]
+    return np.array_equal(after, other[j : j + len(after)])
+
+
+def align_reversal_pairs(
+    a: Steps, b: Steps, freq: float
+) -> tuple[Steps, Steps, list[dict]]:
+    """a and b with the ±1 reversal pairs one side emitted and the other did
+    not removed; any other difference raises."""
+    keep_a, keep_b = np.ones(len(a.signs), bool), np.ones(len(b.signs), bool)
+    events = []
+    i = j = 0
+    while True:
+        d = compare.first_divergence(a.signs[i:], b.signs[j:])
+        if d is None:
+            break
+        i, j = i + d, j + d
+        if reversal_pair_at(b.signs, j, a.signs, i):
+            keep_b[j : j + 2] = False
+            events.append({"extra_in": "live tap", "index": j, "t": b.clocks[j] / freq,
+                           "pair_spacing_us": (b.clocks[j + 1] - b.clocks[j]) / freq * 1e6})  # fmt: skip
+            j += 2
+        elif reversal_pair_at(a.signs, i, b.signs, j):
+            keep_a[i : i + 2] = False
+            events.append({"extra_in": "replay", "index": i, "t": a.clocks[i] / freq,
+                           "pair_spacing_us": (a.clocks[i + 1] - a.clocks[i]) / freq * 1e6})  # fmt: skip
+            i += 2
+        else:
+            raise ValueError(
+                f"replay and tap differ by more than a reversal pair at replay step {i}"
+            )
+    return (
+        Steps(a.clocks[keep_a], a.signs[keep_a]),
+        Steps(b.clocks[keep_b], b.signs[keep_b]),
+        [
+            {k: float(v) if not isinstance(v, str) else v for k, v in e.items()}
+            for e in events
+        ],
+    )
+
+
+def judge_run(run_dir: Path, reference: Reference) -> dict:
+    """Capture vs live tap: the MCU executed every commanded step (sequences
+    equal) and its lateness. Replay vs tap: the live trapq regenerates the
+    commanded steps, up to ±1 reversal pairs (stepcompress flush boundaries,
+    RESULTS.md "Live-trapq replay reference"), listed. Capture vs replay with
+    those pairs removed: timing within 25 µs + 0.1 µs + this run's lateness."""
+    freq = reference.clock_freq
+    tap = compare.load_tap(run_dir)
+    cap = compare.load_capture(run_dir)
+    names = list(reference.steppers)
+    executed = compare.sequences(
+        {n: tap[n] for n in names}, {n: cap[n] for n in names}
+    )
+    _, _, residual = compare.timeline(
+        {n: tap[n] for n in names}, {n: cap[n] for n in names}, freq, None, True
+    )
+    lateness = compare.mcu_lateness(residual)
+    planned, commanded, captured, pairs = {}, {}, {}, {}
+    for name in names:
+        planned[name], commanded[name], pairs[name] = align_reversal_pairs(
+            reference.steppers[name], tap[name], freq
+        )
+        _, captured[name], _ = align_reversal_pairs(
+            reference.steppers[name], cap[name], freq
+        )
+    identity = compare.schedule_identity(planned, commanded, freq)
+    timing, _, _ = compare.timeline(planned, captured, freq, None, True)
+    bound_us = (
+        compare.MAX_STEPCOMPRESS_ERROR_S + compare.INSTRUMENT_SLACK_S
+    ) * 1e6 + lateness["max_us"]
+    checks = {
+        "net_steps_match": all(
+            reference.steppers[n].net == cap[n].net == tap[n].net for n in names
+        ),
+        "capture_equals_tap_sequence": executed["all_steps_paired"],
+        "replay_equals_tap_up_to_reversal_pairs": compare.sequences(
+            planned, commanded
+        )["all_steps_paired"],
+        "replay_within_max_error": identity["abs_max_us"]
+        <= compare.MAX_STEPCOMPRESS_ERROR_S * 1e6
+        and identity["epochs"] == 1,
+        "capture_within_bound": timing["abs_max_us"] <= bound_us,
+    }
+    return {
+        "checks": checks,
+        "ok": all(checks.values()),
+        "capture_vs_tap": {"sequences": executed, "mcu_lateness": lateness},
+        "reversal_pairs": pairs,
+        "replay_vs_tap": identity,
+        "capture_vs_replay": {**timing, "bound_us": bound_us},
+    }
+
+
+def judge(
+    run_dir: Path, kv2: str, dictionary: Path, timed_scripts: list
+) -> dict:
+    out = run_dir / "replay" / "cube_judgement.json"
+    if not out.exists():
+        if (run_dir / "replay" / "reference.json").exists():
+            reference = Reference.load(run_dir / "replay")
+        else:
+            firmware.checkout(firmware.FW_WORKTREE, kv2)
+            reference = replay.build(
+                run_dir,
+                firmware.FW_WORKTREE,
+                dictionary,
+                run_dir / "replay",
+                timed_scripts,
+            )
+        out.write_text(json.dumps(judge_run(run_dir, reference), indent=2))
     return json.loads(out.read_text())
 
 
@@ -493,6 +627,113 @@ def session_report(session: Path, plans: Path) -> dict:
         out[name] = result
         print(name, "done", flush=True)
     return out
+
+
+SETTING_LABEL = {
+    "A": "stock file, mcr 0.2",
+    "B": "stock file, mcr 0.1",
+    "C": "unedited file, cap 21000",
+    "D": "`_cd` file, cap 21000",
+    "E": "unedited file, cap 24000",
+    "F": "unedited file, cap 28000",
+    "G": "unedited file, no cap",
+}
+REAL_OF = {
+    "A": "print 1 (stock, old host)",
+    "C": "print 2 (_cd, corner 21000)",
+    "D": "print 2 (_cd, corner 21000)",
+}
+
+
+def tables(report: dict, plans: dict) -> str:
+    out = []
+    base = report["A"]["trapq"]["span_s"]
+    out += [
+        "| run | setting | span: Stats print_time | Stats wall | live trapq | capture | offline plan | real printer | Δ vs A (trapq) | whole file: trapq | capture | plan |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for name, r in report.items():
+        real = (
+            plans["real"]
+            .get(REAL_OF.get(name, ""), {})
+            .get("measured", {})
+            .get("span_pt_s")
+        )
+        cap = r.get("capture", {})
+        out.append(
+            f"| {name} | {SETTING_LABEL[name]} | {r['stats']['span_pt_s']:.2f} | {r['stats']['span_wall_s']:.2f} | "
+            f"{r['trapq']['span_s']:.2f} | {cap.get('span_s', float('nan')):.2f} | {r['plan']['span_s']:.2f} | "
+            f"{'' if real is None else f'{real:.2f}'} | {100 * (r['trapq']['span_s'] / base - 1):+.2f}% | "
+            f"{r['trapq']['whole_s']:.2f} | {cap.get('whole_s', float('nan')):.2f} | {r['plan']['whole_s']:.2f} |"
+        )
+    out += [
+        "",
+        "| run | outer wall | inner wall | infill | travel | other | source |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for name, r in report.items():
+        rows = [
+            ("live trapq", r["trapq"]["features"], None),
+            (
+                "Stats regression",
+                r["stats"]["regression"]["features"],
+                r["stats"]["regression"]["features_se"],
+            ),
+            ("offline plan", r["plan"]["features"], None),
+        ]
+        real = plans["real"].get(REAL_OF.get(name, ""))
+        if real:
+            m = real["measured"]["regression"]
+            rows.append(
+                (
+                    "real printer, Stats regression",
+                    m["features"],
+                    m["features_se"],
+                )
+            )
+        for source, values, se in rows:
+            cells = [
+                f"{values[f]:.1f}" + ("" if se is None else f" ± {se[f]:.1f}")
+                for f in FEATURES
+            ]
+            out.append(f"| {name} | " + " | ".join(cells) + f" | {source} |")
+    out += [
+        "",
+        "| run | net steps exact | capture = live tap (every step, in order) | replay = tap (± reversal pairs) / within 25 µs | reversal pairs X/Y/Z/E | capture−replay max / bound µs | MCU lateness max µs | F407/F401 ppm | peak steps/s X / Y / E / aggregate |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for name, r in report.items():
+        j = r["judge"]
+        c = j["checks"]
+        timing = j["capture_vs_replay"]
+        peak = r.get("peak_steps_per_s", {})
+        pairs = "/".join(
+            str(len(j["reversal_pairs"][m])) for m in compare.CHANNELS
+        )
+        out.append(
+            f"| {name} | {c['net_steps_match']} | {c['capture_equals_tap_sequence']} | "
+            f"{c['replay_equals_tap_up_to_reversal_pairs']} / {c['replay_within_max_error']} | {pairs} | "
+            f"{timing['abs_max_us']:.1f} / {timing['bound_us']:.1f} | "
+            f"{j['capture_vs_tap']['mcu_lateness']['max_us']:.1f} | {timing['slope_ppm']:.1f} | "
+            + " / ".join(
+                f"{peak[k] / 1e3:.1f} k"
+                for k in ("stepper_x", "stepper_y", "extruder", "aggregate")
+            )
+            + " |"
+        )
+    out += [
+        "",
+        "| run | print | error lines | SCV warnings | ACCEL_TO_DECEL warnings | toolhead limit lines | min buffer_time s | print_stall | mcu_awake max | mcu_task_avg max µs |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for name, r in report.items():
+        h = r["health"]
+        out.append(
+            f"| {name} | {h['print_state']} | {len(h['errors'])} | {h['scv_ignored_warnings']} | {h['accel_to_decel_warnings']} | "
+            f"{h['toolhead_limit_lines']} | {h['buffer_time_min_s']:.2f} | {h['print_stall_max']:.0f} | "
+            f"{h['mcu_awake_max']:.3f} | {1e6 * h['mcu_task_avg_max']:.0f} |"
+        )
+    return "\n".join(out)
 
 
 def main() -> None:
