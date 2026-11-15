@@ -1,27 +1,26 @@
 # syntax=docker/dockerfile:1
 #
-# Multi-stage build — ordered from least- to most-frequently-changed.
-# Each stage's expensive work is cached independently; only the changed
-# stage and everything after it re-executes on a rebuild.
-#
-#   toolchain   apt packages + Rust toolchain  (changes: never)
-#   rust-build  motion-engine cdylib           (registry cache only)
-#   firmware    C firmware ELFs + chelper      (no compile caches)
-#   runtime     final image — no build tools   (changes: klippy/, tools/)
+#   toolchain       apt packages + the rust-toolchain.toml compiler
+#   rust-src        rust/ pruned per consumer by prune_rust.py
+#   cargo-registry  every crate in Cargo.lock (changes with manifests only)
+#   rust-build      motion-engine/config/shaper-ident cdylibs
+#   firmware        MACH_LINUX ELFs (H7, F4, SC)
+#   preload, chelper, plugins   small independent artifacts
+#   runtime         final image — no build tools
 #
 # Compile outputs (cargo target/, make OUT dirs) are deliberately NOT
 # cache-mounted: make and cargo decide freshness by mtime, and a persistent
 # artifact dir paired with COPY'd sources went stale in practice — up to and
 # including a firmware ELF speaking an older wire protocol than the host it
 # shipped with. Skipping unchanged work is the layer cache's job: it keys on
-# file CONTENT, so when sources really change the whole stage recompiles
-# from a clean slate, and when they don't the stage is skipped entirely.
-# Only the cargo registry/git caches remain — cargo addresses those by
-# content, so they cannot serve stale artifacts.
+# file CONTENT, so a stage recompiles from a clean slate when its inputs
+# change and is skipped when they don't. Each build stage gets only its own
+# inputs: rust-build the host crates' closure, firmware the c-api closure,
+# so an edit to a crate one side does not link leaves the other cached.
+# The registry is a layer, not a shared cache mount: two stages unpacking
+# into one mount raced past cargo's lock, which lives in CARGO_HOME
+# (`.package-cache ... File exists`).
 
-# --------------------------------------------------------------------
-# Stage 1 — toolchain
-# --------------------------------------------------------------------
 FROM ubuntu:24.04 AS toolchain
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -52,56 +51,59 @@ RUN pip3 install --break-system-packages \
     greenlet cffi pyserial jinja2 markupsafe numpy 2>/dev/null || true
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain stable --profile minimal
+    sh -s -- -y --default-toolchain none --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# --------------------------------------------------------------------
-# Stage 2 — rust-build
-# Builds the motion-engine cdylib from a clean target dir every time the
-# rust/ content changes; the layer cache skips the stage when it doesn't.
-# --------------------------------------------------------------------
-FROM toolchain AS rust-build
+# The toml's channel for the host target only, overriding the toml for every
+# directory: its cross targets and lint components are not needed here.
+COPY rust/rust-toolchain.toml /toolchain/rust-toolchain.toml
+RUN channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' /toolchain/rust-toolchain.toml)" && \
+    rustup toolchain install "$channel" && \
+    rustup override set "$channel" --path /
+ENV RUSTUP_AUTO_INSTALL=0
 
+FROM toolchain AS rust-src
+
+COPY rust/ /src/rust/
+COPY tools/sim/prune_rust.py /src/prune_rust.py
+RUN python3 /src/prune_rust.py /src/rust /pruned/skeleton && \
+    python3 /src/prune_rust.py /src/rust /pruned/host \
+        motion-engine config-py shaper-ident && \
+    python3 /src/prune_rust.py /src/rust /pruned/firmware c-api
+
+FROM toolchain AS cargo-registry
+
+RUN --mount=type=bind,from=rust-src,source=/pruned/skeleton,target=/skeleton \
+    cd /skeleton && \
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+ENV CARGO_NET_OFFLINE=true
+
+FROM cargo-registry AS rust-build
+
+COPY --from=rust-src /pruned/host/ /kalico/rust/
 WORKDIR /kalico/rust
 
-COPY rust/ /kalico/rust/
-
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    cargo build -p motion-engine -p config-py -p shaper-ident --release && \
+RUN cargo build --locked -p motion-engine -p config-py -p shaper-ident --release && \
     mkdir -p /artifacts && \
     cp /kalico/rust/target/release/lib_motion_engine.so /artifacts/ && \
     cp /kalico/rust/target/release/lib_config_doc.so /artifacts/ && \
     cp /kalico/rust/target/release/lib_shaper_ident.so /artifacts/
 
-# --------------------------------------------------------------------
-# Stage 3 — firmware
-# Builds the two MACH_LINUX ELFs (H7, F4), the preload shims, and the
-# klippy chelper .so. The sim relaxations are first-class code gated by
-# CONFIG_MCU_SIM (set in tools/sim/configs/*), not build-time patches.
-# --------------------------------------------------------------------
-FROM toolchain AS firmware
+# The sim relaxations are first-class code gated by CONFIG_MCU_SIM (set in
+# tools/sim/configs/*), not build-time patches.
+FROM cargo-registry AS firmware
 
 WORKDIR /kalico
 
-# Copy what the C/firmware build needs. Deliberately NOT all of tools/sim —
-# copying the volatile python (cli.py, world.py, tests) here would force
-# a full firmware rebuild on every harness edit.
 COPY Makefile /kalico/Makefile
 COPY src/ /kalico/src/
 COPY lib/ /kalico/lib/
-COPY scripts/ /kalico/scripts/
-COPY klippy/ /kalico/klippy/
+COPY scripts/buildcommands.py scripts/check-gcc.sh scripts/find-firmware-extras.sh \
+    /kalico/scripts/
+COPY klippy/msgproto.py /kalico/klippy/msgproto.py
 COPY tools/check_async_event_registration.py /kalico/tools/check_async_event_registration.py
-COPY tools/sim/preload/ /kalico/tools/sim/preload/
 COPY tools/sim/configs/ /kalico/tools/sim/configs/
-COPY tools/sim/fetch_plugins.sh /kalico/tools/sim/fetch_plugins.sh
-
-# Build shims (libvtime.so + libsim_intercept.so)
-RUN make -C tools/sim/preload
-
-# Copy Rust source for the c-api staticlib build (make needs `cd rust`)
-COPY rust/ /kalico/rust/
+COPY --from=rust-src /pruned/firmware/ /kalico/rust/
 
 RUN mkdir -p /sim_elfs
 
@@ -112,16 +114,14 @@ RUN mkdir -p /sim_elfs
 # features, so later builds reuse the first's target-linux staticlib.
 # out-sc/ leaves CONFIG_MOTION_RUNTIME off, so it is a step/dir only board:
 # every lane is host-computed step times over queue_step, no sample executor.
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    set -e; \
+RUN set -e; \
     cp tools/sim/configs/h7-sim.config .config; \
     make olddefconfig OUT=out-h7/ 2>/dev/null || true; \
     make -j$(nproc) OUT=out-h7/; \
     cp out-h7/klipper.elf /sim_elfs/klipper-h7-sim.elf; \
     cp out-h7/klipper.dict /sim_elfs/klipper-h7-sim.dict
 
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    set -e; \
+RUN set -e; \
     cp tools/sim/configs/f4-sim.config .config; \
     make olddefconfig OUT=out-f4/ 2>/dev/null || true; \
     make -j$(nproc) OUT=out-f4/; \
@@ -129,23 +129,28 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     cp out-f4/klipper.dict /sim_elfs/klipper.dict; \
     cp out-f4/klipper.dict /sim_elfs/klipper-f4-sim.dict
 
-RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    set -e; \
+RUN set -e; \
     cp tools/sim/configs/sc-sim.config .config; \
     make olddefconfig OUT=out-sc/ 2>/dev/null || true; \
     make -j$(nproc) OUT=out-sc/; \
     cp out-sc/klipper.elf /sim_elfs/klipper-sc-sim.elf; \
     cp out-sc/klipper.dict /sim_elfs/klipper-sc-sim.dict
 
-# Build klippy chelper .so
-RUN cd klippy && python3 chelper/__init__.py
+FROM toolchain AS preload
 
-# Fetch pinned third-party klippy plugins (beacon).
-RUN bash tools/sim/fetch_plugins.sh /kalico/tools/sim/third_party_repos
+COPY tools/sim/preload/ /kalico/tools/sim/preload/
+RUN make -C /kalico/tools/sim/preload
 
-# --------------------------------------------------------------------
-# Stage 4 — runtime (final image)
-# --------------------------------------------------------------------
+FROM toolchain AS chelper
+
+COPY klippy/chelper/ /kalico/klippy/chelper/
+RUN cd /kalico/klippy && python3 chelper/__init__.py
+
+FROM toolchain AS plugins
+
+COPY tools/sim/fetch_plugins.sh /kalico/tools/sim/fetch_plugins.sh
+RUN bash /kalico/tools/sim/fetch_plugins.sh /kalico/tools/sim/third_party_repos
+
 FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -183,10 +188,10 @@ COPY pyproject.toml /kalico/pyproject.toml
 COPY --from=firmware /sim_elfs/ /kalico/out/
 
 # Overlay chelper compiled .so files on top of the Python source copy.
-COPY --from=firmware /kalico/klippy/chelper/ /kalico/klippy/chelper/
+COPY --from=chelper /kalico/klippy/chelper/ /kalico/klippy/chelper/
 
 # Preload shims
-COPY --from=firmware \
+COPY --from=preload \
     /kalico/tools/sim/preload/libvtime.so \
     /kalico/tools/sim/preload/libsim_intercept.so \
     /kalico/tools/sim/preload/
@@ -202,8 +207,7 @@ COPY --from=rust-build \
     /artifacts/lib_shaper_ident.so \
     /kalico/klippy/_shaper_ident.so
 
-# Third-party plugins fetched during the firmware stage.
-COPY --from=firmware /kalico/tools/sim/third_party_repos/ \
+COPY --from=plugins /kalico/tools/sim/third_party_repos/ \
     /kalico/tools/sim/third_party_repos/
 
 # Symlink the beacon plugin into klippy/extras so config [beacon]
