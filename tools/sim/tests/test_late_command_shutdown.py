@@ -7,10 +7,17 @@ relinked free list can loop it) and leave the MCU answering.
 The shutdown longjmps out of the frame carrying the late command, dropping
 any frames the MCU read behind it in the same chunk; the MCU then NAKs while
 awaiting the frame after the late one until klippy retransmits it.
+
+klippy queues motion only a few seconds ahead of the playhead, so the late
+command is armed before the zigzag goes out: the heater's next refresh
+(about every 2 s at full power) then leaves late while the zigzag's step
+frames flow. The zigzag plays for half of verify_heater's gain time, so the
+chamber the simulator never heats cannot shut the printer down first.
 """
 
 from __future__ import annotations
 
+import math
 import re
 
 import pytest
@@ -33,8 +40,15 @@ pid_kd: 244.691
 """
 HEATER_LEAD_S = 0.30
 FIELD_LATENESS_S = 0.037
+VERIFY_HEATER_GAIN_TIME_S = 20.0
+ZIGZAG_LEG_MM = 2.0 * math.sqrt(2.0)
+ZIGZAG_FEED_MM_S = 50.0
+ZIGZAG_MOVES = int(
+    VERIFY_HEATER_GAIN_TIME_S / 2.0 * ZIGZAG_FEED_MM_S / ZIGZAG_LEG_MM
+)
 ZIGZAG = "\n".join(
-    f"G1 X{20 + 2 * (i % 2)} Y{20 + 2 * (i % 2)} F3000" for i in range(400)
+    f"G1 X{20 + 2 * (i % 2)} Y{20 + 2 * (i % 2)} F{ZIGZAG_FEED_MM_S * 60:.0f}"
+    for i in range(ZIGZAG_MOVES)
 )
 SHUTDOWN = "MCU 'mcu' shutdown: Timer too close"
 LATE_FRAME_SENT = re.compile(
@@ -52,12 +66,12 @@ def test_late_heater_pwm_shuts_down_cleanly(sim_world):
     )
     world.gcode_ok("SET_KINEMATIC_POSITION X=20 Y=20 Z=20")
     world.gcode_ok("SET_HEATER_TEMPERATURE HEATER=chamber TARGET=60")
-    world.gcode(ZIGZAG)
     world.inject(
         "h7",
         late_command="queue_digital_out",
         by_s=HEATER_LEAD_S + FIELD_LATENESS_S,
     )
+    world.gcode(ZIGZAG)
 
     assert world.wait_for_log_text(SHUTDOWN), world.log_tail()
     assert (
