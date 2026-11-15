@@ -340,13 +340,16 @@ has been enabled.
 
 #### CORNER_DEVIATION_REPORT
 `CORNER_DEVIATION_REPORT [MOTOR_ACCEL=<mm/s²>]`: Reports the worst
-executed acceleration per axis (X and Y) that the junction speeds admit
+executed acceleration per axis (X and Y), and on cartesian and corexy
+per stepper (`stepper_x`, `stepper_y`), that the junction speeds admit
 at the current `max_accel` and `max_velocity`: the legs' acceleration
 plus the shaped velocity step of the fastest corner, or a curve's
-tangential and centripetal acceleration. With MOTOR_ACCEL it also
-reports `recommended_max_accel`, the largest `max_accel` whose worst
-case stays within MOTOR_ACCEL on both axes. On corexy each motor sees up
-to the sum of the X and Y accelerations.
+tangential and centripetal acceleration, a stepper getting the sum of
+its axes; where `max_corner_accel` or `max_corner_stepper_accel` bounds
+an axis or stepper, the larger of that cap and what the moves alone can
+ask of it. With MOTOR_ACCEL it also reports `recommended_max_accel`, the
+largest `max_accel` whose worst case stays within MOTOR_ACCEL on both
+axes.
 
 ### [delayed_gcode]
 

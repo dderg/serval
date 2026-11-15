@@ -8,6 +8,14 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261115: `[corner_deviation]` `max_corner_accel` keeps its meaning (the
+executed X and Y acceleration at corners) but its bound now follows the
+smoothers' shape and the signs of the moves around each corner in time
+instead of reserving the moves' full acceleration, so the same setting
+plans corners faster (see the Config Reference for the exact guarantee).
+Existing configs need no change. The new `max_corner_stepper_accel`
+bounds each stepper (on corexy each motor) instead or as well.
+
 20261114: `SET_VELOCITY_LIMIT ACCEL_TO_DECEL=`, unsupported since
 20250811 and until now ignored silently, now warns once per print. Slicers
 that emit it (e.g. OrcaSlicer's "accel_to_decel") no longer set the
