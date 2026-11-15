@@ -6,7 +6,7 @@ use std::sync::Arc;
 use geometry::segment::SourceRange;
 use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 
-use crate::planner::Planner;
+use crate::planner::{Planner, REPLAN_BATCH_S};
 use crate::types::{PlannedItem, PlannedMove, StreamConfig, StreamInput};
 
 const MAX_V: f64 = 600.0;
@@ -94,6 +94,14 @@ fn stream(moves: &[geometry::Move], drain: bool) -> Vec<PlannedMove> {
         .collect()
 }
 
+/// Keeps both batch triggers from firing: `absorb` re-plans every
+/// `REPLAN_BATCH_MOVES` arrivals or `REPLAN_BATCH_S` of motion, and a
+/// single-window reference must never cut.
+fn hold_batch(planner: &mut Planner) {
+    planner.moves_since_plan = 0;
+    planner.unplanned_s = f64::NEG_INFINITY;
+}
+
 #[test]
 fn commit_horizon_is_set_by_the_open_tails_own_speed() {
     let print_moves = 200;
@@ -128,14 +136,11 @@ fn streamed_commits_reproduce_a_single_window_plan() {
         };
         let mut planner = Planner::new(config(4096), Arc::default());
         for m in &moves {
+            hold_batch(&mut planner);
             assert!(
                 planner.feed(StreamInput::Move(m.clone()), &mut collect),
                 "closed"
             );
-            // Never let the batch trigger fire: `absorb` re-plans every
-            // `REPLAN_BATCH_MOVES` arrivals, and the whole point here is to
-            // compare against a plan that never cut.
-            planner.moves_since_plan = 0;
         }
         assert!(planner.finish(&mut collect), "closed");
         out.into_iter()
@@ -238,11 +243,11 @@ fn plan_one_window(moves: &[geometry::Move]) -> Vec<PlannedMove> {
     };
     let mut planner = Planner::new(ramp_config(), Arc::default());
     for m in moves {
+        hold_batch(&mut planner);
         assert!(
             planner.feed(StreamInput::Move(m.clone()), &mut collect),
             "closed"
         );
-        planner.moves_since_plan = 0;
     }
     assert!(planner.finish(&mut collect), "closed");
     out.into_iter()
@@ -406,13 +411,13 @@ fn plan_layers(moves: &[geometry::Move], cut: bool) -> (Vec<PlannedMove>, usize)
             out.push(item);
             true
         };
+        if !cut {
+            hold_batch(&mut planner);
+        }
         assert!(
             planner.feed(StreamInput::Move(m.clone()), &mut collect),
             "closed"
         );
-        if !cut {
-            planner.moves_since_plan = 0;
-        }
         let emitted = out
             .iter()
             .filter(|item| matches!(item, PlannedItem::Move(_)))
@@ -455,4 +460,44 @@ fn streamed_layer_commits_reproduce_a_single_window_plan() {
     let (streamed, _) = plan_layers(&moves, true);
     let (whole, _) = plan_layers(&moves, false);
     assert_plans_match(&streamed, &whole);
+}
+
+const SPARSE_MM: f64 = 50.0;
+const SPARSE_V: f64 = 50.0;
+const SPARSE_MOVES: usize = 10;
+
+/// Ten collinear moves of a second each: far fewer than a count batch, far
+/// more motion than may wait uncommitted behind the playhead.
+fn sparse_moves() -> Vec<geometry::Move> {
+    (0..SPARSE_MOVES)
+        .map(|i| {
+            let x = i as f64 * SPARSE_MM;
+            let ctx = MoveContext {
+                extruder_axis: 3,
+                feedrate_mm_s: SPARSE_V,
+                limits: limits(),
+                source: SourceRange {
+                    start_line: i as u32,
+                    end_line: i as u32,
+                },
+            };
+            line_move([x, 0.0, 0.0], [x + SPARSE_MM, 0.0, 0.0], 0.0, ctx).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn sparse_moves_commit_by_stream_time_not_by_count() {
+    let moves = sparse_moves();
+    let emitted = stream(&moves, false);
+    let held_s: f64 = moves[emitted.len()..]
+        .iter()
+        .map(geometry::Move::shortest_secs)
+        .sum();
+    assert!(
+        held_s <= REPLAN_BATCH_S + 2.0 * SPARSE_MM / SPARSE_V,
+        "the planner held {held_s:.1}s of motion uncommitted after {SPARSE_MOVES} moves; \
+         a batch re-plans after {REPLAN_BATCH_S}s, so only that, the move the extrusion \
+         reach holds back and the open tail's move may wait"
+    );
 }

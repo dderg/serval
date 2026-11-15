@@ -148,6 +148,8 @@ pub geometry::frontend::Move::feedrate_mm_s: f64
 pub geometry::frontend::Move::limits: geometry::frontend::VelocityLimits
 pub geometry::frontend::Move::segment: geometry::path::PathSegment
 pub geometry::frontend::Move::source: geometry::segment::SourceRange
+impl geometry::frontend::Move
+pub fn geometry::frontend::Move::shortest_secs(&self) -> f64
 pub struct geometry::frontend::MoveContext
 pub geometry::frontend::MoveContext::extruder_axis: usize
 pub geometry::frontend::MoveContext::feedrate_mm_s: f64
@@ -1313,6 +1315,8 @@ pub geometry::Move::feedrate_mm_s: f64
 pub geometry::Move::limits: geometry::frontend::VelocityLimits
 pub geometry::Move::segment: geometry::path::PathSegment
 pub geometry::Move::source: geometry::segment::SourceRange
+impl geometry::frontend::Move
+pub fn geometry::frontend::Move::shortest_secs(&self) -> f64
 pub struct geometry::MoveContext
 pub geometry::MoveContext::extruder_axis: usize
 pub geometry::MoveContext::feedrate_mm_s: f64

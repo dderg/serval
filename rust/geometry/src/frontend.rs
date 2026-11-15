@@ -376,6 +376,14 @@ pub struct Move {
     pub source: SourceRange,
 }
 
+impl Move {
+    /// The least time the move can take: its whole path at its feedrate.
+    #[must_use]
+    pub fn shortest_secs(&self) -> f64 {
+        self.segment.s_len() / self.feedrate_mm_s
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FrontendError {
     ZeroMotion { line_no: u32 },
