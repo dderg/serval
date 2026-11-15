@@ -405,7 +405,7 @@ def pi_estimate(box_worst_x: float, config: Path) -> PiEstimate:
     if gated in speeds:
         speeds = {gated: speeds[gated]}
     estimates = [box_worst_x / speed for speed in speeds.values()]
-    speed_range = f"{min(speeds.values()):.2f}-{max(speeds.values()):.2f}"
+    speed_range = span(min(speeds.values()), max(speeds.values()))
     note = (
         f"estimate: this box's 2-core worst window over its speed against the "
         f"Pi 5 ({speed_range}x) on the throughput gate's calibration replay of "
@@ -526,9 +526,15 @@ def print_timing(
         "ok" if pi.low_x >= gate.PI_FLOOR_X else "WARNING: below the floor"
     )
     print(
-        f"  Pi 5 2-core worst window ~{pi.low_x:.2f}-{pi.high_x:.2f}x, floor "
+        f"  Pi 5 2-core worst window ~{span(pi.low_x, pi.high_x)}x, floor "
         f"{gate.PI_FLOOR_X}x: {verdict}\n    ({pi.note})"
     )
+
+
+def span(low: float, high: float) -> str:
+    if f"{low:.2f}" == f"{high:.2f}":
+        return f"{low:.2f}"
+    return f"{low:.2f}-{high:.2f}"
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
