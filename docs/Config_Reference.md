@@ -2252,11 +2252,25 @@ that corner already can. Acceleration is never changed.
   closer together than the shaper's duration).
   `CORNER_DEVIATION_REPORT MOTOR_ACCEL=<mm/s²>` also prints the largest
   `max_accel` at which that worst case stays within the given motor
-  acceleration. `max_corner_accel` limits the burst instead: junction
-  speeds are lowered so that the executed acceleration per axis, the
-  moves' own acceleration and the steps of nearby corners included, stays
-  within it. A corner whose legs already accelerate along an axis at
-  `max_corner_accel` stops.
+  acceleration. `max_corner_accel` limits the burst instead, per
+  stepper: on `cartesian` the X and Y steppers, on `corexy` the two
+  motors, whose positions are `x + y` and `x - y` (other kinematics are
+  an error with `max_corner_accel`). Junction speeds are lowered so
+  that each stepper's executed acceleration, the moves' own acceleration
+  and the steps of nearby corners included, stays within it. The bound
+  takes the shape of the smoother and the sign of every term into
+  account, and what the moves around a corner can be doing there
+  (a move cannot still be accelerating just before a corner it reaches
+  below its peak speed, nor already decelerating just after one). It
+  still assumes the worst of what the lookahead may yet decide (moves
+  decelerating or accelerating at full `accel` where they could), so
+  the executed peak at most corners it limits stays below it. Where a
+  move alone asks a stepper for more than `max_corner_accel` (on
+  corexy a diagonal move at `accel` asks `1.41 × accel` of one motor)
+  the corners touching that stepper stop; `max_corner_accel` below
+  what a straight move at `max_accel` asks of a stepper is a config
+  error, and a warning is logged once when a move's acceleration
+  exceeds it at run time.
 - A junction to or from a move without X/Y motion (e.g. a pure Z move)
   stops.
 - While input shaping is disabled on X or Y, every change of direction
@@ -2281,9 +2295,11 @@ commands wait until it is ready (`table_ready` in the status), and
 ```
 [corner_deviation]
 #max_corner_accel:
-#   With an input smoother, the executed acceleration (mm/s²) per axis
-#   that corner velocity steps may reach, legs included. The default is
-#   no limit.
+#   With an input smoother on X and Y, the executed acceleration
+#   (mm/s²) each stepper may reach at corners, legs included: on corexy
+#   each motor (x + y and x - y), on cartesian X and Y. It must be at
+#   least what a straight move at max_accel asks of a stepper (corexy:
+#   1.41 × max_accel). The default is no limit.
 #table_cache_dir: ~/.cache/kalico/corner_deviation
 #   Directory for the computed corner tables, one file per shaper
 #   configuration and module version. It must be writable.
