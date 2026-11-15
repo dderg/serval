@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Which corner blend is fastest within the same corner budget?
 
-One isolated corner between two long lines, planned five ways and passed
+One isolated corner between two long lines, planned six ways and passed
 through the X and Y smoothing kernels of a machine profile:
 
 - ``stop``: no blend, a full stop at the vertex;
 - ``clothoid``: the clothoid pair the fitter cuts today (curvature ramps up
-  to the apex and down again, the normal acceleration eases in);
+  to the apex and down again over distance, so over time the normal
+  acceleration comes on fastest at the entry, where the speed is highest);
 - ``arc``: a circular arc tangent to both lines (the normal acceleration
   steps on at its entry and off at its exit);
 - ``parabola``: the path one constant acceleration vector traces between
   the lines (the acceleration vector jumps at entry and exit, and is at
   its limit throughout);
+- ``trochoid``: the path an acceleration vector at its limit traces while
+  it turns at a constant rate from braking along the incoming line to
+  accelerating along the outgoing one (no jump anywhere: braking trades
+  for turning, and turning for accelerating, linearly in time). It is
+  crossed at its curvature ceiling, the one apex speed that law has;
 - ``sharp at speed``: no blend, the vertex crossed at a speed (the velocity
   turns in one instant, as Klipper's square corner velocity plans it).
 
@@ -22,12 +28,18 @@ to the vertex, worst over the corner's orientation against the axes, and
 each plan is held to the planner's prediction of it, margin included.
 
 Per plan the study reports the corner's cost (time lost against turning at
-the feedrate in no time), the shaped acceleration the motors are asked
-for, and what the corner leaves ringing across the outgoing line in a
-damped mode on each axis, at the shaper's frequency and away from it.
+the feedrate in no time), the shaped acceleration and jerk the motors are
+asked for, and what the corner leaves ringing across the outgoing line in
+a damped mode on each axis, at the shaper's frequency and away from it.
 
     uv run --group prototype python tools/corner_blend_study.py
+    uv run --group prototype python tools/corner_blend_study.py --law
     uv run --group prototype python tools/corner_blend_study.py --engine
+
+``--law`` prints each blend's planned acceleration from its apex to its
+exit instead: its tangential and normal shares of the limit, how far it
+has turned from the corner's inward bisector towards the outgoing line (as
+a share of that angle: a turn linear in time reads ``t/T``), and its jerk.
 
 ``--engine`` plans the same corners with the snapshot engine
 (``make -f Makefile.rust motion-engine-fast``) and compares its time and
@@ -64,7 +76,8 @@ RING_TAIL_S = 0.005
 MODE_DAMPING_RATIO = 0.1
 MODE_FREQUENCY_FACTORS = (0.85, 1.0, 1.15, 2.0, 3.0, 5.0)
 FEASIBLE_SLACK_MM = 1e-4
-UNSHAPED = "none"
+CEILING_CUTS_PER_OCTAVE = 16
+LAW_INSTANTS = (0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98)
 WORKERS = 8
 QUADRATURE_NODES = 200001
 BLEND_WINDOW_FACTOR = 2.5
@@ -96,6 +109,7 @@ class Shape(Enum):
     CLOTHOID = "clothoid"
     ARC = "arc"
     PARABOLA = "parabola"
+    TROCHOID = "trochoid"
     SHARP = "sharp"
 
 
@@ -115,8 +129,6 @@ class Kernel:
 
     @classmethod
     def of(cls, kind: str, frequency_hz: float) -> Kernel:
-        if kind == UNSHAPED:
-            return cls(frequency_hz, 0, np.ones(1))
         coeffs, duration_per_hz = SMOOTHERS[kind]
         duration = duration_per_hz / frequency_hz
         unit = np.linspace(-0.5, 0.5, QUADRATURE_NODES)
@@ -171,24 +183,11 @@ class Profile:
         return Kernel.of(*self.x), Kernel.of(*self.y)
 
     @property
-    def shaped(self) -> bool:
-        return self.x[0] != UNSHAPED or self.y[0] != UNSHAPED
-
-    @property
     def label(self) -> str:
         return f"{self.machine}, {self.budget.value} {self.budget_value:g}"
 
 
 PROFILES = (
-    Profile(
-        "no shaper 10k",
-        10000.0,
-        200.0,
-        (UNSHAPED, 50.0),
-        (UNSHAPED, 44.0),
-        BudgetKind.SHAPED,
-        DEFAULT_ALLOWANCE_MM,
-    ),
     Profile(
         "bench 10k mzv50/zv44",
         10000.0,
@@ -262,11 +261,36 @@ def parabola_apex_radius_per_cut(theta: float) -> float:
     return 2.0 / math.tan(theta / 2.0) ** 2
 
 
+def half_swing(theta: float) -> float:
+    """The angle from the corner's inward bisector to its outgoing line:
+    how far an acceleration turns from the apex of a blend to its exit."""
+    return (math.pi - theta) / 2.0
+
+
+def trochoid_velocity(
+    theta: float, turned: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """A trochoid's velocity along and across its apex's tangent once its
+    acceleration has turned `turned` from the apex, in `A/ω`: `ω` the
+    rate the acceleration turns at."""
+    return 1.0 / math.sin(theta / 2.0) - np.cos(turned), np.sin(turned)
+
+
+def trochoid_apex_speed(theta: float) -> float:
+    return 1.0 / math.sin(theta / 2.0) - 1.0
+
+
+def trochoid_cut(theta: float) -> float:
+    """A trochoid's cut in `A/ω²`."""
+    return half_swing(theta) / math.cos(theta / 2.0) - 1.0
+
+
 @dataclass
 class Blend:
     """N corners of one shape and turn, by cut. A blend is walked from its
-    apex by a parameter `q`: the arc length, or on a parabola the distance
-    along the apex's tangent."""
+    apex by a parameter `q`: the arc length, on a parabola the distance
+    along the apex's tangent, on a trochoid the angle its acceleration has
+    turned times its `A/ω²`."""
 
     shape: Shape
     theta: float
@@ -296,6 +320,14 @@ class Blend:
                 * (slope * math.hypot(1.0, slope) + math.asinh(slope))
             )
             self.kappa_peak = 1.0 / radius
+        elif self.shape is Shape.TROCHOID:
+            swing = half_swing(theta)
+            unit = self.cut / trochoid_cut(theta)
+            turned = np.linspace(0.0, swing, QUADRATURE_NODES)
+            speed = np.hypot(*trochoid_velocity(theta, turned))
+            self.end = unit * swing
+            self.length = unit * np.trapezoid(speed, turned)
+            self.kappa_peak = 1.0 / (unit * trochoid_apex_speed(theta) ** 2)
         else:
             self.end = np.zeros_like(self.cut)
             self.length = self.end
@@ -308,6 +340,10 @@ class Blend:
     def slope(self, q: np.ndarray) -> np.ndarray:
         return np.minimum(q, self.end) * self.kappa_peak
 
+    def turned(self, q: np.ndarray) -> np.ndarray:
+        swing = half_swing(self.theta)
+        return np.minimum(q, self.end) * swing / self.end
+
     def kappa(self, q: np.ndarray) -> np.ndarray:
         inside = q < self.end
         if self.shape is Shape.CLOTHOID:
@@ -316,6 +352,13 @@ class Blend:
             return np.where(inside, self.kappa_peak, 0.0)
         if self.shape is Shape.PARABOLA:
             bent = self.kappa_peak * (1.0 + self.slope(q) ** 2) ** -1.5
+            return np.where(inside, bent, 0.0)
+        if self.shape is Shape.TROCHOID:
+            turned = self.turned(q)
+            along, across = trochoid_velocity(self.theta, turned)
+            turning = along * np.cos(turned) - across * np.sin(turned)
+            per_unit = turning / np.hypot(along, across) ** 3
+            bent = per_unit * half_swing(self.theta) / self.end
             return np.where(inside, bent, 0.0)
         return np.zeros_like(q)
 
@@ -326,14 +369,20 @@ class Blend:
             return self.theta / 2.0 + np.arctan(self.slope(q))
         if self.shape is Shape.ARC:
             return self.theta / 2.0 + self.slope(q)
+        if self.shape is Shape.TROCHOID:
+            along, across = trochoid_velocity(self.theta, self.turned(q))
+            return self.theta / 2.0 + np.arctan2(across, along)
         inside = np.minimum(q, self.end)
         ramp = inside - inside * inside / (2.0 * self.end)
         return self.theta / 2.0 + self.kappa_peak * ramp
 
     def arc_per_q(self, q: np.ndarray) -> np.ndarray:
-        if self.shape is not Shape.PARABOLA:
-            return np.ones_like(q)
-        return np.where(q < self.end, np.hypot(1.0, self.slope(q)), 1.0)
+        if self.shape is Shape.PARABOLA:
+            return np.where(q < self.end, np.hypot(1.0, self.slope(q)), 1.0)
+        if self.shape is Shape.TROCHOID:
+            speed = np.hypot(*trochoid_velocity(self.theta, self.turned(q)))
+            return np.where(q < self.end, speed, 1.0)
+        return np.ones_like(q)
 
 
 @dataclass
@@ -598,13 +647,9 @@ class Corner:
         return np.array([crossing(ratio, row, self.budget_mm) for row in curve])
 
     def planner_clothoid(self) -> tuple[float, float]:
-        """Today's choice: the cut whose apex is crossed fastest, or the
-        whole budget where no kernel shapes the path."""
+        """Today's choice: the cut whose apex is crossed fastest."""
         room = self.cut_room_mm()
         accel = self.profile.accel
-        if not self.profile.shaped:
-            cap = Blend(Shape.CLOTHOID, self.theta, np.array([room]))
-            return room, float(cap.speed_cap(accel)[0])
         cuts = room * 2.0 ** (-0.5 * np.arange(1, PLANNER_CUT_CANDIDATES + 1))
         ratios = self.ratios_within_budget(
             Shape.CLOTHOID, cuts, PLANNER_RATIO_NODES
@@ -616,24 +661,40 @@ class Corner:
             raise ValueError("no clothoid cut fits the budget")
         return float(cuts[best]), float(speeds[best])
 
+    def cut_ladder(self, per_octave: int) -> np.ndarray:
+        steps = np.arange(SEARCH_CUT_OCTAVES * per_octave + 1)
+        return self.cut_room_mm() * 2.0 ** (-steps / per_octave)
+
+    def least_cost(
+        self, shape: Shape, cuts: np.ndarray, speeds: np.ndarray
+    ) -> tuple[float, float]:
+        motion = self.moved(shape, cuts, speeds)
+        predicted = self.predicted_miss(cuts, self.raw_miss(motion))
+        cost = motion.half_cost_s()
+        cost[predicted > self.budget_mm + FEASIBLE_SLACK_MM] = np.inf
+        best = int(cost.argmin())
+        if math.isinf(cost[best]):
+            raise ValueError(f"no {shape.value} cut fits the budget")
+        return float(cuts[best]), float(speeds[best])
+
     def cheapest(self, shape: Shape) -> tuple[float, float]:
         """The cut and apex speed costing least time within the budget."""
-        room = self.cut_room_mm()
-        steps = np.arange(SEARCH_CUT_OCTAVES * SEARCH_CUTS_PER_OCTAVE + 1)
-        cuts = room * 2.0 ** (-steps / SEARCH_CUTS_PER_OCTAVE)
+        cuts = self.cut_ladder(SEARCH_CUTS_PER_OCTAVE)
         ratios = self.ratios_within_budget(shape, cuts, SEARCH_RATIO_NODES)
         fits = ~np.isnan(ratios)
         if not fits.any():
             raise ValueError(f"no {shape.value} cut fits the budget")
         cuts, ratios = cuts[fits], ratios[fits]
         cap = Blend(shape, self.theta, cuts).speed_cap(self.profile.accel)
-        speeds = ratios * cap
-        motion = self.moved(shape, cuts, speeds)
-        predicted = self.predicted_miss(cuts, self.raw_miss(motion))
-        cost = motion.half_cost_s()
-        cost[predicted > self.budget_mm + FEASIBLE_SLACK_MM] = np.inf
-        best = int(cost.argmin())
-        return float(cuts[best]), float(speeds[best])
+        return self.least_cost(shape, cuts, ratios * cap)
+
+    def cheapest_at_ceiling(self, shape: Shape) -> tuple[float, float]:
+        """The cut costing least time within the budget of a blend crossed
+        at its curvature ceiling, where its tangential acceleration passes
+        through zero instead of flipping."""
+        cuts = self.cut_ladder(CEILING_CUTS_PER_OCTAVE)
+        cap = Blend(shape, self.theta, cuts).speed_cap(self.profile.accel)
+        return self.least_cost(shape, cuts, cap)
 
     def fastest_sharp(self) -> float:
         speeds = np.linspace(0.0, self.profile.feed, SHARP_SPEED_NODES)
@@ -680,6 +741,7 @@ class Row:
     predicted_miss_mm: float
     cost_ms: float
     peak_accel_over_limit: float
+    peak_jerk: float
     ring_um: list[float]
 
 
@@ -703,7 +765,7 @@ def measure(
     clear = free.apex_index + math.ceil(after_blend_s / DT_S) + 2 - first
     assert clear + 2 < len(accels[0]), "the ring window runs out"
 
-    peak_accel = 0.0
+    peak_accel, peak_jerk = 0.0, 0.0
     ring = np.zeros(len(MODE_FREQUENCY_FACTORS))
     for orientation in orientations():
         sin, cos = math.sin(orientation), math.cos(orientation)
@@ -712,6 +774,8 @@ def measure(
             sin * accels[2] + cos * accels[3],
         )
         peak_accel = max(peak_accel, float(np.hypot(*axes).max()))
+        jerks = [np.diff(axis) / DT_S for axis in axes]
+        peak_jerk = max(peak_jerk, float(np.hypot(*jerks).max()))
         heading = orientation + corner.theta
         across = (abs(math.sin(heading)), abs(math.cos(heading)))
         for index, factor in enumerate(MODE_FREQUENCY_FACTORS):
@@ -729,11 +793,70 @@ def measure(
         float(corner.predicted_miss(cuts, np.array([raw]))[0]),
         cost_ms,
         peak_accel / corner.profile.accel,
+        peak_jerk,
         [float(value) for value in ring],
     )
 
 
-def study(case: tuple[Profile, float]) -> dict:
+@dataclass
+class Law:
+    """A blend's planned acceleration at LAW_INSTANTS of the time from its
+    apex to its exit."""
+
+    label: str
+    cut_mm: float
+    apex_speed: float
+    apex_to_exit_ms: float
+    tangential_over_limit: list[float]
+    normal_over_limit: list[float]
+    turned: list[float]
+    jerk: list[float]
+
+
+def law(
+    corner: Corner, label: str, shape: Shape, cut: float, speed: float
+) -> Law:
+    cuts, speeds = np.array([cut]), np.array([speed])
+    motion = corner.moved(shape, cuts, speeds, feed=math.inf)
+    accel = corner.profile.accel
+    inside = round(float(motion.exit_s()[0]) / DT_S)
+    q = motion.q_out[0, :inside]
+    normal = motion.speed_out[0, :inside] ** 2 * motion.blend.kappa(q)
+    tangential = np.sqrt(np.clip(accel**2 - normal**2, 0.0, None))
+    direction = motion.blend.heading(q) + np.arctan2(normal, tangential)
+    bisector = (corner.theta + math.pi) / 2.0
+    turned = (bisector - direction) / half_swing(corner.theta)
+    jerk = accel * np.abs(np.gradient(direction, DT_S))
+    at = [round(instant * (inside - 1)) for instant in LAW_INSTANTS]
+    return Law(
+        label,
+        cut,
+        speed,
+        1e3 * inside * DT_S,
+        [float(value) for value in tangential[at] / accel],
+        [float(value) for value in normal[at] / accel],
+        [float(value) for value in turned[at]],
+        [float(value) for value in jerk[at]],
+    )
+
+
+Plan = tuple[str, Shape, tuple[float, float]]
+
+
+def plans(corner: Corner) -> list[Plan]:
+    trochoid = corner.cheapest_at_ceiling(Shape.TROCHOID)
+    return [
+        ("stop", Shape.SHARP, (0.0, 0.0)),
+        ("clothoid (today)", Shape.CLOTHOID, corner.planner_clothoid()),
+        ("clothoid", Shape.CLOTHOID, corner.cheapest(Shape.CLOTHOID)),
+        ("arc", Shape.ARC, corner.cheapest(Shape.ARC)),
+        ("parabola", Shape.PARABOLA, corner.cheapest(Shape.PARABOLA)),
+        ("trochoid", Shape.TROCHOID, trochoid),
+        ("sharp at speed", Shape.SHARP, (0.0, corner.fastest_sharp())),
+    ]
+
+
+def opened(case: tuple[Profile, float]) -> tuple[Corner, dict]:
     profile, theta_deg = case
     corner = Corner(profile, math.radians(theta_deg))
     result = {
@@ -743,45 +866,56 @@ def study(case: tuple[Profile, float]) -> dict:
         "budget_mm": corner.budget_mm,
         "feed": profile.feed,
         "accel": profile.accel,
-        "rows": [],
     }
     if PREDICTION_MARGIN * corner.floor_mm > corner.budget_mm:
         result["skipped"] = (
             "the floor is past the budget: the planner slows the acceleration"
         )
+    return corner, result
+
+
+def study(case: tuple[Profile, float]) -> dict:
+    corner, result = opened(case)
+    if "skipped" in result:
         return result
-    plans = [
-        ("stop", Shape.SHARP, (0.0, 0.0)),
-        ("clothoid (today)", Shape.CLOTHOID, corner.planner_clothoid()),
-        ("clothoid", Shape.CLOTHOID, corner.cheapest(Shape.CLOTHOID)),
-        ("arc", Shape.ARC, corner.cheapest(Shape.ARC)),
-        ("parabola", Shape.PARABOLA, corner.cheapest(Shape.PARABOLA)),
+    result["rows"] = [
+        asdict(measure(corner, label, shape, cut, speed))
+        for label, shape, (cut, speed) in plans(corner)
     ]
-    if profile.shaped:
-        plans.append(
-            ("sharp at speed", Shape.SHARP, (0.0, corner.fastest_sharp()))
-        )
-    for label, shape, (cut, speed) in plans:
-        row = measure(corner, label, shape, cut, speed)
-        result["rows"].append(asdict(row))
     return result
 
 
-def table(result: dict) -> str:
-    head = (
+def laws(case: tuple[Profile, float]) -> dict:
+    corner, result = opened(case)
+    if "skipped" in result:
+        return result
+    result["laws"] = [
+        asdict(law(corner, label, shape, cut, speed))
+        for label, shape, (cut, speed) in plans(corner)
+        if shape is not Shape.SHARP
+    ]
+    return result
+
+
+def head(result: dict) -> str:
+    return (
         f"\n{result['profile']}  turn {result['theta_deg']:g} deg  "
         f"F {result['feed']:g}  floor {result['floor_mm']:.4f} mm  "
         f"budget {result['budget_mm']:.4f} mm"
     )
+
+
+def table(result: dict) -> str:
     if "skipped" in result:
-        return f"{head}\n  {result['skipped']}"
+        return f"{head(result)}\n  {result['skipped']}"
     modes = "".join(
         f" {f'{factor:g}f':>7}" for factor in MODE_FREQUENCY_FACTORS
     )
     lines = [
-        head,
+        head(result),
         f"  {'plan':<17} {'cut':>7} {'v_apex':>7} {'miss':>7} {'pred':>7}"
-        f" {'cost_ms':>8} {'saved':>7} {'a/A':>6}  ring um:{modes}",
+        f" {'cost_ms':>8} {'saved':>7} {'a/A':>6} {'jerk':>9}"
+        f"  ring um:{modes}",
     ]
     today = result["rows"][1]["cost_ms"]
     for row in result["rows"]:
@@ -791,8 +925,38 @@ def table(result: dict) -> str:
             f" {row['apex_speed']:7.2f} {row['raw_miss_mm']:7.4f}"
             f" {row['predicted_miss_mm']:7.4f} {row['cost_ms']:8.3f}"
             f" {today - row['cost_ms']:7.3f}"
-            f" {row['peak_accel_over_limit']:6.2f}          {ring}"
+            f" {row['peak_accel_over_limit']:6.2f} {row['peak_jerk']:9.3g}"
+            f"          {ring}"
         )
+    return "\n".join(lines)
+
+
+def law_table(result: dict) -> str:
+    if "skipped" in result:
+        return f"{head(result)}\n  {result['skipped']}"
+    lines = [head(result)]
+    for plan in result["laws"]:
+        lines.append(
+            f"  {plan['label']:<17} cut {plan['cut_mm']:.4f}"
+            f"  v_apex {plan['apex_speed']:.2f}"
+            f"  apex to exit {plan['apex_to_exit_ms']:.3f} ms"
+        )
+        lines.append(
+            f"    {'t/T':>5} {'a_t/A':>7} {'a_n/A':>7} {'turned':>7}"
+            f" {'jerk':>9}"
+        )
+        columns = zip(
+            LAW_INSTANTS,
+            plan["tangential_over_limit"],
+            plan["normal_over_limit"],
+            plan["turned"],
+            plan["jerk"],
+        )
+        for instant, tangential, normal, turned, jerk in columns:
+            lines.append(
+                f"    {instant:5.2f} {tangential:7.3f} {normal:7.3f}"
+                f" {turned:7.3f} {jerk:9.3g}"
+            )
     return "\n".join(lines)
 
 
@@ -890,6 +1054,7 @@ def main() -> None:
         type=float,
         help="plan every profile at its floor plus this many mm",
     )
+    parser.add_argument("--law", action="store_true")
     parser.add_argument("--engine", action="store_true")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
@@ -903,11 +1068,12 @@ def main() -> None:
         if args.profiles in profile.label
         for theta_deg in turns
     ]
+    report, render = (laws, law_table) if args.law else (study, table)
     with multiprocessing.Pool(min(WORKERS, len(cases))) as pool:
         results = []
-        for result in pool.imap(study, cases):
+        for result in pool.imap(report, cases):
             results.append(result)
-            print(table(result), flush=True)
+            print(render(result), flush=True)
     if args.json:
         args.json.write_text(json.dumps(results, indent=1))
 
