@@ -17,7 +17,7 @@ from tools.motion_eval import evaluate, fuzz, run, sweep
 OWNER_CFG = sweep.HERE / "configs" / "owner.cfg"
 MAX_ACCEL = 50000.0
 MAX_VELOCITY = 800.0
-BOUND = 1.03 * MAX_ACCEL
+BOUND = 1.03 * math.sqrt(2.0) * MAX_ACCEL
 MOTOR_ACCEL = MAX_ACCEL
 DT = 25e-6
 WORST_CASE = "voron_top_layers"
@@ -45,7 +45,11 @@ def _run(section, gcode, start):
         raw = run.run_klippy(config, gcode, start)
     _, _, _, _, _, motion = evaluate.executed_motion(raw.capture, DT)
     peaks = {a: float(np.abs(motion[a].acc).max()) for a in "xy"}
-    return raw.capture, peaks
+    motors = {
+        "motor_a": float(np.abs(motion["x"].acc + motion["y"].acc).max()),
+        "motor_b": float(np.abs(motion["x"].acc - motion["y"].acc).max()),
+    }
+    return raw.capture, dict(peaks, **motors)
 
 
 def _case(name):
@@ -99,7 +103,7 @@ def test_max_corner_accel_holds_the_burst():
     _, peaks = _run(
         "[corner_deviation]\nmax_corner_accel: %r\n" % (BOUND,), text, start
     )
-    assert max(peaks.values()) <= BOUND
+    assert max(peaks["motor_a"], peaks["motor_b"]) <= BOUND
 
 
 @pytest.mark.parametrize(
@@ -140,14 +144,14 @@ def test_recommended_max_accel_keeps_the_worst_corner_within_the_motor():
     _, peaks = _run(
         "[corner_deviation]\n", _fast_shallow_corner(recommended), START
     )
-    assert max(peaks.values()) <= MOTOR_ACCEL
+    assert max(peaks["x"], peaks["y"]) <= MOTOR_ACCEL
     text, start = _case(WORST_CASE)
     _, peaks = _run(
         "[corner_deviation]\n",
         "SET_VELOCITY_LIMIT ACCEL=%r\n%s" % (recommended, text),
         start,
     )
-    assert max(peaks.values()) <= MOTOR_ACCEL
+    assert max(peaks["x"], peaks["y"]) <= MOTOR_ACCEL
 
 
 class _Gcmd:

@@ -288,6 +288,9 @@ def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
                 step_dist=st["step_dist"],
                 final_mcu_position=st["final_mcu_position"],
                 model_vs_steps=step_checks[name],
+                peak_accel_mm_s2=float(
+                    np.abs(exec_acc @ np.array(st["linear_map"]["row"])).max()
+                ),
             )
             for name, st in steppers.items()
         },

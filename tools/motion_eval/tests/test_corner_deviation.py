@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import math
 import tempfile
 
 import pytest
@@ -14,7 +15,8 @@ CASES = (
     "circles",
     "voron_top_layers",
 )
-BOUND_RATIO = 1.03
+STEPPER_DEMAND = math.sqrt(2.0)
+BOUND_RATIO = 1.03 * STEPPER_DEMAND
 MODES = ("floor", "bounded")
 
 
@@ -80,4 +82,4 @@ def test_smoother_peak_accel_within_what_the_planner_admits(case, config):
 def test_smoother_peak_accel_within_max_corner_accel(case, config):
     bound = BOUND_RATIO * max_accel(case, config, "smooth_mzv")
     result = limited("bounded", case, config, "smooth_mzv")
-    assert result["peak_accel"] <= bound
+    assert result["peak_stepper_accel"] <= bound

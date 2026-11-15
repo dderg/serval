@@ -47,3 +47,18 @@ def test_junction_limits_do_not_depend_on_flushes(seed):
     with tempfile.TemporaryDirectory() as tmp:
         fuzz.check_flushes(v, case, tmp)
     assert not v, v[:10]
+
+
+@pytest.mark.parametrize("seed", seeds())
+def test_bounded_junction_limits_do_not_depend_on_lazy_flushes(seed):
+    case = corpus_case(seed)
+    v = fuzz.Violations()
+    lazy_env = {
+        "MOTION_EVAL_LAZY_FLUSH_AT": ",".join(map(str, case.lazy_flush_at))
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        section = fuzz._sections(case)["bounded"]
+        batch = fuzz._run(case, tmp, section)
+        lazy = fuzz._run(case, tmp, section, env=lazy_env)
+        fuzz._check_junctions(v, "bounded, lazy flushes", lazy, batch)
+    assert not v, v[:10]

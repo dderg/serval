@@ -400,16 +400,23 @@ def _config(case, tmpdir, section):
     return path
 
 
-def _config_max_accel(case):
+def _config_value(case, key):
     base = dict((n, p) for n, p, _ in CONFIGS)[case.config]
-    (value,) = re.findall(r"^max_accel:\s*(\S+)", base.read_text(), re.M)
-    return float(value)
+    (value,) = re.findall(r"^%s:\s*(\S+)" % (key,), base.read_text(), re.M)
+    return value
 
 
 def _corner_accel(case):
-    """The bounded run bounds the corner burst, CORNER_ACCEL_RATIO above
-    the config's max_accel; the floor run leaves it unbounded."""
-    return CORNER_ACCEL_RATIO * _config_max_accel(case)
+    """The bounded run's max_corner_accel: CORNER_ACCEL_RATIO above the
+    most a straight move at the config's max_accel asks of one stepper
+    (on corexy sqrt(2) * max_accel, moving diagonally); the floor run
+    leaves it unbounded."""
+    rows = corner_deviation.STEPPER_ROWS[_config_value(case, "kinematics")]
+    return (
+        CORNER_ACCEL_RATIO
+        * float(_config_value(case, "max_accel"))
+        * max(math.hypot(*row) for row in rows)
+    )
 
 
 def _sections(case):
@@ -507,35 +514,78 @@ def _shaper_spec(state):
     return ("smoother", tuple(state["coeffs"]), state["smooth_time"])
 
 
-def _admitted_accel(capture, corner_accel):
+def _epoch_models(capture):
+    """Per shaper epoch, corner_deviation's CornerAccel (None when X or Y
+    is unshaped) and whether max_corner_accel bounds it (smoothers on
+    both axes)."""
+    models = {}
+    for epoch, state in enumerate(capture["shapers"]):
+        specs = tuple(_shaper_spec(state[axis]) for axis in "xy")
+        if None in specs:
+            models[epoch] = (None, False)
+            continue
+        kx, ky = (corner_deviation.kernel_from_spec(s) for s in specs)
+        arrays = corner_deviation.table_arrays(specs, kx, ky, TABLE_CACHE_DIR)
+        models[epoch] = (
+            corner_deviation.CornerAccel(arrays, kx, ky),
+            kx.density is not None and ky.density is not None,
+        )
+    return models
+
+
+def _admitted_accel(capture):
     """Per move, the worst executed (x, y) acceleration the limiter admits
     at the move's accel under its shaper epoch (corner_deviation's
     CornerAccel; a stop at every corner without shaping)."""
     moves = capture["moves"]
     max_velocity = max(m["max_cruise_v"] for m in moves)
-    models, worst = {}, {}
+    models, worst = _epoch_models(capture), {}
     out = np.zeros((len(moves), 2))
     for i, m in enumerate(moves):
-        epoch = m["shaper_epoch"]
-        if epoch not in models:
-            state = capture["shapers"][epoch]
-            specs = tuple(_shaper_spec(state[axis]) for axis in "xy")
-            models[epoch] = None
-            if None not in specs:
-                kx, ky = (corner_deviation.kernel_from_spec(s) for s in specs)
-                arrays = corner_deviation.table_arrays(
-                    specs, kx, ky, TABLE_CACHE_DIR
-                )
-                models[epoch] = corner_deviation.CornerAccel(arrays, kx, ky)
-        key = (epoch, m["accel"])
+        key = (m["shaper_epoch"], m["accel"])
         if key not in worst:
-            model = models[epoch]
+            model, _ = models[m["shaper_epoch"]]
             worst[key] = (
                 (m["accel"], m["accel"])
                 if model is None
-                else model.worst(m["accel"], max_velocity, corner_accel)
+                else model.worst(m["accel"], max_velocity, None)
             )
         out[i] = worst[key]
+    return out
+
+
+def _stepper_rows(capture):
+    """(name, (x, y)) of every stepper the toolhead's X/Y motion moves,
+    from its captured linear map."""
+    rows = []
+    for name, st in sorted(capture["steppers"].items()):
+        x, y, z = st["linear_map"]["row"]
+        if not (x or y):
+            continue
+        if z:
+            raise ValueError("stepper %s couples X/Y with Z" % (name,))
+        rows.append((name, (x, y)))
+    return rows
+
+
+def _admitted_stepper_accel(capture, corner_accel, rows):
+    """Per move and stepper row, the guarantee of max_corner_accel: under
+    smoothers on X and Y, max(max_corner_accel, the move's own demand
+    accel * sum_a |row_a * u_a|); otherwise the floor-mode per-axis worst
+    through the row."""
+    moves = capture["moves"]
+    models = _epoch_models(capture)
+    floor = _admitted_accel(capture)
+    out = np.zeros((len(moves), len(rows)))
+    for i, m in enumerate(moves):
+        bounded = models[m["shaper_epoch"]][1]
+        u = (m["axes_r_x"], m["axes_r_y"])
+        for k, (_, row) in enumerate(rows):
+            if bounded:
+                own = m["accel"] * sum(abs(r * c) for r, c in zip(row, u))
+                out[i, k] = max(corner_accel, own)
+            else:
+                out[i, k] = sum(abs(r) * w for r, w in zip(row, floor[i]))
     return out
 
 
@@ -591,30 +641,34 @@ def _check_shaped_at(v, name, raw, corner_accel, dt):
         )
     t = t0 + dt * np.arange(n)
     near = _painted_max(moves, max_accel, t0, n, reach, dt)
-    admitted = _admitted_accel(raw.capture, corner_accel)
-    admitted_near = {
-        axis: _painted_max(moves, admitted[:, i], t0, n, reach, dt)
-        for i, axis in enumerate("xy")
-    }
-    admitted_near["z"] = near
+    series = [("z", np.abs(motion["z"].acc), near)]
+    if corner_accel is None:
+        admitted = _admitted_accel(raw.capture)
+        for i, axis in enumerate("xy"):
+            limit = _painted_max(moves, admitted[:, i], t0, n, reach, dt)
+            series.append((axis, np.abs(motion[axis].acc), limit))
+    else:
+        rows = _stepper_rows(raw.capture)
+        admitted = _admitted_stepper_accel(raw.capture, corner_accel, rows)
+        for k, (stepper, row) in enumerate(rows):
+            acc = np.abs(row[0] * motion["x"].acc + row[1] * motion["y"].acc)
+            limit = _painted_max(moves, admitted[:, k], t0, n, reach, dt)
+            series.append((stepper, acc, limit))
     slack = FLOAT_TOLERANCE * near.max()
-    metrics["accel_ratio"] = 0.0
-    metrics["admitted_ratio"] = 0.0
-    for axis in "xyz":
-        acc = np.abs(motion[axis].acc)
-        limit = admitted_near[axis]
-        metrics["accel_ratio"] = max(
-            metrics["accel_ratio"],
-            float((acc / np.where(near > 0.0, near, np.inf)).max(initial=0.0)),
+    metrics["accel_ratio"] = max(
+        float(
+            (np.abs(motion[a].acc) / np.where(near > 0.0, near, np.inf)).max(
+                initial=0.0
+            )
         )
-        positive = admitted_near[axis] > 0.0
+        for a in "xyz"
+    )
+    metrics["admitted_ratio"] = 0.0
+    for label, acc, limit in series:
+        positive = limit > 0.0
         metrics["admitted_ratio"] = max(
             metrics["admitted_ratio"],
-            float(
-                (acc / np.where(positive, admitted_near[axis], np.inf)).max(
-                    initial=0.0
-                )
-            ),
+            float((acc / np.where(positive, limit, np.inf)).max(initial=0.0)),
         )
         v.check(
             bool(np.isfinite(acc).all()), "%s: non-finite executed accel", name
@@ -626,7 +680,7 @@ def _check_shaped_at(v, name, raw, corner_accel, dt):
                 False,
                 "%s: executed %s accel %.1f > %.1f at t=%.6f",
                 name,
-                axis,
+                label,
                 acc[k],
                 limit[k],
                 t[k],
