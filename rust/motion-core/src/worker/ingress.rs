@@ -23,6 +23,12 @@ mod pacer;
 use pacer::IdleVerdict;
 pub(super) use pacer::Pacer;
 
+/// The shortest wait the ingress parks for. The gate can reopen in a few
+/// nanoseconds; a `recv_timeout` that short returns without parking, and a
+/// loop of them spins, which in the simulator also keeps the virtual clock
+/// from ever reaching the reopening.
+const MIN_PARK: Duration = Duration::from_millis(1);
+
 /// Proof the ingress just found its inbox empty: the idle path's runway
 /// rule only holds then, and a stream whose moves keep arriving is paced by
 /// [`BusyRunwayWatch`] instead.
@@ -165,7 +171,7 @@ impl Ingress {
                     .recv()
                     .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected);
             };
-            match rx.recv_timeout(wait) {
+            match rx.recv_timeout(wait.max(MIN_PARK)) {
                 Err(crossbeam_channel::RecvTimeoutError::Timeout)
                     if deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
                 received => return received,
