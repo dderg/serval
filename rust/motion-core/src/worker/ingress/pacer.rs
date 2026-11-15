@@ -6,8 +6,20 @@ use std::time::{Duration, Instant};
 
 use crate::anchor::LOW_MARGIN_WARN_SECS;
 
-const DRAIN_RESERVE_FLOOR_S: f64 = 0.5;
 pub(super) const DRAIN_RESERVE_SAFETY: f64 = 2.0;
+
+/// The runway one brake to rest is taken to consume until a costlier one is
+/// measured: 2.7x the slowest drain the Pi 5 bench measured with motion in
+/// flight (0.09 s, 2026-11-15). Braking with only the transport floor left
+/// anchored the drained trajectory at the floor or below it.
+const UNMEASURED_BRAKE_S: f64 = 0.25;
+
+/// The most reserve a host may need: twice the bench's starved one-core
+/// trident brake (0.53 s). The intake keeps the runway at the reserve plus
+/// the pump's stall headroom, so a wider reserve would hold every PAUSE and
+/// CANCEL_PRINT back by as much; a host whose brakes cost more cannot be
+/// paced and fails loudly.
+const RESERVE_CAP_S: f64 = 2.0;
 
 // TODO: expose as a config knob if 250 ms turns out wrong for slower feeds.
 const STARTUP_PRIME_S: f64 = 0.250;
@@ -72,23 +84,29 @@ impl Pacer {
     /// The runway the pacer keeps for braking to rest: a multiple of one
     /// brake to rest.
     pub(in crate::worker) fn reserve_secs(&self) -> f64 {
-        (self.one_brake_secs() * DRAIN_RESERVE_SAFETY).max(DRAIN_RESERVE_FLOOR_S)
+        self.one_brake_secs() * DRAIN_RESERVE_SAFETY
     }
 
     /// The runway one brake to rest consumes, measured from the last
     /// moment the pacer could decide on it: the most runway it lost while
-    /// planning between two decisions, the slowest drain, and the transport
-    /// floor the brake's trajectory must still arrive ahead of the playhead
-    /// by.
+    /// planning between two decisions, the costliest drain, and the
+    /// transport floor the brake's trajectory must still arrive ahead of the
+    /// playhead by.
     fn one_brake_secs(&self) -> f64 {
-        self.worst_blind_drop_s + self.worst_drain_s + LOW_MARGIN_WARN_SECS
+        (self.worst_blind_drop_s + self.worst_drain_s).max(UNMEASURED_BRAKE_S)
+            + LOW_MARGIN_WARN_SECS
     }
 
-    /// The runway fell from `before_s` to `after_s` while the ingress
-    /// planned, unable to pace. Runway the dispatcher kept extending while
-    /// planning waited on it costs nothing.
-    pub(in crate::worker) fn note_step(&mut self, before_s: f64, after_s: f64) {
-        self.worst_blind_drop_s = self.worst_blind_drop_s.max(before_s - after_s);
+    /// The runway fell from `before_s` to as little as `lowest_s` while the
+    /// ingress planned, unable to pace. Runway the dispatcher kept extending
+    /// while planning waited on it costs nothing.
+    pub(in crate::worker) fn note_step(
+        &mut self,
+        before_s: f64,
+        lowest_s: f64,
+    ) -> Result<(), String> {
+        self.worst_blind_drop_s = self.worst_blind_drop_s.max(before_s - lowest_s);
+        self.within_cap()
     }
 
     pub(in crate::worker) fn undrained(&self) -> bool {
@@ -103,16 +121,44 @@ impl Pacer {
         self.undrained_since = None;
     }
 
-    /// A brake to rest finished after `latency_s`; true when it is the
-    /// slowest yet and widened the reserve.
-    pub(in crate::worker) fn note_drain(&mut self, latency_s: f64) -> bool {
+    /// A brake to rest finished. It consumed the runway between `before_s`,
+    /// when it was ordered, and `lowest_s`, the least left ahead of the
+    /// playhead until its trajectory was dispatched: time spent waiting on a
+    /// playhead that kept the committed end as far ahead costs nothing, and a
+    /// timeline a reset or halt discarded (`None`) consumed nothing. True
+    /// when it is the costliest yet and widened the reserve.
+    pub(in crate::worker) fn note_drain(
+        &mut self,
+        before_s: f64,
+        lowest_s: Option<f64>,
+    ) -> Result<bool, String> {
         self.undrained_since = None;
         self.busy.reset();
-        if latency_s <= self.worst_drain_s {
-            return false;
+        let Some(lowest_s) = lowest_s else {
+            return Ok(false);
+        };
+        let consumed_s = before_s - lowest_s;
+        if consumed_s <= self.worst_drain_s {
+            return Ok(false);
         }
-        self.worst_drain_s = latency_s;
-        true
+        self.worst_drain_s = consumed_s;
+        self.within_cap()?;
+        Ok(true)
+    }
+
+    fn within_cap(&self) -> Result<(), String> {
+        let reserve_s = self.reserve_secs();
+        if reserve_s <= RESERVE_CAP_S {
+            return Ok(());
+        }
+        Err(format!(
+            "pacer: one brake to rest costs {:.3}s of runway ({:.3}s lost planning \
+             between decisions, {:.3}s draining), so its {reserve_s:.3}s reserve passes \
+             the {RESERVE_CAP_S}s cap: this host cannot brake in time",
+            self.one_brake_secs(),
+            self.worst_blind_drop_s,
+            self.worst_drain_s
+        ))
     }
 
     /// Whether a stream whose moves keep arriving must brake now.

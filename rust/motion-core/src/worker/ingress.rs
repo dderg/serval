@@ -13,6 +13,7 @@ use motion_pipeline::{
 };
 
 use super::dispatch::WorkerLinks;
+use super::intake_gate::{self, IntakeGate};
 use super::{ExecutionTimeline, HomeDripParams, NudgeParams, StreamMsg, fatal};
 use crate::dispatch_record::{DispatchRecorder, DrainCause};
 use crate::lock_ext::LockExt;
@@ -47,6 +48,7 @@ pub(super) struct Ingress {
     pub(super) moves_sent: u64,
     pub(super) dispatch_record: Option<Arc<DispatchRecorder>>,
     pub(super) pump: crossbeam_channel::Sender<crate::pump::PumpMsg>,
+    pub(super) intake: Arc<IntakeGate>,
 }
 
 impl Ingress {
@@ -87,12 +89,11 @@ impl Ingress {
                 match rx.try_recv() {
                     Ok(msg) => Some(msg),
                     Err(crossbeam_channel::TryRecvError::Empty) => {
-                        let runway_before_s = self.timeline.frontier.runway_secs();
+                        let runway_before_s = self.watch_runway();
                         let planned_from_s = self.pipeline.planned_through_s();
                         let planned = self.pipeline.idle();
                         self.hold_for_throttle(planned_from_s);
-                        self.pacer
-                            .note_step(runway_before_s, self.timeline.frontier.runway_secs());
+                        self.note_planning_step(runway_before_s);
                         if !planned {
                             if self.links.shutting_down.load(Ordering::Acquire) {
                                 return;
@@ -101,7 +102,7 @@ impl Ingress {
                         }
                         match self.drain_or_runway(InboxFoundEmpty(())) {
                             None => continue,
-                            Some(wait) => match rx.recv_timeout(wait) {
+                            Some(wait) => match self.recv_reopening_intake(&rx, Some(wait)) {
                                 Ok(msg) => Some(msg),
                                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => None,
@@ -111,19 +112,23 @@ impl Ingress {
                     Err(crossbeam_channel::TryRecvError::Disconnected) => None,
                 }
             } else {
-                rx.recv().ok()
+                self.recv_reopening_intake(&rx, None).ok()
             };
             let Some(msg) = received else {
                 self.drain_and_fence();
                 return;
             };
-            self.links.wakeup.notify_space_freed();
+            if let StreamMsg::Move(m) = &msg {
+                self.intake.leave(intake_gate::shortest_ns(m));
+            }
+            if self.intake.admits() {
+                self.links.wakeup.notify_space_freed();
+            }
             match msg {
                 StreamMsg::Move(m) => {
-                    let runway_before_s = self.timeline.frontier.runway_secs();
+                    let runway_before_s = self.watch_runway();
                     self.handle_move(m);
-                    self.pacer
-                        .note_step(runway_before_s, self.timeline.frontier.runway_secs());
+                    self.note_planning_step(runway_before_s);
                     self.brake_if_busy_runway_falls();
                 }
                 other => {
@@ -133,6 +138,56 @@ impl Ingress {
                 }
             }
         }
+    }
+
+    /// Waits up to `limit` (without one on `None`) for the next message,
+    /// waking a submitter the intake refused the moment the playhead has
+    /// made room for its move.
+    fn recv_reopening_intake(
+        &self,
+        rx: &Receiver<StreamMsg>,
+        limit: Option<Duration>,
+    ) -> Result<StreamMsg, crossbeam_channel::RecvTimeoutError> {
+        let deadline = limit.map(|limit| Instant::now() + limit);
+        loop {
+            let reopens_in = self.intake.reopens_in();
+            if reopens_in.is_none() {
+                self.links.wakeup.notify_space_freed();
+            }
+            let until_deadline =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            let wait = match (until_deadline, reopens_in) {
+                (Some(until_deadline), Some(reopens_in)) => Some(until_deadline.min(reopens_in)),
+                (until_deadline, reopens_in) => until_deadline.or(reopens_in),
+            };
+            let Some(wait) = wait else {
+                return rx
+                    .recv()
+                    .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected);
+            };
+            match rx.recv_timeout(wait) {
+                Err(crossbeam_channel::RecvTimeoutError::Timeout)
+                    if deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
+                received => return received,
+            }
+        }
+    }
+
+    /// Starts a measured interval: marks the frontier and returns the runway
+    /// now.
+    fn watch_runway(&self) -> f64 {
+        self.timeline.frontier.mark_lowest_lead();
+        self.timeline.frontier.runway_secs()
+    }
+
+    fn note_planning_step(&mut self, runway_before_s: f64) {
+        let Some(lowest_s) = self.timeline.frontier.lowest_lead_secs() else {
+            return;
+        };
+        if let Err(error) = self.pacer.note_step(runway_before_s, lowest_s) {
+            fatal(&error);
+        }
+        self.intake.set_reserve(self.pacer.reserve_secs());
     }
 
     fn send(&mut self, item: StreamInput) {
@@ -190,13 +245,14 @@ impl Ingress {
     /// Drain the lookahead and fence: the pipeline is empty and the full
     /// braked-to-rest trajectory is dispatched when this returns, so no
     /// intake remains uncommitted. Every drain runs through here, so every
-    /// drain measures the traversal the pacer's reserve has to cover.
+    /// drain measures the runway a brake to rest consumes.
     fn drain_and_fence(&mut self) -> BarrierAck {
         self.drain_and_fence_as(DrainCause::Requested)
     }
 
     fn drain_and_fence_as(&mut self, cause: DrainCause) -> BarrierAck {
         let sent = Instant::now();
+        let runway_before_s = self.watch_runway();
         self.send(StreamInput::Drain);
         self.pacer.note_reset();
         let ack = self.barrier();
@@ -207,13 +263,20 @@ impl Ingress {
             }
         }
         let latency_s = sent.elapsed().as_secs_f64();
-        if self.pacer.note_drain(latency_s) {
+        let lowest_s = self.timeline.frontier.lowest_lead_secs();
+        let widened = self
+            .pacer
+            .note_drain(runway_before_s, lowest_s)
+            .unwrap_or_else(|error| fatal(&error));
+        self.intake.set_reserve(self.pacer.reserve_secs());
+        if widened {
             tracing::info!(
                 subsystem = "motion",
                 event = "pacer_reserve_raised",
                 latency_s,
+                consumed_s = runway_before_s - lowest_s.unwrap_or(runway_before_s),
                 reserve_s = self.pacer.reserve_secs(),
-                "[pacer] slowest brake-to-rest yet — widening the runway the \
+                "[pacer] costliest brake-to-rest yet — widening the runway the \
                  pacer keeps for the next one"
             );
         }

@@ -266,8 +266,7 @@ impl SegmentSink for AnchoredSink {
 
 #[test]
 fn a_claim_after_a_nudge_never_follows_the_next_move_start() {
-    let frontier: Arc<CommittedFrontier> = Arc::default();
-    frontier.advance_to(Instant::now() + Duration::from_secs(60));
+    let frontier = Arc::new(CommittedFrontier::unexecuted());
     let timeline = ExecutionTimeline {
         frontier,
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
@@ -556,8 +555,7 @@ fn a_busy_stream_falling_behind_its_playhead_brakes_before_running_dry() {
 
 #[test]
 fn a_start_hold_delays_the_next_move_to_the_held_instant() {
-    let frontier: Arc<CommittedFrontier> = Arc::default();
-    frontier.advance_to(Instant::now() + Duration::from_secs(60));
+    let frontier = Arc::new(CommittedFrontier::unexecuted());
     let timeline = ExecutionTimeline {
         frontier,
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
@@ -1321,6 +1319,33 @@ fn submit_move_errors_when_channel_full_instead_of_blocking() {
     assert!(matches!(err, StreamWorkerError::ChannelFull));
 }
 
+/// PAUSE and CANCEL_PRINT stop feeding moves and wait for what is queued
+/// ahead of the playhead: on the bench that was 14-28 s of committed
+/// runway, so the intake admits no move while the runway is past its cap.
+#[test]
+fn moves_wait_while_the_committed_runway_is_past_the_cap() {
+    let frontier: Arc<CommittedFrontier> = Arc::default();
+    frontier.advance_to(Instant::now() + Duration::from_secs(10));
+    let h = spawn_capture(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        Capture::default(),
+        Arc::clone(&frontier),
+    );
+    let first = line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]);
+    assert!(
+        matches!(
+            h.submit_move(first.clone()),
+            Err(StreamWorkerError::ChannelFull)
+        ),
+        "a move was admitted behind 10 s of committed runway"
+    );
+    frontier.clear();
+    h.submit_move(first)
+        .expect("the playhead caught up with the committed end");
+}
+
 #[test]
 fn channel_depth_tracks_occupancy_and_refuses_overflow_at_capacity() {
     let cap = 4;
@@ -1570,8 +1595,7 @@ fn poll_claim(h: &StreamWorkerHandle, id: u64, timeout: Duration) -> Result<f64,
 #[test]
 fn claiming_the_earliest_start_leaves_buffered_motion_unbraked() {
     let rests = RestCount::default();
-    let frontier: Arc<CommittedFrontier> = Arc::default();
-    frontier.advance_to(Instant::now() + Duration::from_secs(60));
+    let frontier = Arc::new(CommittedFrontier::unexecuted());
     let mut h = spawn_capture(
         cfg(),
         AxisChainSet::default(),
