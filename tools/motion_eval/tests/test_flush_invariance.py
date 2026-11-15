@@ -57,7 +57,7 @@ def test_bounded_junction_limits_do_not_depend_on_lazy_flushes(seed):
         "MOTION_EVAL_LAZY_FLUSH_AT": ",".join(map(str, case.lazy_flush_at))
     }
     with tempfile.TemporaryDirectory() as tmp:
-        section = fuzz._sections(case)["bounded"]
+        section = fuzz.bound_section(fuzz.bound_caps(case, "corexy")["both"])
         batch = fuzz._run(case, tmp, section)
         lazy = fuzz._run(case, tmp, section, env=lazy_env)
         fuzz._check_junctions(v, "bounded, lazy flushes", lazy, batch)

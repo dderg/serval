@@ -8,8 +8,10 @@ reversals, collinear runs, arcs, Z hops, extrude-only moves and retracts,
 G92, SET_VELOCITY_LIMIT, M204 and SET_INPUT_SHAPER mid-print (smoothers,
 pulse shapers and off), on owner.cfg, bench.cfg or fast.cfg. It runs the
 default planner (no limiter), [corner_deviation] in floor mode, bounded
-by max_corner_accel, and floor mode again with forced and with lazy
-lookahead flushes, and checks:
+by max_corner_accel, by max_corner_stepper_accel and by both (on the
+config's corexy and again as cartesian, each with its own default run),
+and floor mode again with forced and with lazy lookahead flushes, and
+checks:
 
 - every run completes, every trapq move is finite with positive duration,
   and the executed motion matches the decoded steps (the harness check);
@@ -18,8 +20,9 @@ lookahead flushes, and checks:
   moves around it;
 - the trapq accels and the final step positions equal the default run's;
 - executed peak acceleration per axis <= what the limiter admits
-  (CornerAccel.worst, cluster margin included, in floor mode;
-  max_corner_accel in the bounded run);
+  (CornerAccel.worst, cluster margin included, in floor mode); in the
+  bounded runs, per bounded row (axes, steppers) the stated guarantee
+  max(cap, what the moves near the time ask alone);
 - lazy flushes at random moves leave the trapq and the junction limits
   identical; forced flushes (M400) leave every junction limit not at a
   flush identical and every move at most as fast.
@@ -74,6 +77,8 @@ MICRO_MM = (0.01, 0.5)
 CLUSTER_MOVES = (3, 40)
 CLUSTERS = (3, 12)
 CORNER_ACCEL_RATIO = 1.03
+FLOOR_SECTION = "[corner_deviation]\n"
+KINEMATICS = ("corexy", "cartesian")
 TABLE_CACHE_DIR = os.path.expanduser(corner_deviation.TABLE_CACHE_DIR)
 
 
@@ -391,12 +396,15 @@ def generate_clusters(seed):
 GENERATORS = {"random": generate, "clusters": generate_clusters}
 
 
-def _config(case, tmpdir, section):
+def _config(case, tmpdir, section, kinematics=None):
     base = dict((n, p) for n, p, _ in CONFIGS)[case.config]
-    if section is None:
+    override = ""
+    if kinematics not in (None, _config_value(case, "kinematics")):
+        override = "[printer]\nkinematics: %s\n\n" % (kinematics,)
+    if section is None and not override:
         return base
     path = pathlib.Path(tempfile.mkstemp(suffix=".cfg", dir=tmpdir)[1])
-    path.write_text("[include %s]\n\n%s" % (base, section))
+    path.write_text("[include %s]\n\n%s%s" % (base, override, section or ""))
     return path
 
 
@@ -406,25 +414,52 @@ def _config_value(case, key):
     return value
 
 
-def _corner_accel(case):
-    """The bounded run's max_corner_accel: CORNER_ACCEL_RATIO above the
-    most a straight move at the config's max_accel asks of one stepper
-    (on corexy sqrt(2) * max_accel, moving diagonally); the floor run
-    leaves it unbounded."""
-    rows = corner_deviation.STEPPER_ROWS[_config_value(case, "kinematics")]
-    return (
-        CORNER_ACCEL_RATIO
-        * float(_config_value(case, "max_accel"))
-        * max(math.hypot(*row) for row in rows)
-    )
-
-
-def _sections(case):
+def bound_caps(case, kinematics):
+    """Per bound setting, (max_corner_accel, max_corner_stepper_accel):
+    CORNER_ACCEL_RATIO above the most a straight move at the config's
+    max_accel asks of an axis and of a stepper (on corexy sqrt(2) *
+    max_accel, moving diagonally)."""
+    axis = CORNER_ACCEL_RATIO * float(_config_value(case, "max_accel"))
+    rows = corner_deviation.STEPPER_ROWS[kinematics]
+    stepper = axis * max(math.hypot(*row) for row in rows)
     return {
-        "floor": "[corner_deviation]\n",
-        "bounded": "[corner_deviation]\nmax_corner_accel: %r\n"
-        % (_corner_accel(case),),
+        "axes": (axis, None),
+        "steppers": (None, stepper),
+        "both": (axis, stepper),
     }
+
+
+def bound_section(caps):
+    axis, stepper = caps
+    section = FLOOR_SECTION
+    if axis is not None:
+        section += "max_corner_accel: %r\n" % (axis,)
+    if stepper is not None:
+        section += "max_corner_stepper_accel: %r\n" % (stepper,)
+    return section
+
+
+def _runs(case):
+    """(name, kinematics, section, caps) of every planner run of a case:
+    per kinematics the default planner (section None) and the bounded
+    runs, and floor mode on the config's own kinematics."""
+    native = _config_value(case, "kinematics")
+    runs = []
+    for kinematics in KINEMATICS:
+        prefix = "" if kinematics == native else kinematics + " "
+        runs.append((prefix + "default", kinematics, None, None))
+        if kinematics == native:
+            runs.append(("floor", kinematics, FLOOR_SECTION, None))
+        for setting, caps in bound_caps(case, kinematics).items():
+            runs.append(
+                (
+                    prefix + "bounded " + setting,
+                    kinematics,
+                    bound_section(caps),
+                    caps,
+                )
+            )
+    return runs
 
 
 def _with_forced_flushes(case):
@@ -437,9 +472,9 @@ def _with_forced_flushes(case):
     return "\n".join(out) + "\n"
 
 
-def _run(case, tmpdir, section, gcode=None, env=None):
+def _run(case, tmpdir, section, gcode=None, env=None, kinematics=None):
     return run.run_klippy(
-        _config(case, tmpdir, section),
+        _config(case, tmpdir, section, kinematics),
         case.gcode if gcode is None else gcode,
         case.start,
         env=env,
@@ -540,16 +575,17 @@ def _admitted_accel(capture):
     moves = capture["moves"]
     max_velocity = max(m["max_cruise_v"] for m in moves)
     models, worst = _epoch_models(capture), {}
+    unbounded = corner_deviation.CornerCaps()
     out = np.zeros((len(moves), 2))
     for i, m in enumerate(moves):
         key = (m["shaper_epoch"], m["accel"])
         if key not in worst:
             model, _ = models[m["shaper_epoch"]]
-            worst[key] = (
-                (m["accel"], m["accel"])
-                if model is None
-                else model.worst(m["accel"], max_velocity, None)
-            )
+            if model is None:
+                worst[key] = (m["accel"], m["accel"])
+            else:
+                axes = model.worst(m["accel"], max_velocity, unbounded)
+                worst[key] = (axes["x"], axes["y"])
         out[i] = worst[key]
     return out
 
@@ -568,48 +604,83 @@ def _stepper_rows(capture):
     return rows
 
 
-def _admitted_stepper_accel(capture, corner_accel, rows):
-    """(cap, demand): per move and stepper row, max_corner_accel under
-    smoothers on X and Y, otherwise the floor-mode per-axis worst through
-    the row; and per move and axis its own acceleration accel * |u_a|.
-    The guarantee near a time is the larger of the cap and sum_a |row_a|
-    times the largest axis demand of the moves near it: the axis kernels
-    differ, so across a direction change one axis can still see one move
-    and the other the next."""
+def _bounded_series(capture, motion, caps, t0, n, reach, dt):
+    """(label, |r . a|, limit) per row a cap bounds (the axes for
+    max_corner_accel, the captured steppers for max_corner_stepper_accel).
+    The limit near a time is the larger of the cap (under smoothers on X
+    and Y, otherwise the floor-mode per-axis worst through the row) and
+    what the moves near it ask alone: sum_a |row_a| times the largest
+    axis demand accel * |u_a| of those moves (the axis kernels differ, so
+    across a direction change one axis can still see one move and the
+    other the next), or, when smaller, their largest accel * |u_xy| times
+    CornerAccel.leg_demand(row)."""
+    axis_cap, stepper_cap = caps
+    rows = []
+    if axis_cap is not None:
+        rows += [
+            (axis, row, axis_cap)
+            for axis, row in zip("xy", corner_deviation.AXIS_ROWS)
+        ]
+    if stepper_cap is not None:
+        rows += [
+            (name, row, stepper_cap) for name, row in _stepper_rows(capture)
+        ]
     moves = capture["moves"]
     models = _epoch_models(capture)
     floor = _admitted_accel(capture)
-    cap = np.zeros((len(moves), len(rows)))
-    demand = np.zeros((len(moves), 2))
-    for i, m in enumerate(moves):
-        bounded = models[m["shaper_epoch"]][1]
-        demand[i] = (
-            m["accel"] * abs(m["axes_r_x"]),
-            m["accel"] * abs(m["axes_r_y"]),
+    accel = np.array([m["accel"] for m in moves])
+    axis_demand = [
+        _painted_max(moves, accel * np.abs(u), t0, n, reach, dt)
+        for u in (
+            np.array([m["axes_r_x"] for m in moves]),
+            np.array([m["axes_r_y"] for m in moves]),
         )
-        for k, (_, row) in enumerate(rows):
-            cap[i, k] = (
-                corner_accel
+    ]
+    xy_accel = accel * np.array(
+        [math.hypot(m["axes_r_x"], m["axes_r_y"]) for m in moves]
+    )
+    series = []
+    for label, row, cap in rows:
+        admitted = np.empty(len(moves))
+        alone = np.empty(len(moves))
+        for i, m in enumerate(moves):
+            model, bounded = models[m["shaper_epoch"]]
+            admitted[i] = (
+                cap
                 if bounded
-                else sum(abs(r) * w for r, w in zip(row, floor[i]))
+                else abs(row[0]) * floor[i, 0] + abs(row[1]) * floor[i, 1]
             )
-    return cap, demand
+            alone[i] = (
+                xy_accel[i] * model.leg_demand(row) if bounded else np.inf
+            )
+        moves_alone = np.minimum(
+            abs(row[0]) * axis_demand[0] + abs(row[1]) * axis_demand[1],
+            _painted_max(moves, alone, t0, n, reach, dt),
+        )
+        acc = np.abs(row[0] * motion["x"].acc + row[1] * motion["y"].acc)
+        limit = np.maximum(
+            _painted_max(moves, admitted, t0, n, reach, dt), moves_alone
+        )
+        series.append((label, acc, limit))
+    return series
 
 
-def _check_shaped(v, name, raw, corner_accel):
+def _check_shaped(v, name, raw, caps):
     """_check_shaped_at on the DT grid; where the harness model misses a
     step there, on the FINE_DT grid (the smoother convolution is a Riemann
     sum on the grid, which errs more on steep accelerations)."""
     try:
-        return _check_shaped_at(v, name, raw, corner_accel, DT)
+        return _check_shaped_at(v, name, raw, caps, DT)
     except analysis.ModelMismatch:
-        return _check_shaped_at(v, name, raw, corner_accel, FINE_DT)
+        return _check_shaped_at(v, name, raw, caps, FINE_DT)
 
 
-def _check_shaped_at(v, name, raw, corner_accel, dt):
+def _check_shaped_at(v, name, raw, caps, dt):
     """A vertex's deviation is measured over [t_arrive - W, t_leave + W]
     (W the kernel reach), and the shaped path there depends on the moves
-    within another W: the floor and the stop exemption look that far."""
+    within another W: the floor and the stop exemption look that far.
+    caps: (max_corner_accel, max_corner_stepper_accel) of a bounded run,
+    None in floor mode."""
     result = evaluate.analyze(raw, dt=dt, sample_dt=None)
     moves = raw.capture["moves"]
     seg, epochs, t0, n, _, motion = evaluate.executed_motion(raw.capture, dt)
@@ -649,24 +720,13 @@ def _check_shaped_at(v, name, raw, corner_accel, dt):
     t = t0 + dt * np.arange(n)
     near = _painted_max(moves, max_accel, t0, n, reach, dt)
     series = [("z", np.abs(motion["z"].acc), near)]
-    if corner_accel is None:
+    if caps is None:
         admitted = _admitted_accel(raw.capture)
         for i, axis in enumerate("xy"):
             limit = _painted_max(moves, admitted[:, i], t0, n, reach, dt)
             series.append((axis, np.abs(motion[axis].acc), limit))
     else:
-        rows = _stepper_rows(raw.capture)
-        cap, demand = _admitted_stepper_accel(raw.capture, corner_accel, rows)
-        legs = [
-            _painted_max(moves, demand[:, a], t0, n, reach, dt) for a in (0, 1)
-        ]
-        for k, (stepper, row) in enumerate(rows):
-            acc = np.abs(row[0] * motion["x"].acc + row[1] * motion["y"].acc)
-            limit = np.maximum(
-                _painted_max(moves, cap[:, k], t0, n, reach, dt),
-                abs(row[0]) * legs[0] + abs(row[1]) * legs[1],
-            )
-            series.append((stepper, acc, limit))
+        series += _bounded_series(raw.capture, motion, caps, t0, n, reach, dt)
     slack = FLOAT_TOLERANCE * near.max()
     metrics["accel_ratio"] = max(
         float(
@@ -729,30 +789,31 @@ def check(case):
     v = Violations()
     out = {"seed": case.seed, "config": case.config}
     with tempfile.TemporaryDirectory(prefix="motion_eval_fuzz_") as tmp:
+        plan = _runs(case)
         runs = {}
-        for name, section in (("default", None),) + tuple(
-            _sections(case).items()
-        ):
+        for name, kinematics, section, _ in plan:
             try:
-                runs[name] = _run(case, tmp, section)
+                runs[name] = _run(case, tmp, section, kinematics=kinematics)
             except run.KlippyRunError as e:
                 v.check(False, "%s: klippy failed: %s", name, str(e)[-3000:])
-        if "default" not in runs:
+        defaults = {
+            kinematics: runs.get(name)
+            for name, kinematics, section, _ in plan
+            if section is None
+        }
+        if None in defaults.values():
             out["violations"] = v
             return out
-        default_moves = runs["default"].capture["moves"]
-        for name, raw in runs.items():
+        for name, kinematics, section, caps in plan:
+            if name not in runs:
+                continue
+            raw, default = runs[name], defaults[kinematics]
             moves = raw.capture["moves"]
             _check_moves(v, name, moves)
-            if name == "default":
+            if section is None:
                 continue
             try:
-                result, metrics = _check_shaped(
-                    v,
-                    name,
-                    raw,
-                    _corner_accel(case) if name == "bounded" else None,
-                )
+                result, metrics = _check_shaped(v, name, raw, caps)
             except analysis.ModelMismatch as e:
                 v.check(False, "%s: harness model mismatch: %s", name, e)
                 continue
@@ -763,16 +824,16 @@ def check(case):
             }
             v.check(
                 [m["accel"] for m in moves]
-                == [m["accel"] for m in default_moves],
+                == [m["accel"] for m in default.capture["moves"]],
                 "%s: trapq accels differ from the default run",
                 name,
             )
             v.check(
-                _final_positions(raw) == _final_positions(runs["default"]),
+                _final_positions(raw) == _final_positions(default),
                 "%s: final step positions %r != default %r",
                 name,
                 _final_positions(raw),
-                _final_positions(runs["default"]),
+                _final_positions(default),
             )
         if "floor" in runs:
             out["flushes"] = check_flushes(
@@ -864,13 +925,13 @@ def check_flushes(v, case, tmp, floor=None, default=None):
     junction check still holds the limiter to identical limits). Forced
     flushes, at minimum_cruise_ratio 0: no move faster."""
     if floor is None:
-        floor = _run(case, tmp, _sections(case)["floor"])
+        floor = _run(case, tmp, FLOOR_SECTION)
     if default is None:
         default = _run(case, tmp, None)
     lazy_env = {
         "MOTION_EVAL_LAZY_FLUSH_AT": ",".join(map(str, case.lazy_flush_at))
     }
-    lazy = _run(case, tmp, _sections(case)["floor"], env=lazy_env)
+    lazy = _run(case, tmp, FLOOR_SECTION, env=lazy_env)
     default_lazy = _run(case, tmp, None, env=lazy_env)
     label = "lazy flush at %r" % (case.lazy_flush_at,)
     _check_junctions(v, label, lazy, floor)
@@ -888,11 +949,9 @@ def check_flushes(v, case, tmp, floor=None, default=None):
             label,
         )
     flat = without_cruise_ratio(case)
-    flat_base = _run(flat, tmp, _sections(case)["floor"])
+    flat_base = _run(flat, tmp, FLOOR_SECTION)
     base_moves = flat_base.capture["moves"]
-    forced = _run(
-        flat, tmp, _sections(case)["floor"], gcode=_with_forced_flushes(flat)
-    )
+    forced = _run(flat, tmp, FLOOR_SECTION, gcode=_with_forced_flushes(flat))
     moves = forced.capture["moves"]
     v.check(
         len(moves) == len(base_moves),
@@ -949,7 +1008,15 @@ def parse_seeds(text):
 def summary(results):
     """Largest floor/accel ratio per mode and flush counts."""
     lines = []
-    for mode in ("floor", "bounded"):
+    modes = sorted(
+        {
+            name
+            for r in results
+            for name, x in r.items()
+            if isinstance(x, dict) and "admitted_ratio" in x
+        }
+    )
+    for mode in modes:
         for metric in (
             "floor_ratio",
             "accel_ratio",
