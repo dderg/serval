@@ -17,6 +17,8 @@ STEPS = 500
 INTERVAL = 84_000
 LATE_STEP = 200
 LATE_TICKS = 252
+EARLY_STEPS = 25
+EARLY_TICKS = 55
 COINCIDENT_OFFSET_TICKS = 100
 COINCIDENT_LATE_NS = COINCIDENT_OFFSET_TICKS / FREQ * 1e9
 MOTORS = [SimpleNamespace(role=r, channel=i) for i, r in enumerate("abze")]
@@ -81,6 +83,18 @@ def test_a_late_step_stands_out_above_the_fitted_clock_map(tmp_path):
     assert report["steps_late_over_1000ns"] == 1
     assert report["lateness_ns"]["max"] == pytest.approx(3_000, abs=30)
     assert report["lateness_ns"]["p50"] < 30
+
+
+def test_early_steps_do_not_move_the_floor_of_the_step_fit_reference(tmp_path):
+    commanded = _single_lane_run(tmp_path)
+    captured = np.round(commanded * (1 + 50e-6) + 1_234).astype(np.int64)
+    captured[:: STEPS // EARLY_STEPS] -= EARLY_TICKS
+    report = mcu_execution.report(tmp_path, _events(_channel(captured)), MOTORS)
+    assert report["clock_reference"] == "fit"
+    assert report["lateness_ns"]["p50"] < 30
+    assert report["lateness_ns"]["p50"] == pytest.approx(
+        report["fit_lateness_ns"]["p50"], abs=1
+    )
 
 
 def test_a_commanded_and_captured_count_mismatch_is_fatal(tmp_path):
