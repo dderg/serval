@@ -16,7 +16,7 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 use crate::leader_prefit::{LeaderGroupFits, LeaderPrefitter};
 use crate::shaper::{Shaper, SourceMaterializer};
-use crate::{BaseItem, Pipeline, PlanningFront, StreamInput, TrajectoryItem};
+use crate::{BaseItem, Control, Pipeline, PlanningFront, StreamInput, TrajectoryItem};
 
 /// Items each stage's inbox holds. Bounded so a slow shaper backpressures
 /// planning instead of buffering without limit: the pacer reads how far
@@ -204,8 +204,10 @@ impl StagedPipeline {
         let materializer = &mut self.materializer;
         let planned_through_s = &mut self.planned_through_s;
         (&mut self.front, move |mut item| {
-            if let BaseItem::Seg(seg) = &item {
-                *planned_through_s = planned_through_s.max(seg.t_end);
+            match &item {
+                BaseItem::Seg(seg) => *planned_through_s = planned_through_s.max(seg.t_end),
+                BaseItem::Control(Control::Reset { .. }) => *planned_through_s = 0.0,
+                BaseItem::Drain | BaseItem::Control(_) => {}
             }
             materializer.materialize(std::slice::from_mut(&mut item));
             inbox.send(item)
@@ -213,7 +215,7 @@ impl StagedPipeline {
     }
 
     /// The stream time the planning side has committed to the shaper
-    /// through.
+    /// through, since the last reset restarted the timeline.
     #[must_use]
     pub fn planned_through_s(&self) -> f64 {
         self.planned_through_s

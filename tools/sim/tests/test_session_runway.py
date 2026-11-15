@@ -13,6 +13,7 @@ Bench sweep of origin/main 0b90eeaf3 (2026-11-15, Pi 5 + F401):
 Every motion time here is read off the X/Y step edges the MCUs emitted
 (shared virtual timeline), never off klippy's own clock."""
 
+import dataclasses
 import json
 import pathlib
 
@@ -42,7 +43,9 @@ NS_PER_S = 1e9
 DURATION_TOLERANCE = 0.10
 MAX_RESUME_LEAD_S = 1.0
 MAX_RESERVE_S = 1.0
-STOP_BOUND_S = 5.0
+
+PACER_LOG = "info,motion_core::worker::ingress=debug"
+STOP_BRAKE_CAUSE = "RunwayExhausted"
 
 PAUSE_RESUME = "\n[pause_resume]\n"
 
@@ -71,7 +74,8 @@ class _EventCursor:
         return events
 
 
-def _boot(sim_world):
+def _boot(sim_world, monkeypatch):
+    monkeypatch.setenv("RUST_LOG", PACER_LOG)
     world = sim_world(
         lambda w: configs.neptune_print_config(w.h7_pty, str(w.gcode_dir))
         + PAUSE_RESUME,
@@ -150,16 +154,60 @@ def _motion_s(world, control, path: pathlib.Path) -> float:
     return _wait_motion_still(world, control) - started_s
 
 
-def _stop_latency_s(world, control, command: str) -> float:
+@dataclasses.dataclass
+class _Stop:
+    issued_s: float
+    fed_until_s: float
+    ended_s: float
+
+
+def _stop(world, control, command: str) -> _Stop:
+    """Runs `command`, which returns once klippy has stopped feeding moves,
+    and waits for the motion to end."""
     issued_s = _now_s(world)
     world.gcode_ok(command, timeout=PRINT_TIMEOUT_S)
-    return _wait_motion_still(world, control) - issued_s
+    fed_until_s = _now_s(world)
+    return _Stop(issued_s, fed_until_s, _wait_motion_still(world, control))
 
 
-def _print_state(world) -> str:
-    return (
-        world.status({"print_stats": None}).get("print_stats", {}).get("state")
+def _closing_brake(events: list[dict]) -> dict:
+    brakes = [
+        event
+        for event in events
+        if event.get("event") == "pipe_drain"
+        and event.get("cause") == STOP_BRAKE_CAUSE
+    ]
+    assert brakes, "no pacer brake brought the stream to rest"
+    return brakes[0]
+
+
+def _assert_stopped_within_bound(
+    world, what: str, stop: _Stop, events: list[dict]
+) -> None:
+    """Once klippy stops feeding, the motion left is what stood ahead
+    outside the planning front (at most the engine's `peak_ahead_s`) and
+    what the front still held, which the closing brake planned to rest
+    (`drained_s`). Any buffer outside that account fails here."""
+    brake = _closing_brake(events)
+    after_feed_s = stop.ended_s - stop.fed_until_s
+    bound_s = brake["peak_ahead_s"] + brake["drained_s"]
+    record = {
+        "what": what,
+        "latency_s": stop.ended_s - stop.issued_s,
+        "after_feed_s": after_feed_s,
+        "bound_s": bound_s,
+        **{key: brake[key] for key in ("cap_s", "peak_ahead_s", "drained_s")},
+    }
+    with (world.log_dir / "stop_latency.jsonl").open("a") as stream:
+        stream.write(json.dumps(record) + "\n")
+    assert after_feed_s <= bound_s, (
+        f"X/Y kept stepping {after_feed_s:.2f}s after {what} stopped the "
+        f"feed, past the {bound_s:.2f}s the engine accounts for: {record}"
     )
+
+
+def _print_ended(cursor: _EventCursor) -> bool:
+    return any(event.get("event") == "print.end" for event in cursor.new())
 
 
 def _assert_clean(world) -> None:
@@ -192,8 +240,8 @@ def _assert_reserve_bounded(events: list[dict]) -> None:
     )
 
 
-def test_a_second_print_runs_like_the_first(sim_world):
-    world = _boot(sim_world)
+def test_a_second_print_runs_like_the_first(sim_world, monkeypatch):
+    world = _boot(sim_world, monkeypatch)
     control = world.sim_control("h7")
     gcode = _first_layers(world)
     whole_session = _EventCursor(world)
@@ -210,15 +258,15 @@ def test_a_second_print_runs_like_the_first(sim_world):
     _assert_reserve_bounded(whole_session.new())
 
 
-def test_a_print_after_a_cancel_runs_like_the_first(sim_world):
-    world = _boot(sim_world)
+def test_a_print_after_a_cancel_runs_like_the_first(sim_world, monkeypatch):
+    world = _boot(sim_world, monkeypatch)
     control = world.sim_control("h7")
     gcode = _first_layers(world)
 
     reference_s = _motion_s(world, control, gcode)
     started_s = _start(world, gcode)
     _wait_print_time(world, started_s, ACTION_AT_S)
-    _stop_latency_s(world, control, "CANCEL_PRINT")
+    _stop(world, control, "CANCEL_PRINT")
     after_cancel = _EventCursor(world)
     again_s = _motion_s(world, control, gcode)
 
@@ -230,61 +278,63 @@ def test_a_print_after_a_cancel_runs_like_the_first(sim_world):
 
 
 @pytest.mark.parametrize("gcode_name", sorted(GCODES))
-def test_pause_stops_motion_within_bound(sim_world, gcode_name):
-    world = _boot(sim_world)
+def test_pause_stops_motion_within_bound(sim_world, monkeypatch, gcode_name):
+    world = _boot(sim_world, monkeypatch)
     control = world.sim_control("h7")
     gcode = GCODES[gcode_name](world)
 
     started_s = _start(world, gcode)
     _wait_print_time(world, started_s, ACTION_AT_S)
-    latency_s = _stop_latency_s(world, control, "PAUSE")
+    paused = _EventCursor(world)
+    stop = _stop(world, control, "PAUSE")
+    stop_events = paused.new()
     world.gcode_ok("RESUME", timeout=PRINT_TIMEOUT_S)
     world.wait_print_done(timeout=PRINT_TIMEOUT_S)
     world.gcode_ok("M400", timeout=PRINT_TIMEOUT_S)
 
     _assert_clean(world)
-    assert latency_s <= STOP_BOUND_S, (
-        f"X/Y kept stepping {latency_s:.1f}s after PAUSE "
-        f"(bound {STOP_BOUND_S}s)"
-    )
+    _assert_stopped_within_bound(world, "PAUSE", stop, stop_events)
 
 
 @pytest.mark.parametrize("gcode_name", sorted(GCODES))
-def test_cancel_stops_motion_within_bound(sim_world, gcode_name):
-    world = _boot(sim_world)
+def test_cancel_stops_motion_within_bound(sim_world, monkeypatch, gcode_name):
+    world = _boot(sim_world, monkeypatch)
     control = world.sim_control("h7")
     gcode = GCODES[gcode_name](world)
 
     started_s = _start(world, gcode)
     _wait_print_time(world, started_s, ACTION_AT_S)
-    latency_s = _stop_latency_s(world, control, "CANCEL_PRINT")
+    cancelled = _EventCursor(world)
+    stop = _stop(world, control, "CANCEL_PRINT")
 
     _assert_clean(world)
     state = world.status({"print_stats": None})["print_stats"]["state"]
     assert state == "cancelled", state
-    assert latency_s <= STOP_BOUND_S, (
-        f"X/Y kept stepping {latency_s:.1f}s after CANCEL_PRINT "
-        f"(bound {STOP_BOUND_S}s)"
-    )
+    _assert_stopped_within_bound(world, "CANCEL_PRINT", stop, cancelled.new())
 
 
-def test_print_stats_completes_with_the_motion(sim_world):
-    world = _boot(sim_world)
+def test_print_stats_completes_with_the_motion(sim_world, monkeypatch):
+    world = _boot(sim_world, monkeypatch)
     control = world.sim_control("h7")
     gcode = _long_moves(world)
+    printing = _EventCursor(world)
 
     _start(world, gcode)
     world.wait_until(
-        lambda: _print_state(world) == "complete",
+        lambda: _print_ended(printing),
         timeout=PRINT_TIMEOUT_S,
-        what="print_stats complete",
+        what="print_stats print.end",
         poll=0.05,
     )
-    completed_s = _now_s(world)
-    motion_end_s = _wait_motion_still(world, control)
+    ended_s = _now_s(world)
+    completing = _EventCursor(world)
+    stop = _Stop(ended_s, ended_s, _wait_motion_still(world, control))
 
     _assert_clean(world)
-    assert motion_end_s - completed_s <= STOP_BOUND_S, (
-        f"print_stats reported complete {motion_end_s - completed_s:.1f}s "
-        f"before the motion ended (bound {STOP_BOUND_S}s)"
+    assert (
+        world.status({"print_stats": None})["print_stats"]["state"]
+        == "complete"
+    )
+    _assert_stopped_within_bound(
+        world, "print_stats complete", stop, completing.new()
     )

@@ -442,6 +442,7 @@ impl StreamWorkerHandle {
         let pacer = ingress::Pacer::default();
         let intake = Arc::new(intake_gate::IntakeGate::new(
             Arc::clone(&timeline.frontier),
+            Arc::clone(&links),
             pacer.reserve_secs(),
         ));
         let ingress = ingress::Ingress {
@@ -482,8 +483,9 @@ impl StreamWorkerHandle {
         let queued_ns = intake_gate::shortest_ns(&m);
         self.intake.enter(queued_ns);
         let sent = self.try_send_arming(StreamMsg::Move(m));
-        if sent.is_err() {
-            self.intake.leave(queued_ns);
+        match sent {
+            Ok(()) => self.intake.note_ahead(),
+            Err(_) => self.intake.leave(queued_ns),
         }
         sent
     }

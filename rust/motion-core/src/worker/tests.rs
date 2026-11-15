@@ -886,7 +886,7 @@ fn ctx(line_no: u32) -> MoveContext {
     }
 }
 
-fn line(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
+pub(super) fn line(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
     line_move(start, end, 0.0, ctx(line_no)).unwrap()
 }
 

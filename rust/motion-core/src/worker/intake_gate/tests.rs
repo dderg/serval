@@ -11,7 +11,7 @@ const TOLERANCE_S: f64 = 0.05;
 fn gate_with_runway(runway_s: f64) -> IntakeGate {
     let frontier: Arc<CommittedFrontier> = Arc::default();
     frontier.advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
-    IntakeGate::new(frontier, RESERVE_S)
+    IntakeGate::new(frontier, Arc::default(), RESERVE_S)
 }
 
 #[test]
@@ -54,8 +54,75 @@ fn moves_waiting_in_the_inbox_count_against_the_cap() {
 }
 
 #[test]
+fn motion_planned_past_the_dispatched_end_counts_against_the_cap() {
+    let frontier: Arc<CommittedFrontier> = Arc::default();
+    frontier.advance_to(Instant::now() + Duration::from_secs_f64(RESERVE_S));
+    let links: Arc<WorkerLinks> = Arc::default();
+    let dispatched_s = 10.0_f64;
+    links
+        .last_move_time_bits
+        .store(dispatched_s.to_bits(), Ordering::Release);
+    let gate = IntakeGate::new(frontier, links, RESERVE_S);
+
+    gate.set_planned_through(dispatched_s + STALL_HEADROOM_S - 0.5);
+    assert!(gate.admits());
+    gate.set_planned_through(dispatched_s + STALL_HEADROOM_S + 1.0);
+    let reopens_s = gate.reopens_in().expect("closed").as_secs_f64();
+    assert!(
+        (reopens_s - 1.0).abs() < TOLERANCE_S,
+        "reopens in {reopens_s}s, expected 1s"
+    );
+}
+
+#[test]
+fn planned_motion_the_dispatcher_passed_counts_nothing() {
+    let links: Arc<WorkerLinks> = Arc::default();
+    links
+        .last_move_time_bits
+        .store(10.0_f64.to_bits(), Ordering::Release);
+    let gate = IntakeGate::new(Arc::default(), links, RESERVE_S);
+    gate.set_planned_through(4.0);
+    assert!(
+        gate.admits(),
+        "a dwell put the dispatched end past the plan"
+    );
+}
+
+#[test]
+fn the_peak_ahead_is_the_most_noted_since_it_was_last_taken() {
+    let gate = gate_with_runway(1.0);
+    let second = Duration::from_secs(1).as_nanos() as u64;
+    gate.note_ahead();
+    gate.enter(second);
+    gate.note_ahead();
+    gate.leave(second);
+    gate.note_ahead();
+
+    let peak_s = gate.take_peak_ahead();
+    assert!(
+        (peak_s - 2.0).abs() < TOLERANCE_S,
+        "peak {peak_s}s, expected 2s"
+    );
+    assert_eq!(gate.take_peak_ahead(), 0.0);
+}
+
+#[test]
+fn a_reopening_less_than_a_nanosecond_away_has_happened() {
+    const SUB_NANOSECOND_S: f64 = 1.0e-10;
+    let links: Arc<WorkerLinks> = Arc::default();
+    let gate = IntakeGate::new(Arc::default(), links, RESERVE_S);
+    gate.set_planned_through(gate.cap_secs() + SUB_NANOSECOND_S);
+    assert_eq!(gate.reopens_in(), None);
+    assert!(gate.admits());
+}
+
+#[test]
 fn a_pipeline_no_mcu_executes_always_admits() {
-    let gate = IntakeGate::new(Arc::new(CommittedFrontier::unexecuted()), RESERVE_S);
+    let gate = IntakeGate::new(
+        Arc::new(CommittedFrontier::unexecuted()),
+        Arc::default(),
+        RESERVE_S,
+    );
     assert!(gate.admits());
 }
 
