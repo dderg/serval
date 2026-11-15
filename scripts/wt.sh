@@ -6,7 +6,8 @@
 #
 # Every new worktree used to start with a cold rust/target: ~250 s to the first
 # green `ci.sh quick` against ~42 s in a warm one (75 worktrees over the audited
-# sessions). The pool keeps worktrees named <dir>/serval-pool-N, whose target
+# sessions). The pool keeps worktrees named <dir>/serval-pool-N (<dir> is
+# .worktrees/ in the main checkout unless WT_POOL_DIR is set), whose target
 # dirs stay warm: `new` takes an idle one (detached HEAD, clean tree), switches
 # it to a new branch cut from the base (default origin/main) and prints its
 # path; land-pr.sh returns a pool worktree to idle (detached at origin/main)
@@ -22,7 +23,11 @@
 # short-lived shell, while the agent's cwd persists.
 set -euo pipefail
 
-POOL_DIR="${WT_POOL_DIR:-$HOME/Developer}"
+main_checkout() {
+    git worktree list --porcelain | awk 'NR == 1 { print substr($0, 10) }'
+}
+
+POOL_DIR="${WT_POOL_DIR:-$(main_checkout)/.worktrees}"
 POOL_PREFIX="serval-pool-"
 
 die() { echo "wt: $*" >&2; exit 1; }
@@ -64,9 +69,16 @@ next_pool_path() {
     echo "$POOL_DIR/$POOL_PREFIX$n"
 }
 
+make_pool_dir() {
+    [ ! -d "$POOL_DIR" ] || return 0
+    "$(dirname "$0")/guard-main-checkout.sh" lift >&2
+    mkdir -p "$POOL_DIR"
+}
+
 new_topic() {
     local topic="${1:?usage: wt.sh new <topic> [--base REF]}"; shift
     "$(dirname "$0")/install-git-guards.sh" >&2
+    make_pool_dir
     "$(dirname "$0")/guard-main-checkout.sh" apply >&2 || true
     python3 "$(dirname "$0")/gc_caches.py" --if-free-below "${WT_GC_BELOW_GB:-100}" --apply >&2 || true
     local base="origin/main"
