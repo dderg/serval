@@ -28,6 +28,7 @@ mod ethercat_endpoint;
 mod homing_api;
 mod motion_caps;
 mod passthrough;
+mod pipeline_request;
 mod pipeline_setup;
 #[cfg(test)]
 mod pipeline_setup_tests;

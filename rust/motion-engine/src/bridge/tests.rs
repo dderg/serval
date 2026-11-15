@@ -415,7 +415,7 @@ fn post_processor_rejected_parameter_and_composition_preserve_configuration() {
     for value in [-1.0, 0.0] {
         assert!(
             engine
-                .update_post_processor("smooth", "smooth_time", value)
+                .try_update_post_processor("smooth", "smooth_time", value)
                 .is_err()
         );
         let cfg = engine.planner_config.lock_ok();
@@ -441,9 +441,9 @@ fn post_processor_bypass_retains_updates_and_rejects_invalid_restore() {
         .unwrap()
         .chains[0]
         .kernel_variance_s2();
-    engine.set_post_processor_bypass(true).unwrap();
+    assert!(engine.try_set_post_processor_bypass(true).unwrap());
     engine
-        .update_post_processor("smooth", "smooth_time", 0.02)
+        .try_update_post_processor("smooth", "smooth_time", 0.02)
         .unwrap();
     assert!(
         engine
@@ -454,7 +454,7 @@ fn post_processor_bypass_retains_updates_and_rejects_invalid_restore() {
             .chains[0]
             .is_empty()
     );
-    engine.set_post_processor_bypass(false).unwrap();
+    assert!(engine.try_set_post_processor_bypass(false).unwrap());
     let restored_variance = engine
         .planner_config
         .lock_ok()
@@ -471,11 +471,11 @@ fn post_processor_bypass_retains_updates_and_rejects_invalid_restore() {
             .param("smooth", "smooth_time"),
         Some(0.02)
     );
-    engine.set_post_processor_bypass(true).unwrap();
+    assert!(engine.try_set_post_processor_bypass(true).unwrap());
     engine
-        .update_post_processor("smooth", "smooth_time", 0.0)
+        .try_update_post_processor("smooth", "smooth_time", 0.0)
         .unwrap();
-    assert!(engine.set_post_processor_bypass(false).is_err());
+    assert!(engine.try_set_post_processor_bypass(false).is_err());
     let cfg = engine.planner_config.lock_ok();
     assert!(cfg.post_processor_bypass);
     assert_eq!(
@@ -499,10 +499,10 @@ fn post_processor_failed_submission_preserves_parameters_and_bypass() {
 
     assert!(
         engine
-            .update_post_processor("smooth", "smooth_time", 0.02)
+            .try_update_post_processor("smooth", "smooth_time", 0.02)
             .is_err()
     );
-    assert!(engine.set_post_processor_bypass(true).is_err());
+    assert!(engine.try_set_post_processor_bypass(true).is_err());
     let cfg = engine.planner_config.lock_ok();
     assert_eq!(
         cfg.post_processors.param("smooth", "smooth_time"),

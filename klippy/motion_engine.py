@@ -65,6 +65,7 @@ _PRINT_FINISH_EVENTS = (
 )
 
 ENDPOINT_CALL_DEADLINE_S = 30.0
+PIPELINE_REQUEST_POLL_S = 0.002
 
 
 def attach_structured_logging(native, printer, events_dir):
@@ -172,6 +173,48 @@ class MotionEngineWrapper:
             lambda: self._engine.endpoint_call_done(call_id) or None,
             what,
             ENDPOINT_CALL_DEADLINE_S,
+        )
+
+    def _wait_pipeline_request(self, what):
+        engine_wait.wait_for(
+            self._printer,
+            lambda: self._engine.pipeline_request_poll() or None,
+            what,
+            engine_wait.UNBOUNDED,
+            interval_s=PIPELINE_REQUEST_POLL_S,
+        )
+
+    def submit_dwell(self, duration_s):
+        self._engine.dwell_start(duration_s)
+        self._wait_pipeline_request("dwell")
+
+    def dwell_until(self, print_time, mcu_handle):
+        self._engine.dwell_until_start(print_time, mcu_handle)
+        self._wait_pipeline_request("dwell_until")
+
+    def set_bed_mesh(self, request):
+        activation = self._engine.set_bed_mesh_start(request)
+        self._wait_pipeline_request("bed mesh swap")
+        return activation
+
+    def clear_bed_mesh(self):
+        rebase = self._engine.clear_bed_mesh_start()
+        self._wait_pipeline_request("bed mesh clear")
+        return rebase
+
+    def submit_nudge(self, target, motion):
+        duration = self._engine.submit_nudge_start(target, motion)
+        self._wait_pipeline_request("nudge")
+        return duration
+
+    def update_post_processor(self, name, key, value):
+        engine_wait.wait_for(
+            self._printer,
+            lambda: self._engine.try_update_post_processor(name, key, value)
+            or None,
+            "post processor update (motion pipe space)",
+            engine_wait.UNBOUNDED,
+            interval_s=PIPELINE_REQUEST_POLL_S,
         )
 
     def set_drive_limits(self, mcu_handle, drives):

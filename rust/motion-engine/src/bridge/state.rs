@@ -269,6 +269,7 @@ impl HomingLifecycle {
 pub(crate) struct FlushState {
     pub(crate) pending_drain: Mutex<Option<crossbeam_channel::Receiver<Result<(), String>>>>,
     pub(crate) drain_wait_diag: Mutex<Option<super::drain_wait::DrainWaitDiag>>,
+    pub(crate) pending_request: Mutex<Option<super::pipeline_request::PendingRequest>>,
 }
 
 /// The pump's control handle, join handle and the per-lane-kind

@@ -1,3 +1,4 @@
+use super::pipeline_request::{MeshSwap, PendingRequest, PipelineRequest};
 use super::{
     Arc, ArgValue, DRAIN_TIMEOUT, HashSet, McuTopologyInput, Ordering, PyMotionEngine, PyResult,
     PyRuntimeError, PyValueError, Python, planner_err, pymethods,
@@ -179,36 +180,21 @@ struct CurveDisplacement {
 
 #[pymethods]
 impl PyMotionEngine {
+    /// Stages the nudge; `pipeline_request_poll` reports when it has run.
     #[pyo3(signature = (target, motion))]
-    fn submit_nudge(
-        &self,
-        py: Python<'_>,
-        target: NudgeTarget,
-        motion: NudgeMotion,
-    ) -> PyResult<f64> {
+    fn submit_nudge_start(&self, target: NudgeTarget, motion: NudgeMotion) -> PyResult<f64> {
         require_single_motor_mask(target.motor_mask).map_err(PyRuntimeError::new_err)?;
         let profile =
             trajectory::NudgeProfile::try_new(motion.delta_mm, motion.speed, motion.accel, 0.0)
                 .map_err(|e| PyRuntimeError::new_err(format!("submit_nudge: {e}")))?;
-        let rx = {
-            let guard = self.planner.lock_ok();
-            let planner = guard.as_ref().ok_or_else(|| {
-                PyRuntimeError::new_err("planner not initialized — call init_planner first")
-            })?;
-            planner
-                .submit_nudge(motion_core::worker::NudgeParams {
-                    mcu_id: target.mcu_id,
-                    axis: target.axis_idx,
-                    motor_mask: target.motor_mask,
-                    delta_mm: motion.delta_mm,
-                    speed: motion.speed,
-                    accel: motion.accel,
-                })
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-        };
-        py.detach(|| rx.recv())
-            .map_err(|_| PyRuntimeError::new_err("nudge notify dropped"))?
-            .map_err(PyRuntimeError::new_err)?;
+        self.stage_request(PipelineRequest::Nudge(motion_core::worker::NudgeParams {
+            mcu_id: target.mcu_id,
+            axis: target.axis_idx,
+            motor_mask: target.motor_mask,
+            delta_mm: motion.delta_mm,
+            speed: motion.speed,
+            accel: motion.accel,
+        }))?;
         Ok(profile.duration())
     }
     /// `config_text` is the serialized config document; the motion-owned
@@ -412,16 +398,12 @@ impl PyMotionEngine {
              follow-up. Decompose arcs into line segments upstream.",
         )
     }
-    fn submit_dwell(&self, duration_s: f64) -> PyResult<()> {
-        let guard = self.planner.lock_ok();
-        let planner = guard.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err("planner not initialized — call init_planner first")
-        })?;
-        planner.dwell(duration_s).map_err(planner_err)?;
+    fn dwell_start(&self, duration_s: f64) -> PyResult<()> {
+        self.stage_request(PipelineRequest::Dwell(duration_s))?;
         *self.last_g5_pq.lock_ok() = None;
         Ok(())
     }
-    fn dwell_until(&self, print_time: f64, mcu_handle: u32) -> PyResult<()> {
+    fn dwell_until_start(&self, print_time: f64, mcu_handle: u32) -> PyResult<()> {
         let host_s = self
             .router
             .lock_ok()
@@ -434,13 +416,36 @@ impl PyMotionEngine {
                     "dwell_until: no clock estimate established for mcu_handle {mcu_handle}"
                 ))
             })?;
-        let guard = self.planner.lock_ok();
-        let planner = guard.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err("planner not initialized — call init_planner first")
-        })?;
-        planner.hold_start_until(host_s).map_err(planner_err)?;
+        self.stage_request(PipelineRequest::HoldStartUntil(host_s))?;
         *self.last_g5_pq.lock_ok() = None;
         Ok(())
+    }
+    /// `true` once the request a `*_start` call staged has been served;
+    /// `false` while it waits for input-channel room or for the drain ahead
+    /// of it. A served mesh swap is adopted here, never earlier.
+    fn pipeline_request_poll(&self) -> PyResult<bool> {
+        let mut slot = self.flush.pending_request.lock_ok();
+        let pending = slot
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("pipeline_request_poll: no request staged"))?;
+        match pending.advance(&self.planner) {
+            Ok(false) => Ok(false),
+            Ok(true) => {
+                let request = slot
+                    .take()
+                    .expect("the served request is staged")
+                    .into_request();
+                drop(slot);
+                if let PipelineRequest::SwapMesh(swap) = request {
+                    self.adopt_mesh(swap);
+                }
+                Ok(true)
+            }
+            Err(error) => {
+                *slot = None;
+                Err(PyRuntimeError::new_err(error))
+            }
+        }
     }
     #[pyo3(signature = (x, y, z))]
     fn set_position(&self, py: Python<'_>, x: f64, y: f64, z: f64) -> PyResult<()> {
@@ -482,7 +487,8 @@ impl PyMotionEngine {
             .set_accel_cap(accel)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
-    pub(super) fn set_post_processor_bypass(&self, enabled: bool) -> PyResult<()> {
+    /// `false` when the input channel is full: nothing changed, retry.
+    pub(super) fn try_set_post_processor_bypass(&self, enabled: bool) -> PyResult<bool> {
         self.publish_post_processors(|_, bypass| {
             *bypass = enabled;
             Ok(())
@@ -504,7 +510,13 @@ impl PyMotionEngine {
             .set_square_corner_velocity(square_corner_velocity)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
-    pub(super) fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
+    /// `false` when the input channel is full: nothing changed, retry.
+    pub(super) fn try_update_post_processor(
+        &self,
+        name: &str,
+        key: &str,
+        value: f64,
+    ) -> PyResult<bool> {
         self.publish_post_processors(|processors, _| processors.set_param(name, key, value))
     }
 
@@ -515,7 +527,10 @@ impl PyMotionEngine {
             .param(name, key)
     }
 
-    fn set_bed_mesh(&self, request: BedMeshRequest) -> PyResult<(f64, (f64, f64, f64, f64, f64))> {
+    fn set_bed_mesh_start(
+        &self,
+        request: BedMeshRequest,
+    ) -> PyResult<(f64, (f64, f64, f64, f64, f64))> {
         let BedMeshRequest {
             points,
             x_min,
@@ -604,7 +619,7 @@ impl PyMotionEngine {
             envelope_a_mm_s2 = z_accel_budget + coupled_a,
             "bed mesh activated; transient Z exceedance envelope logged"
         );
-        let rebase = self.swap_bed_mesh(Some(Arc::new(transform)))?;
+        let rebase = self.stage_mesh_swap(Some(Arc::new(transform)))?;
         Ok((
             rebase,
             (
@@ -617,8 +632,8 @@ impl PyMotionEngine {
         ))
     }
 
-    fn clear_bed_mesh(&self) -> PyResult<f64> {
-        self.swap_bed_mesh(None)
+    fn clear_bed_mesh_start(&self) -> PyResult<f64> {
+        self.stage_mesh_swap(None)
     }
 
     /// Gcode-space Z the toolhead is commanded at, given a machine-space Z at
@@ -639,7 +654,7 @@ impl PyMotionEngine {
             &mut planner_config::PostProcessorSet,
             &mut bool,
         ) -> Result<(), planner_config::PostProcessorConfigError>,
-    ) -> PyResult<()> {
+    ) -> PyResult<bool> {
         let mut cfg = self.planner_config.lock_ok();
         let mut processors = cfg.post_processors.clone();
         let mut bypass = cfg.post_processor_bypass;
@@ -651,13 +666,39 @@ impl PyMotionEngine {
             planner_config::extruder_caps(&cfg.axis_registry, &axis_chains, cfg.fit_tolerance_mm)
                 .map_err(PyValueError::new_err)?;
         if let Some(handle) = self.planner.lock_ok().as_ref() {
-            handle
-                .update_axis_chains(axis_chains)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            match handle.update_axis_chains(axis_chains) {
+                Ok(()) => {}
+                Err(motion_core::worker::StreamWorkerError::ChannelFull) => return Ok(false),
+                Err(e) => return Err(PyRuntimeError::new_err(e.to_string())),
+            }
         }
         cfg.post_processors = processors;
         cfg.post_processor_bypass = bypass;
         *self.extruder_caps.lock_ok() = extruder_caps;
+        Ok(true)
+    }
+
+    /// Stages `request` for `pipeline_request_poll`. A mesh swap with no
+    /// planner behind it has nothing to drain and is served at once.
+    fn stage_request(&self, request: PipelineRequest) -> PyResult<()> {
+        let has_planner = self.planner.lock_ok().is_some();
+        let pending = match (&request, has_planner) {
+            (_, true) => PendingRequest::unsent(request),
+            (PipelineRequest::SwapMesh(_), false) => PendingRequest::served(request),
+            (_, false) => {
+                return Err(PyRuntimeError::new_err(
+                    "planner not initialized — call init_planner first",
+                ));
+            }
+        };
+        let mut slot = self.flush.pending_request.lock_ok();
+        if slot.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "a pipeline request is already staged — poll it to completion with \
+                 pipeline_request_poll before staging another",
+            ));
+        }
+        *slot = Some(pending);
         Ok(())
     }
 
@@ -721,29 +762,23 @@ impl PyMotionEngine {
         .map_err(PyRuntimeError::new_err)
     }
 
-    /// Swap the active surface transform behind a pipeline drain, keeping the
-    /// physical position invariant: the machine Z at the current rest point is
-    /// re-expressed as a gcode Z through the *new* transform, and that rebase
-    /// rides the token so every gcode-space odometer moves together. Returns
-    /// the rebased gcode Z for the host's own position bookkeeping.
-    fn swap_bed_mesh(&self, new: Option<Arc<geometry::SurfaceTransform>>) -> PyResult<f64> {
+    /// Stage a swap of the active surface transform behind a pipeline drain,
+    /// keeping the physical position invariant: the machine Z at the current
+    /// rest point is re-expressed as a gcode Z through the *new* transform,
+    /// and that rebase rides the token so every gcode-space odometer moves
+    /// together. Returns the rebased gcode Z for the host's own position
+    /// bookkeeping.
+    fn stage_mesh_swap(&self, new: Option<Arc<geometry::SurfaceTransform>>) -> PyResult<f64> {
         let pos = *self.commanded_pos.lock_ok();
-        let mut current = self.bed_mesh.lock_ok();
-        let machine = pos.to_machine(current.as_deref());
-        let rebase = machine.to_gcode(new.as_deref()).z();
-        // `update_mesh` blocks until the lowerer has adopted the new
-        // transform behind the pipeline drain; `current` stays locked across
-        // the wait so no bridge crossing can invert through a mesh the
-        // pipeline is not warping with yet.
-        if let Some(handle) = self.planner.lock_ok().as_ref() {
-            handle
-                .update_mesh(new.clone(), rebase)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        }
-        *current = new;
-        drop(current);
-        self.commanded_pos.lock_ok().0[2] = rebase;
-        Ok(rebase)
+        let machine = pos.to_machine(self.bed_mesh.lock_ok().as_deref());
+        let gcode_z = machine.to_gcode(new.as_deref()).z();
+        self.stage_request(PipelineRequest::SwapMesh(MeshSwap { mesh: new, gcode_z }))?;
+        Ok(gcode_z)
+    }
+
+    fn adopt_mesh(&self, swap: MeshSwap) {
+        *self.bed_mesh.lock_ok() = swap.mesh;
+        self.commanded_pos.lock_ok().0[2] = swap.gcode_z;
     }
 
     fn reseed_mcus_after_position_set(
