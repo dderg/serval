@@ -100,7 +100,7 @@ docker_image() {
 # tmpfs, every run downloaded cpython and ~30 wheels again (24 s of `ci.sh
 # sim`'s 38). The venv stays per run.
 CI_UV_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/serval-ci-uv"
-mkdir -p "$CI_UV_CACHE"
+mkdir -p "$CI_UV_CACHE" && touch "$CI_UV_CACHE"
 DOCKER_RUN_AS_USER=(
     --user "$(id -u):$(id -g)"
     --tmpfs /tmp:exec,mode=1777,size=4g
