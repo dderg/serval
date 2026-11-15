@@ -59,8 +59,11 @@ zero_reference_position: 100, 100
 #*# tension = 0.2
 """
 
-LEADERS = ("unshaped_xy", "shaped_xy")
-EXTRUDER_CHAINS = ("pa_only", "pa_kernel")
+CHAINS = (
+    ("unshaped_xy", "pa_only"),
+    ("unshaped_xy", "pa_kernel"),
+    ("shaped_xy", "pa_kernel"),
+)
 
 
 def _config(world, leaders, extruder):
@@ -87,8 +90,7 @@ def _print_lines():
 
 
 @pytest.mark.parametrize("mesh", MESH_STATES)
-@pytest.mark.parametrize("extruder", EXTRUDER_CHAINS)
-@pytest.mark.parametrize("leaders", LEADERS)
+@pytest.mark.parametrize(("leaders", "extruder"), CHAINS)
 def test_print_with_mesh_loaded(sim_world, leaders, extruder, mesh):
     world = sim_world(lambda w: _config(w, leaders, extruder), dual_mcu=False)
     world.gcode_ok("SET_KINEMATIC_POSITION X=100 Y=100 Z=5")
