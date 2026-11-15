@@ -10,8 +10,9 @@ pulse shapers and off), on owner.cfg, bench.cfg or fast.cfg. It runs the
 default planner (no limiter), [corner_deviation] in floor mode, bounded
 by max_corner_accel, by max_corner_stepper_accel and by both (on the
 config's corexy and again as cartesian, each with its own default run),
-and floor mode again with forced and with lazy lookahead flushes, and
-checks:
+and floor mode again with forced and with lazy lookahead flushes; every
+bounded run with a distinct limiter is planned again with the case's lazy
+flushes and with its forced flushes (M400). It checks:
 
 - every run completes, every trapq move is finite with positive duration,
   and the executed motion matches the decoded steps (the harness check);
@@ -21,8 +22,9 @@ checks:
 - the trapq accels and the final step positions equal the default run's;
 - executed peak acceleration per axis <= what the limiter admits
   (CornerAccel.worst, cluster margin included, in floor mode); in the
-  bounded runs, per bounded row (axes, steppers) the stated guarantee
-  max(cap, what the moves near the time ask alone);
+  bounded runs, flushed or not, per bounded row (axes, steppers) the
+  stated guarantee max(cap, what the moves near the time ask alone),
+  runout and forced stops included;
 - lazy flushes at random moves leave the trapq and the junction limits
   identical; forced flushes (M400) leave every junction limit not at a
   flush identical and every move at most as fast.
@@ -472,6 +474,31 @@ def _with_forced_flushes(case):
     return "\n".join(out) + "\n"
 
 
+def _flushed_runs(case):
+    """(name, kinematics, section, caps, gcode, env, batch run name) of
+    every bounded run with a distinct limiter again with the case's lazy
+    flushes and with its forced flushes (cartesian steppers and both
+    repeat the axes limiter)."""
+    lazy_env = {
+        "MOTION_EVAL_LAZY_FLUSH_AT": ",".join(map(str, case.lazy_flush_at))
+    }
+    forced = _with_forced_flushes(case)
+    runs, limiters = [], set()
+    for name, kinematics, section, caps in _runs(case):
+        limiter = (kinematics, _limiter_key(kinematics, caps))
+        if caps is None or limiter in limiters:
+            continue
+        limiters.add(limiter)
+        for mode, gcode, env in (
+            ("lazy", None, lazy_env),
+            ("forced", forced, None),
+        ):
+            runs.append(
+                (name + " " + mode, kinematics, section, caps, gcode, env, name)
+            )
+    return runs
+
+
 def _run(case, tmpdir, section, gcode=None, env=None, kinematics=None):
     return run.run_klippy(
         _config(case, tmpdir, section, kinematics),
@@ -771,7 +798,7 @@ def _final_positions(raw):
 
 def _junctions(raw):
     """add_move index -> (toolhead limit passed in, limiter result)."""
-    return {int(i): (cap, v2) for i, cap, v2 in raw.capture["junctions"]}
+    return {int(j[0]): (j[1], j[2]) for j in raw.capture["junctions"]}
 
 
 def _same_own_limit(a, b):
@@ -794,6 +821,59 @@ def _limiter_key(kinematics, caps):
         return None
     stepper_rows = corner_deviation.STEPPER_ROWS[kinematics]
     return corner_deviation.CornerCaps(*caps, stepper_rows).limiter()
+
+
+def _analyse(v, name, raw, caps):
+    """The out entry of a planned run: print time, corner max and the
+    _check_shaped metrics (None on a harness model mismatch)."""
+    try:
+        result, metrics = _check_shaped(v, name, raw, caps)
+    except analysis.ModelMismatch as e:
+        v.check(False, "%s: harness model mismatch: %s", name, e)
+        return None
+    return {
+        "print_time_s": result["print_time_s"],
+        "corner_max_mm": result["executed"]["corners"]["max_mm"],
+        **metrics,
+    }
+
+
+def _check_against_default(v, name, raw, default):
+    v.check(
+        [m["accel"] for m in raw.capture["moves"]]
+        == [m["accel"] for m in default.capture["moves"]],
+        "%s: trapq accels differ from the default run",
+        name,
+    )
+    v.check(
+        _final_positions(raw) == _final_positions(default),
+        "%s: final step positions %r != default %r",
+        name,
+        _final_positions(raw),
+        _final_positions(default),
+    )
+
+
+def _check_flushed(v, out, case, tmp, runs, defaults):
+    """The bounded runs again with flushes: the same checks, and the
+    analysis reused when the plan equals the batch one."""
+    for name, kinematics, section, caps, gcode, env, batch in _flushed_runs(
+        case
+    ):
+        try:
+            raw = _run(case, tmp, section, gcode, env, kinematics)
+        except run.KlippyRunError as e:
+            v.check(False, "%s: klippy failed: %s", name, str(e)[-3000:])
+            continue
+        moves = raw.capture["moves"]
+        _check_moves(v, name, moves)
+        _check_against_default(v, name, raw, defaults[kinematics])
+        base = runs.get(batch)
+        stops = len(_full_flushes(raw) - _full_flushes(base)) if base else 0
+        same_plan = base is not None and moves == base.capture["moves"]
+        entry = out.get(batch) if same_plan else _analyse(v, name, raw, caps)
+        if entry is not None:
+            out[name] = dict(entry, extra_stops=stops, same_plan=same_plan)
 
 
 def check(case):
@@ -835,30 +915,13 @@ def check(case):
                 )
                 out[name] = out[twin]
             else:
-                try:
-                    result, metrics = _check_shaped(v, name, raw, caps)
-                except analysis.ModelMismatch as e:
-                    v.check(False, "%s: harness model mismatch: %s", name, e)
+                entry = _analyse(v, name, raw, caps)
+                if entry is None:
                     continue
-                out[name] = {
-                    "print_time_s": result["print_time_s"],
-                    "corner_max_mm": result["executed"]["corners"]["max_mm"],
-                    **metrics,
-                }
+                out[name] = entry
                 checked[limiter] = name
-            v.check(
-                [m["accel"] for m in moves]
-                == [m["accel"] for m in default.capture["moves"]],
-                "%s: trapq accels differ from the default run",
-                name,
-            )
-            v.check(
-                _final_positions(raw) == _final_positions(default),
-                "%s: final step positions %r != default %r",
-                name,
-                _final_positions(raw),
-                _final_positions(default),
-            )
+            _check_against_default(v, name, raw, default)
+        _check_flushed(v, out, case, tmp, runs, defaults)
         if "floor" in runs:
             out["flushes"] = check_flushes(
                 v, case, tmp, runs["floor"], runs["default"]
@@ -1056,6 +1119,19 @@ def summary(results):
                 lines.append(
                     "%s %s max %.4f (seed %d)" % (mode, metric, value, seed)
                 )
+    for mode in modes:
+        flushed = [r[mode] for r in results if "same_plan" in r.get(mode, {})]
+        if flushed:
+            lines.append(
+                "%s plans %d: differing from batch %d, with extra full stops"
+                " %d"
+                % (
+                    mode,
+                    len(flushed),
+                    sum(1 for f in flushed if not f["same_plan"]),
+                    sum(1 for f in flushed if f["extra_stops"]),
+                )
+            )
     flushes = [r["flushes"] for r in results if "flushes" in r]
     lines.append(
         "lazy flush cases %d: with runout stops %d, default planner"

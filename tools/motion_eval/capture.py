@@ -270,7 +270,17 @@ class Capture:
 
         def logged(prev_move, move, max_start_v2):
             v2 = timed(prev_move, move, max_start_v2)
-            self.junctions.append([self.added - 1, max_start_v2, v2])
+            self.junctions.append(
+                [
+                    self.added - 1,
+                    max_start_v2,
+                    v2,
+                    prev_move.max_start_v2,
+                    prev_move.move_d * math.hypot(*prev_move.axes_r[:2]),
+                    prev_move.accel,
+                    prev_move.max_cruise_v2,
+                ]
+            )
             return v2
 
         self.toolhead.junction_limiter = logged
