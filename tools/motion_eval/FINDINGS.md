@@ -251,9 +251,13 @@ Default: scv 5, mcr 0.5 → 8.72 s, max 0.135. Floor mode: 5.77 s, max 0.184.
   between two corners breaks that; such junctions stop when they turn more
   than 60° (conclusion 4), and smaller turns in such clusters can round up
   to the stated 10% (FLOOR_MARGIN) above the floor.
-- With `max_corner_accel`, the burst bound is the largest Σ dv·|density|
-  over the step placements the plan allows plus the legs at full
-  acceleration: a true bound, at a small time cost on dense curves.
+- With `max_corner_accel`, the bound is per stepper (corexy motors x + y,
+  x - y): the junction's and the earlier steps' signed bursts plus the
+  legs convolved with both kernels in time, the legs' sign restricted
+  where the lookahead's profile shapes allow (kv2-notes
+  corner-bound-design.md). A true bound; on the voron0 cube a motor cap of
+  34000 plans 660.6 s against 677.8 s for stock, motors ≤ 34000, and the
+  old X/Y cap 21000 would plan 675.3 s instead of 696.4 s.
   Without it, the burst is bounded only by what the table admits
   (`corner_accel_x/y`, isolated corners and curves plus a stated 25% for
   clusters).
