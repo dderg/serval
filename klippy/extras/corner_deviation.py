@@ -33,17 +33,21 @@ Z move) stops.
 An input smoother turns a junction's velocity step dv into acceleration
 dv * density over its duration, on top of what the legs command. Like
 square_corner_velocity, the junction speed does not limit that burst by
-default: CornerAccel.worst is the worst executed per-axis acceleration
-the planner admits, the legs' acceleration plus the larger of the biggest
-step burst (density_peak * dv, dv from the table at the shaper floor and
-max_velocity) and the centripetal acceleration the curve cap allows, with
-CLUSTER_ACCEL_MARGIN for corners within one kernel reach; it is logged
-when a table is ready, reported in the status, and
-recommended_max_accel() inverts it for a motor's acceleration limit. The
-optional max_corner_accel bounds the burst instead, per stepper (rows r of
-the kinematics' linear map, STEPPER_ROWS: corexy motors x + y, x - y): at
-every time t of the junction's window, for either sign of r . a(t),
-  v * own(t) + earlier(t) + legs(t) <= max_corner_accel,
+default: CornerAccel.worst is the worst executed acceleration per axis
+(and per stepper) the planner admits, the legs' acceleration plus the
+larger of the biggest step burst (density_peak * dv, dv from the table at
+the shaper floor and max_velocity) and the centripetal acceleration the
+curve cap allows, with CLUSTER_ACCEL_MARGIN for corners within one kernel
+reach; it is logged when a table is ready, reported in the status, and
+recommended_max_accel() inverts it for a motor's acceleration limit.
+
+The optional max_corner_accel bounds the burst on the cartesian axes
+(rows r = (1, 0), (0, 1)), max_corner_stepper_accel on the steppers (rows
+of the kinematics' linear map, STEPPER_ROWS: corexy motors x + y, x - y);
+with both, every row holds its own cap (CornerCaps scales the rows to one
+cap: the bound is linear in r and the cap). At every time t of the
+junction's window, for each row and either sign of r . a(t),
+  v * own(t) + earlier(t) + legs(t) <= cap,
 own the junction's burst per unit speed (signed, r . du * w(t), both axis
 kernels), earlier the steps before it within the window (signed, placed
 anywhere their gaps allow: a dynamic programme), legs the moves' own
@@ -57,8 +61,8 @@ that fits the model of a faster junction is safe (corner_bound searches
 between them). bound_shape lays both kernels on one window of segments;
 the min-kernel split (common mass min(w_x, w_y) and each axis' excess)
 bounds a leg's convolution on a motor row whose axes have different
-kernels. A move that alone asks a stepper for more than max_corner_accel
-makes the corners touching that stepper stop.
+kernels. A move that alone asks a row for more than its cap makes the
+corners touching that row stop.
 
 With input shaping inactive on X or Y every direction change stops (as
 square_corner_velocity: 0).
@@ -105,6 +109,7 @@ STEPPER_ROWS = {
     "corexy": COREXY_ROWS,
     "limited_corexy": COREXY_ROWS,
 }
+STEPPER_NAMES = ("stepper_x", "stepper_y")
 SHORT_MOVE_STOP_DEG = 60.0
 TABLE_CACHE_DIR = "~/.cache/kalico/corner_deviation"
 BUILD_POLL_S = 0.05
@@ -290,6 +295,18 @@ def _mass_pieces(np, kernels):
     return out
 
 
+def _kernel_masses(kx, ky):
+    """The masses of the common part min(w_x, w_y) and of each axis'
+    excess over it (the excesses' sum is the kernels' L1 distance)."""
+    import numpy as np
+
+    pieces = _mass_pieces(np, [_density_in_u(k) for k in (kx, ky)])
+    return tuple(
+        sum(float(p.integ()(b) - p.integ()(a)) for a, b, p in mass)
+        for mass in pieces
+    )
+
+
 def _largest_slope(pieces):
     """The largest |density'| of a density given as (a, b, polynomial)
     pieces (exact: piece ends and the critical points of the slope)."""
@@ -389,6 +406,61 @@ def table_arrays(specs, kx, ky, cache_dir):
     return arrays
 
 
+class CornerCaps:
+    """max_corner_accel on the cartesian axes (AXIS_ROWS) and
+    max_corner_stepper_accel on the steppers (stepper_rows, the
+    kinematics' STEPPER_ROWS, None when it has none); None when unset."""
+
+    def __init__(self, axis=None, stepper=None, stepper_rows=None):
+        self.axis = axis
+        self.stepper = stepper
+        self.stepper_rows = stepper_rows
+
+    def bounded_rows(self):
+        """(row, cap) of every row a cap bounds."""
+        rows = []
+        if self.axis is not None:
+            rows += [(row, self.axis) for row in AXIS_ROWS]
+        if self.stepper is not None:
+            rows += [(row, self.stepper) for row in self.stepper_rows]
+        return rows
+
+    def limiter(self):
+        """(cap, rows) for the C limiter, which holds every row to one
+        cap: the bound is linear in the row and the cap, so a row with its
+        own cap c enters scaled by cap / c, and a row bounded twice keeps
+        the tighter cap. (None, AXIS_ROWS) without a cap."""
+        tightest = {}
+        for row, cap in self.bounded_rows():
+            tightest[row] = min(cap, tightest.get(row, math.inf))
+        if not tightest:
+            return None, AXIS_ROWS
+        cap = min(tightest.values())
+        rows = tuple(
+            tuple(cap / own * r for r in row) for row, own in tightest.items()
+        )
+        return cap, rows
+
+    def stop_accel(self):
+        """The largest acceleration at which a straight move in any
+        direction asks no bounded row for more than its cap (above it,
+        corners touching such a move stop)."""
+        return min(
+            (cap / math.hypot(*row) for row, cap in self.bounded_rows()),
+            default=math.inf,
+        )
+
+    def axes_from_steppers(self):
+        """|inverse| of the stepper map: |a_x|, |a_y| are at most these
+        rows times the steppers' |accelerations|."""
+        (a, b), (c, d) = self.stepper_rows
+        det = a * d - b * c
+        return (
+            (abs(d / det), abs(b / det)),
+            (abs(c / det), abs(a / det)),
+        )
+
+
 class JunctionLimit:
     """The C junction limit (chelper/corner_deviation.c) over one table:
     cell (alpha, turn) holds g, the isolated corner's deviation per unit
@@ -465,19 +537,21 @@ def _max_abs_on(np, lo, hi, func, peak_at):
 
 
 class CornerAccel:
-    """The worst executed per-axis acceleration the junction limit admits.
-    At an isolated corner the shaped legs command at most accel * share
-    along an axis, share the larger axis component of the two directions,
-    and the junction at speed v adds at most density_peak * v * du, du the
-    direction change along the axis: |du_x| = 2 |sin(alpha + turn/2)|
-    |sin(turn/2)|, |du_y| = 2 |cos(alpha + turn/2)| |sin(turn/2)|. Both are
-    bounded over each table cell. On a curve at the curve cap the
+    """The worst executed acceleration the junction limit admits, per axis
+    and per stepper. At an isolated corner the shaped legs command at most
+    accel * share along an axis, share the larger axis component of the
+    two directions, and the junction at speed v adds at most density_peak
+    * v * du, du the direction change along the axis: |du_x| = 2 |sin(alpha
+    + turn/2)| |sin(turn/2)|, |du_y| = 2 |cos(alpha + turn/2)| |sin(turn/2)|.
+    Both are bounded over each table cell. On a curve at the curve cap the
     tangential accel and the centripetal 2 * accel * room / sigma^2 are
     perpendicular: at most their hypot along any axis. The steps of
     corners closer than the kernel's reach add up beyond both;
     CLUSTER_ACCEL_MARGIN is the stated allowance for that, checked by
-    tools/motion_eval/fuzz.py on clustered corners. With max_corner_accel
-    the junctions bound that sum themselves."""
+    tools/motion_eval/fuzz.py on clustered corners. A stepper sees at most
+    the sum of its row's axes. Where a cap bounds a row the junctions keep
+    the bursts and the legs under it, and where no burst runs the moves
+    alone ask at most accel * leg_demand(row) of it."""
 
     def __init__(self, arrays, kx, ky):
         import numpy as np
@@ -485,6 +559,9 @@ class CornerAccel:
         self.arrays = arrays
         self.variance = max(kx.variance, ky.variance)
         self.density_peak = (kx.density_peak, ky.density_peak)
+        self.leg_masses = (
+            _kernel_masses(kx, ky) if kx.density and ky.density else None
+        )
         n_alpha, n_theta = arrays["w_floor"].shape
         alpha_step = math.radians(TABLE_ALPHA_DEG)
         theta_step = math.radians(TABLE_THETA_DEG)
@@ -512,9 +589,19 @@ class CornerAccel:
                 )
             )
 
-    def worst(self, accel, max_velocity, max_corner_accel):
-        """(x, y) worst executed acceleration at this max_accel; with
-        max_corner_accel, the bound."""
+    def leg_demand(self, row):
+        """The most the moves alone ask of r . a after both smoothers, per
+        unit acceleration: |r_x w_x a_x + r_y w_y a_y| <= hypot(r_x w_x,
+        r_y w_y) |a| <= (|r| min(w_x, w_y) + |r_x| excess_x + |r_y|
+        excess_y) |a|, integrated over the kernels."""
+        common, excess_x, excess_y = self.leg_masses
+        return (
+            math.hypot(*row) * common
+            + abs(row[0]) * excess_x
+            + abs(row[1]) * excess_y
+        )
+
+    def _floor_worst(self, accel, max_velocity):
         speed = (accel * self.arrays["w_floor"]).clip(max=max_velocity)
         centripetal = (
             2.0 * accel * float(self.arrays["floor"].max()) / self.variance
@@ -527,23 +614,47 @@ class CornerAccel:
             corner = float(
                 (accel * share_max + density_peak * speed * du_max).max()
             )
-            axis = (1.0 + CLUSTER_ACCEL_MARGIN) * max(corner, curve)
-            if max_corner_accel is not None and density_peak:
-                axis = min(axis, max(max_corner_accel, accel))
-            out.append(float(axis))
-        return tuple(out)
+            out.append((1.0 + CLUSTER_ACCEL_MARGIN) * max(corner, curve))
+        return out
 
-    def recommended_max_accel(
-        self, motor_accel, max_velocity, max_corner_accel
-    ):
+    def _capped(self, worst, cap, accel, rows):
+        if cap is None or self.leg_masses is None:
+            return worst
+        return [
+            min(w, max(cap, accel * self.leg_demand(row)))
+            for w, row in zip(worst, rows)
+        ]
+
+    def worst(self, accel, max_velocity, caps):
+        """{"x", "y"} worst executed acceleration at this max_accel, and
+        per stepper (STEPPER_NAMES) when caps knows the stepper map."""
+        axes = self._capped(
+            self._floor_worst(accel, max_velocity), caps.axis, accel, AXIS_ROWS
+        )
+        if caps.stepper_rows is None:
+            return dict(zip("xy", axes))
+        steppers = self._capped(
+            [
+                abs(r[0]) * axes[0] + abs(r[1]) * axes[1]
+                for r in caps.stepper_rows
+            ],
+            caps.stepper,
+            accel,
+            caps.stepper_rows,
+        )
+        axes = [
+            min(a, inverse[0] * steppers[0] + inverse[1] * steppers[1])
+            for a, inverse in zip(axes, caps.axes_from_steppers())
+        ]
+        return dict(zip("xy", axes), **dict(zip(STEPPER_NAMES, steppers)))
+
+    def recommended_max_accel(self, motor_accel, max_velocity, caps):
         """The largest max_accel whose worst corner stays within motor_accel
         on both axes (worst grows with max_accel: bisection)."""
 
         def fits(accel):
-            return (
-                max(self.worst(accel, max_velocity, max_corner_accel))
-                <= motor_accel
-            )
+            worst = self.worst(accel, max_velocity, caps)
+            return max(worst["x"], worst["y"]) <= motor_accel
 
         lo, hi = 0.0, motor_accel
         if fits(hi):
@@ -603,8 +714,9 @@ class CornerDeviation:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
-        self.max_corner_accel = config.getfloat(
-            "max_corner_accel", None, above=0.0
+        max_corner_accel = config.getfloat("max_corner_accel", None, above=0.0)
+        max_corner_stepper_accel = config.getfloat(
+            "max_corner_stepper_accel", None, above=0.0
         )
         printer_section = config.getsection("printer")
         if printer_section.get("square_corner_velocity", None) is not None:
@@ -612,32 +724,34 @@ class CornerDeviation:
                 "[corner_deviation] replaces square_corner_velocity;"
                 " remove square_corner_velocity from [printer]"
             )
-        self.rows = AXIS_ROWS
-        if self.max_corner_accel is not None:
-            kinematics = printer_section.get("kinematics")
-            if kinematics not in STEPPER_ROWS:
+        kinematics = printer_section.get("kinematics")
+        stepper_rows = STEPPER_ROWS.get(kinematics)
+        if max_corner_stepper_accel is not None:
+            if stepper_rows is None:
                 raise config.error(
-                    "[corner_deviation] max_corner_accel bounds the"
-                    " steppers through the kinematics' linear map, known for"
-                    " %s; kinematics %s has none"
+                    "[corner_deviation] max_corner_stepper_accel needs the"
+                    " kinematics' linear stepper map, known for %s;"
+                    " kinematics %s has none"
                     % (", ".join(sorted(STEPPER_ROWS)), kinematics)
                 )
-            self.rows = STEPPER_ROWS[kinematics]
-            self.leg_demand = max(math.hypot(*row) for row in self.rows)
             max_accel = printer_section.getfloat("max_accel", above=0.0)
-            if self.max_corner_accel < self.leg_demand * max_accel:
+            straight = max_accel * max(math.hypot(*r) for r in stepper_rows)
+            if max_corner_stepper_accel < straight:
                 raise config.error(
-                    "[corner_deviation] max_corner_accel %.0f bounds each"
-                    " %s stepper (not the X/Y axes) and is below the"
-                    " %.0f mm/s^2 a straight move at max_accel %.0f asks"
-                    " of one; every corner touching it would stop"
+                    "[corner_deviation] max_corner_stepper_accel %.0f is below"
+                    " the %.0f mm/s^2 a straight move at max_accel %.0f asks"
+                    " of a %s stepper; every corner touching it would stop"
                     % (
-                        self.max_corner_accel,
-                        kinematics,
-                        self.leg_demand * max_accel,
+                        max_corner_stepper_accel,
+                        straight,
                         max_accel,
+                        kinematics,
                     )
                 )
+        self.caps = CornerCaps(
+            max_corner_accel, max_corner_stepper_accel, stepper_rows
+        )
+        self.stop_accel = self.caps.stop_accel()
         self.cache_dir = os.path.expanduser(
             config.get("table_cache_dir", TABLE_CACHE_DIR)
         )
@@ -660,7 +774,7 @@ class CornerDeviation:
         self.input_shaper = None
         self.limit = None
         self.reported_inactive = False
-        self.reported_leg_demand = False
+        self.reported_stop_accel = False
         self.building = False
         self.corner_accel_key = self.corner_accel = None
         self.generation = 0
@@ -741,9 +855,7 @@ class CornerDeviation:
         try:
             kx, ky = (kernel_from_spec(s) for s in specs)
             arrays = table_arrays(specs, kx, ky, self.cache_dir)
-            limit = JunctionLimit(
-                arrays, kx, ky, self.max_corner_accel, self.rows
-            )
+            limit = JunctionLimit(arrays, kx, ky, *self.caps.limiter())
             result = (limit, None)
         except Exception as e:
             logging.exception("corner_deviation: table build failed")
@@ -778,18 +890,22 @@ class CornerDeviation:
         if self.limit is not None:
             for name, count in self.limit.counters().items():
                 counters[name] += count
-        corner_accel = self._corner_accel()
+        corner_accel = self._corner_accel() or {}
         return dict(
             counters,
-            max_corner_accel=self.max_corner_accel,
+            max_corner_accel=self.caps.axis,
+            max_corner_stepper_accel=self.caps.stepper,
             table_ready=self.limit is not None,
-            corner_accel_x=corner_accel and corner_accel[0],
-            corner_accel_y=corner_accel and corner_accel[1],
+            **{
+                "corner_accel_" + name: corner_accel.get(name)
+                for name in ("x", "y") + STEPPER_NAMES
+            },
         )
 
     def _corner_accel(self):
-        """Worst executed (x, y) acceleration admitted at the toolhead's
-        current max_accel and max_velocity; None without a table."""
+        """Worst executed acceleration admitted per axis and stepper
+        (CornerAccel.worst) at the toolhead's current max_accel and
+        max_velocity; None without a table."""
         if self.limit is None:
             return None
         key = (self.limit, self.toolhead.max_accel, self.toolhead.max_velocity)
@@ -798,15 +914,21 @@ class CornerDeviation:
             self.corner_accel = self.limit.accel_model.worst(
                 self.toolhead.max_accel,
                 self.toolhead.max_velocity,
-                self.max_corner_accel,
+                self.caps,
             )
         return self.corner_accel
 
     def _accel_summary(self):
-        x, y = self._corner_accel()
-        return "worst corner accel X %.0f Y %.0f mm/s^2 at max_accel %.0f" % (
-            x,
-            y,
+        worst = self._corner_accel()
+        steppers = "".join(
+            " %s %.0f" % (name, worst[name])
+            for name in STEPPER_NAMES
+            if name in worst
+        )
+        return "worst corner accel X %.0f Y %.0f%s mm/s^2 at max_accel %.0f" % (
+            worst["x"],
+            worst["y"],
+            steppers,
             self.toolhead.max_accel,
         )
 
@@ -824,7 +946,7 @@ class CornerDeviation:
             recommended = self.limit.accel_model.recommended_max_accel(
                 motor_accel,
                 self.toolhead.max_velocity,
-                self.max_corner_accel,
+                self.caps,
             )
             msg += "\nrecommended_max_accel %.0f for MOTOR_ACCEL %.0f" % (
                 recommended,
@@ -847,20 +969,16 @@ class CornerDeviation:
                 )
                 self.reported_inactive = True
             return 0.0
-        if (
-            self.max_corner_accel is not None
-            and not self.reported_leg_demand
-            and move.accel * self.leg_demand > self.max_corner_accel
-        ):
+        if not self.reported_stop_accel and move.accel > self.stop_accel:
             logging.warning(
-                "corner_deviation: accel %.0f asks up to %.0f mm/s^2 of a"
-                " stepper, above max_corner_accel %.0f; corners touching it"
-                " stop",
+                "corner_deviation: accel %.0f is above %.0f, the most at"
+                " which a straight move in any direction fits"
+                " max_corner_accel and max_corner_stepper_accel; corners"
+                " touching a move that asks more stop",
                 move.accel,
-                move.accel * self.leg_demand,
-                self.max_corner_accel,
+                self.stop_accel,
             )
-            self.reported_leg_demand = True
+            self.reported_stop_accel = True
         prev_r, move_r = prev_move.axes_r, move.axes_r
         return limit.junction_v2(
             limit.c,

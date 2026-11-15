@@ -152,9 +152,6 @@ def execute(run, tmpdir):
         max_jump_mm_s=max(ex[a]["max_velocity_jump_mm_s"] for a in "xy"),
         p99_jump_mm_s=max(ex[a]["p99_velocity_jump_mm_s"] for a in "xy"),
         peak_accel=max(ex[a]["peak_accel_mm_s2"] for a in "xy"),
-        peak_stepper_accel=max(
-            s["peak_accel_mm_s2"] for s in r["steppers"].values()
-        ),
         cmd_peak_accel=max(cmd[a]["peak_accel_mm_s2"] for a in "xy"),
         max_step_model_error_share=max(
             s["model_vs_steps"]["max_error_mm"]

@@ -1,4 +1,4 @@
-# [corner_deviation] max_corner_accel bounds the corexy motors (x + y, x - y)
+# corexy with max_corner_accel on X/Y below a diagonal move's motor demand (starts) and max_corner_stepper_accel on the motors (x + y, x - y)
 CONFIG corner_deviation_corexy.cfg
 DICTIONARY atmega2560.dict
 GCODE corner_deviation.gcode

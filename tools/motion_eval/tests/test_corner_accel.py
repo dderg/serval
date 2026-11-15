@@ -1,7 +1,8 @@
-"""The corner acceleration burst on owner.cfg (smooth_mzv 200/130 Hz,
-50 000 mm/s^2): unbounded by default, within what CornerAccel says the
-planner admits, bounded by max_corner_accel when set, and kept within a
-motor's limit at recommended_max_accel."""
+"""The corner acceleration burst on owner.cfg (corexy, smooth_mzv 200/130
+Hz, 50 000 mm/s^2): unbounded by default, within what CornerAccel says
+the planner admits, bounded by max_corner_accel on the axes and by
+max_corner_stepper_accel on the motors when set, and kept within a motor's
+limit at recommended_max_accel."""
 
 import math
 import pathlib
@@ -17,7 +18,14 @@ from tools.motion_eval import evaluate, fuzz, run, sweep
 OWNER_CFG = sweep.HERE / "configs" / "owner.cfg"
 MAX_ACCEL = 50000.0
 MAX_VELOCITY = 800.0
-BOUND = 1.03 * math.sqrt(2.0) * MAX_ACCEL
+BOUND = 1.03 * MAX_ACCEL
+STEPPER_BOUND = 1.03 * math.sqrt(2.0) * MAX_ACCEL
+CAPS = {
+    "axes": cd.CornerCaps(BOUND, None, cd.COREXY_ROWS),
+    "steppers": cd.CornerCaps(None, STEPPER_BOUND, cd.COREXY_ROWS),
+    "both": cd.CornerCaps(BOUND, STEPPER_BOUND, cd.COREXY_ROWS),
+}
+SERIES = ("x", "y") + cd.STEPPER_NAMES
 MOTOR_ACCEL = MAX_ACCEL
 DT = 25e-6
 WORST_CASE = "voron_top_layers"
@@ -45,11 +53,15 @@ def _run(section, gcode, start):
         raw = run.run_klippy(config, gcode, start)
     _, _, _, _, _, motion = evaluate.executed_motion(raw.capture, DT)
     peaks = {a: float(np.abs(motion[a].acc).max()) for a in "xy"}
-    motors = {
-        "motor_a": float(np.abs(motion["x"].acc + motion["y"].acc).max()),
-        "motor_b": float(np.abs(motion["x"].acc - motion["y"].acc).max()),
+    steppers = {
+        "stepper_x": float(np.abs(motion["x"].acc + motion["y"].acc).max()),
+        "stepper_y": float(np.abs(motion["x"].acc - motion["y"].acc).max()),
     }
-    return raw.capture, dict(peaks, **motors)
+    return raw.capture, dict(peaks, **steppers)
+
+
+def _section(caps):
+    return fuzz.bound_section((caps.axis, caps.stepper))
 
 
 def _case(name):
@@ -80,9 +92,7 @@ def _fast_shallow_corner(accel):
 def test_unbounded_is_at_least_as_fast_as_bounded():
     text, start = _case(WORST_CASE)
     free, _ = _run("[corner_deviation]\n", text, start)
-    bounded, _ = _run(
-        "[corner_deviation]\nmax_corner_accel: %r\n" % (BOUND,), text, start
-    )
+    bounded, _ = _run(_section(CAPS["both"]), text, start)
 
     def span(capture):
         moves = capture["moves"]
@@ -98,12 +108,18 @@ def test_unbounded_is_at_least_as_fast_as_bounded():
     assert span(free) <= span(bounded)
 
 
-def test_max_corner_accel_holds_the_burst():
+@pytest.mark.parametrize("setting", sorted(CAPS))
+def test_corner_caps_hold_the_burst_and_the_reported_worst(setting):
+    caps = CAPS[setting]
     text, start = _case(WORST_CASE)
-    _, peaks = _run(
-        "[corner_deviation]\nmax_corner_accel: %r\n" % (BOUND,), text, start
-    )
-    assert max(peaks["motor_a"], peaks["motor_b"]) <= BOUND
+    capture, peaks = _run(_section(caps), text, start)
+    status = capture["corner_deviation"]
+    for series in SERIES:
+        assert peaks[series] <= status["corner_accel_" + series]
+    if caps.axis is not None:
+        assert max(peaks["x"], peaks["y"]) <= caps.axis
+    if caps.stepper is not None:
+        assert max(peaks["stepper_x"], peaks["stepper_y"]) <= caps.stepper
 
 
 @pytest.mark.parametrize(
@@ -124,7 +140,7 @@ def test_the_admitted_worst_is_reached_at_a_fast_shallow_corner():
     capture, peaks = _run(
         "[corner_deviation]\n", _fast_shallow_corner(MAX_ACCEL), START
     )
-    admitted_x, _ = model.worst(MAX_ACCEL, MAX_VELOCITY, None)
+    admitted_x = model.worst(MAX_ACCEL, MAX_VELOCITY, cd.CornerCaps())["x"]
     assert capture["corner_deviation"]["corner_accel_x"] == admitted_x
     turn = math.radians(ALPHA_DEG + TURN_DEG)
     up_x, um_x = math.cos(math.radians(ALPHA_DEG)), math.cos(turn)
@@ -137,10 +153,17 @@ def test_the_admitted_worst_is_reached_at_a_fast_shallow_corner():
 
 def test_recommended_max_accel_keeps_the_worst_corner_within_the_motor():
     model, _ = _model()
-    recommended = model.recommended_max_accel(MOTOR_ACCEL, MAX_VELOCITY, None)
-    assert max(model.worst(recommended, MAX_VELOCITY, None)) <= MOTOR_ACCEL
-    above = recommended * (1.0 + 10.0 * cd.RECOMMEND_TOLERANCE)
-    assert max(model.worst(above, MAX_VELOCITY, None)) > MOTOR_ACCEL
+    caps = cd.CornerCaps()
+    recommended = model.recommended_max_accel(MOTOR_ACCEL, MAX_VELOCITY, caps)
+
+    def worst_axis(accel):
+        worst = model.worst(accel, MAX_VELOCITY, caps)
+        return max(worst["x"], worst["y"])
+
+    assert worst_axis(recommended) <= MOTOR_ACCEL
+    assert worst_axis(recommended * (1.0 + 10.0 * cd.RECOMMEND_TOLERANCE)) > (
+        MOTOR_ACCEL
+    )
     _, peaks = _run(
         "[corner_deviation]\n", _fast_shallow_corner(recommended), START
     )
@@ -177,17 +200,47 @@ class _Toolhead:
 def test_report_states_the_worst_corner_and_the_recommended_max_accel():
     model, _ = _model()
     kx, ky = (cd.kernel_from_spec(s) for s in OWNER_SPECS)
+    caps = CAPS["both"]
     limiter = object.__new__(cd.CornerDeviation)
-    limiter.limit = cd.JunctionLimit(model.arrays, kx, ky, None)
+    limiter.limit = cd.JunctionLimit(model.arrays, kx, ky, *caps.limiter())
     limiter.toolhead = _Toolhead()
-    limiter.max_corner_accel = None
+    limiter.caps = caps
     limiter.corner_accel_key = limiter.corner_accel = None
     gcmd = _Gcmd(MOTOR_ACCEL)
     limiter.cmd_CORNER_DEVIATION_REPORT(gcmd)
-    worst = model.worst(MAX_ACCEL, MAX_VELOCITY, None)
-    recommended = model.recommended_max_accel(MOTOR_ACCEL, MAX_VELOCITY, None)
+    worst = model.worst(MAX_ACCEL, MAX_VELOCITY, caps)
+    recommended = model.recommended_max_accel(MOTOR_ACCEL, MAX_VELOCITY, caps)
     assert gcmd.responses == [
-        "worst corner accel X %.0f Y %.0f mm/s^2 at max_accel %.0f\n"
+        "worst corner accel X %.0f Y %.0f stepper_x %.0f stepper_y %.0f"
+        " mm/s^2 at max_accel %.0f\n"
         "recommended_max_accel %.0f for MOTOR_ACCEL %.0f"
-        % (worst + (MAX_ACCEL, recommended, MOTOR_ACCEL))
+        % (
+            tuple(worst[name] for name in SERIES)
+            + (MAX_ACCEL, recommended, MOTOR_ACCEL)
+        )
     ]
+
+
+@pytest.mark.parametrize("setting", sorted(CAPS))
+def test_reported_worst_keeps_each_cap_above_the_moves_own_demand(setting):
+    """A cap bounds its rows down to what the moves alone ask (at least a
+    straight move's demand); axes and steppers bound each other through
+    the corexy map."""
+    model, _ = _model()
+    caps = CAPS[setting]
+    free = model.worst(
+        MAX_ACCEL, MAX_VELOCITY, cd.CornerCaps(None, None, cd.COREXY_ROWS)
+    )
+    worst = model.worst(MAX_ACCEL, MAX_VELOCITY, caps)
+    diagonal = MAX_ACCEL * model.leg_demand((1.0, 1.0))
+    assert diagonal >= math.sqrt(2.0) * MAX_ACCEL
+    for series in SERIES:
+        assert worst[series] <= free[series]
+    for stepper in cd.STEPPER_NAMES:
+        assert worst[stepper] <= worst["x"] + worst["y"]
+    if caps.axis is not None:
+        assert max(worst["x"], worst["y"]) <= caps.axis
+    if caps.stepper is not None:
+        steppers = (worst["stepper_x"], worst["stepper_y"])
+        assert max(steppers) <= max(caps.stepper, diagonal)
+        assert max(worst["x"], worst["y"]) <= 0.5 * sum(steppers)

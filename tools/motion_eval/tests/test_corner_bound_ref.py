@@ -18,7 +18,11 @@ SMOOTHERS = (
     (shaper_defs.get_ei_smoother, 200.0, 130.0),
     (shaper_defs.get_zv_smoother, 70.0, 70.0),
 )
-ROWS = {"axes": cd.AXIS_ROWS, "corexy": cd.COREXY_ROWS}
+CAPS = {
+    "axes": cd.CornerCaps(30000.0, None, cd.COREXY_ROWS),
+    "corexy": cd.CornerCaps(None, 30000.0, cd.COREXY_ROWS),
+    "both": cd.CornerCaps(30000.0, 45000.0, cd.COREXY_ROWS),
+}
 
 
 def _kernels(smoother, fx, fy):
@@ -36,18 +40,18 @@ def _direction(rng, heading):
     return (xy * math.cos(heading), xy * math.sin(heading))
 
 
-@pytest.mark.parametrize("rows", sorted(ROWS))
+@pytest.mark.parametrize("setting", sorted(CAPS))
 @pytest.mark.parametrize(
     "smoother", SMOOTHERS, ids=lambda s: "%s-%g" % (s[0].__name__, s[1])
 )
-def test_c_bound_matches_the_reference(smoother, rows):
+def test_c_bound_matches_the_reference(smoother, setting):
     specs, kx, ky = _kernels(*smoother)
     arrays = cd.table_arrays(specs, kx, ky, fuzz.TABLE_CACHE_DIR)
-    cap = 30000.0
-    bounded = cd.JunctionLimit(arrays, kx, ky, cap, ROWS[rows])
-    free = cd.JunctionLimit(arrays, kx, ky, None, ROWS[rows])
-    reference = corner_bound_ref.ReferenceLimit(kx, ky, cap, ROWS[rows])
-    rng = random.Random("%g-%s" % (smoother[1], rows))
+    cap, rows = CAPS[setting].limiter()
+    bounded = cd.JunctionLimit(arrays, kx, ky, cap, rows)
+    free = cd.JunctionLimit(arrays, kx, ky, None, rows)
+    reference = corner_bound_ref.ReferenceLimit(kx, ky, cap, rows)
+    rng = random.Random("%g-%s" % (smoother[1], setting))
     heading = rng.uniform(-math.pi, math.pi)
     up = _direction(rng, heading)
     prev_d, prev_accel, prev_max_v2, prev_start_v2 = 1.0, 20000.0, 9e4, 0.0

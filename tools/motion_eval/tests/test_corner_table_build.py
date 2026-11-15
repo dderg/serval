@@ -42,9 +42,9 @@ def _limiter(cache_dir):
     limiter = object.__new__(cd.CornerDeviation)
     limiter.printer = _Printer()
     limiter.cache_dir = str(cache_dir)
-    limiter.max_corner_accel = None
-    limiter.rows = cd.AXIS_ROWS
-    limiter.reported_leg_demand = False
+    limiter.caps = cd.CornerCaps()
+    limiter.stop_accel = limiter.caps.stop_accel()
+    limiter.reported_stop_accel = False
     limiter.toolhead = _Toolhead()
     limiter.corner_accel_key = limiter.corner_accel = None
     limiter.limit = None

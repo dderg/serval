@@ -1,0 +1,4 @@
+# max_corner_accel bounds the X/Y axes on any kinematics (corexz here)
+CONFIG corner_deviation_corexz.cfg
+DICTIONARY atmega2560.dict
+GCODE corner_deviation.gcode
