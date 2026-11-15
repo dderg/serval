@@ -210,8 +210,9 @@ class MotionEngineWrapper:
     def update_post_processor(self, name, key, value):
         engine_wait.wait_for(
             self._printer,
-            lambda: self._engine.try_update_post_processor(name, key, value)
-            or None,
+            lambda: (
+                self._engine.try_update_post_processor(name, key, value) or None
+            ),
             "post processor update (motion pipe space)",
             engine_wait.UNBOUNDED,
             interval_s=PIPELINE_REQUEST_POLL_S,
