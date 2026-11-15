@@ -93,7 +93,7 @@ impl Ingress {
         let peak_ahead_s = self.intake.take_peak_ahead();
         let planned_from_s = self.pipeline.planned_through_s();
         self.drain_and_fence_as(DrainCause::PacerBrake);
-        tracing::debug!(
+        tracing::info!(
             subsystem = "motion",
             event = "pipe_drain",
             ?cause,
