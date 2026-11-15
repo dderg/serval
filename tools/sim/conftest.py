@@ -12,6 +12,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.sim.world import UNBOUNDED_VTIME_SPEED, SimWorld  # noqa: E402
 
+LONG_TEST_S = 10.0
+
 
 def _expected_seconds(item) -> float:
     mark = item.get_closest_marker("expected_seconds")
@@ -32,6 +34,22 @@ def pytest_collection_modifyitems(items):
     pairs = itertools.zip_longest(long, short[: len(long)])
     paired = [item for pair in pairs for item in pair if item is not None]
     items[:] = paired + short[len(long) :]
+
+
+def pytest_terminal_summary(terminalreporter):
+    for reports in terminalreporter.stats.values():
+        for rep in reports:
+            if getattr(rep, "when", None) != "call":
+                continue
+            if (
+                rep.duration <= LONG_TEST_S
+                or "expected_seconds" in rep.keywords
+            ):
+                continue
+            terminalreporter.write_line(
+                f"hint: {rep.nodeid} ran {rep.duration:.0f} s without "
+                "@pytest.mark.expected_seconds; mark it so xdist starts it first"
+            )
 
 
 @pytest.hookimpl(hookwrapper=True)
