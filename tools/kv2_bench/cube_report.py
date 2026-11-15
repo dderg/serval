@@ -26,7 +26,8 @@ import numpy as np
 
 from . import compare, firmware, replay
 from .cube import AB, SETTINGS, STOCK
-from .reference import Reference
+from .headroom import fatal_lines
+from .reference import Reference, Steps
 from .report import peak_rates
 from .trapq_diff import live_phases
 
@@ -50,6 +51,8 @@ PRINT_START_END = (60.0, 0.3, 0.28)
 AXES_TOL = 1e-6
 POS_TOL = 1e-5
 MAX_SKIPPED_LINES = 6
+REVERSAL_CONTEXT = 50
+ERROR_MARKERS = ("Traceback", "Internal error", "!! ", "Unknown command")
 REAL_PLANS = AB / "print-compare-plans"
 REAL = {
     "print 1 (stock, old host)": (
@@ -329,36 +332,22 @@ def capture_timing(
     }
 
 
-def health(run_dir: Path, rows: list[dict]) -> dict:
+def health(g: Gcode, run_dir: Path, rows: list[dict]) -> dict:
+    """Errors over the whole log; Stats over the span (first extrusion to
+    line 39601), as the real-printer comparison reports them."""
     log = (run_dir / "klippy.log").read_text()
     printing = [r for r in rows if pc.find(r, "sd_pos") is not None]
 
-    def peak(key: str, fn=max) -> float | None:
-        values = [pc.find(r, key) for r in printing]
-        values = [v for v in values if isinstance(v, float)]
-        return fn(values) if values else None
+    def peak(key: str, fn=max) -> float:
+        return fn(pc.find(r, key) for r in span)
 
     run = json.loads((run_dir / "run.json").read_text())
+    lines = log.splitlines()
     return {
         "print_state": run.get("print_state"),
         "failure": run.get("failure"),
-        "errors": [
-            line
-            for line in log.splitlines()
-            if any(
-                k in line
-                for k in (
-                    "Traceback",
-                    "Error",
-                    "error",
-                    "Timer too close",
-                    "shutdown",
-                    "Lost communication",
-                )
-            )
-            and not line.startswith("Stats")
-            and "error_on_unused" not in line
-        ][:20],
+        "errors": fatal_lines(log)
+        + [line for line in lines if any(k in line for k in ERROR_MARKERS)],
         "scv_ignored_warnings": log.count("SQUARE_CORNER_VELOCITY is ignored"),
         "accel_to_decel_warnings": log.count("ACCEL_TO_DECEL is ignored"),
         "toolhead_limit_lines": sum(
@@ -366,7 +355,7 @@ def health(run_dir: Path, rows: list[dict]) -> dict:
             for line in log.splitlines()
             if line.startswith("toolhead: max_velocity")
         ),
-        "printing_samples": len(printing),
+        "span_samples": len(span),
         "buffer_time_min_s": peak("buffer_time", min),
         "print_stall_max": peak("print_stall"),
         "mcu_awake_max": peak("mcu_awake"),
@@ -481,7 +470,8 @@ def session_report(session: Path, plans: Path) -> dict:
         cumulative = t_first + np.cumsum(durations)
         t_start, t_end = float(cumulative[g.start]), float(cumulative[g.end])
         whole = (phases[0]["t"], max(p["t"] + p["dur"] for p in phases))
-        verdict = judge(run_dir, record["kv2"], dictionary)
+        pa_script = pressure_advance_script(g, phases)
+        verdict = judge(run_dir, record["kv2"], dictionary, [pa_script])
         result = {
             "run_dir": str(run_dir),
             "plan": planned,
@@ -491,9 +481,11 @@ def session_report(session: Path, plans: Path) -> dict:
                 "whole_s": whole[1] - whole[0],
             },
             "judge": verdict,
-            "health": health(run_dir, rows),
+            "health": health(g, run_dir, rows),
+            "pressure_advance_script": pa_script,
         }
-        if verdict["checks"].get("capture_equals_replay_sequence"):
+        xy_paired = not any(verdict["reversal_pairs"][m] for m in XY_MOTORS)
+        if verdict["checks"]["capture_equals_tap_sequence"] and xy_paired:
             result["capture"] = capture_timing(
                 g, run_dir, t_start, t_end, whole
             )
@@ -505,9 +497,14 @@ def session_report(session: Path, plans: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("plans", "session"))
+    parser.add_argument("action", choices=("plans", "session", "tables"))
     parser.add_argument("dirs", type=Path, nargs="+")
     args = parser.parse_args()
+    if args.action == "tables":
+        report = json.loads((args.dirs[0] / "cube_report.json").read_text())
+        plans = json.loads((args.dirs[1] / "plans_report.json").read_text())
+        print(tables(report, plans))
+        return
     if args.action == "plans":
         result = plans_report(args.dirs[0])
         path = args.dirs[0] / "plans_report.json"

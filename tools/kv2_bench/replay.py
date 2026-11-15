@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import compare, trapq_diff
 from .reference import Reference, batch_config, decode, run_batch
+from .replay_capture import TIMED_SCRIPTS
 
 KINEMATIC = ("stepper_x", "stepper_y", "stepper_z")
 
@@ -43,11 +44,16 @@ def replay_phases(
     dictionary: Path,
     out_dir: Path,
     meta: dict,
+    timed_scripts: list[tuple[float, str]] = (),
 ) -> Reference:
+    """timed_scripts: (live print_time, gcode) the program applied to step
+    generation, such as its SET_PRESSURE_ADVANCE (replay_capture.py)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     phases = {name: p for name, p in phases.items() if p}
     phases_path = out_dir / "phases.json"
-    phases_path.write_text(json.dumps(phases))
+    phases_path.write_text(
+        json.dumps({**phases, TIMED_SCRIPTS: list(timed_scripts)})
+    )
     config_path = out_dir / "batch.cfg"
     config_path.write_text(batch_config(config_text))
     gcode_path = out_dir / "replay.gcode"
@@ -70,6 +76,7 @@ def replay_phases(
             **meta,
             "klippy_tree": str(tree),
             "trapqs": {name: len(p) for name, p in phases.items()},
+            "timed_scripts": list(timed_scripts),
             "input_shaper": capture["input_shaper"],
         },
     )
@@ -78,7 +85,11 @@ def replay_phases(
 
 
 def build(
-    run_dir: Path, tree: Path, dictionary: Path, out_dir: Path
+    run_dir: Path,
+    tree: Path,
+    dictionary: Path,
+    out_dir: Path,
+    timed_scripts: list[tuple[float, str]] = (),
 ) -> Reference:
     trapqs = trapq_diff.trapq_names(run_dir)
     return replay_phases(
@@ -88,6 +99,7 @@ def build(
         dictionary,
         out_dir,
         {"run_dir": str(run_dir)},
+        timed_scripts,
     )
 
 

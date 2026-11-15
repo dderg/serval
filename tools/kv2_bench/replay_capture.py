@@ -7,6 +7,9 @@ The input gcode runs REPLAY_LIVE_TRAPQ once. It skips klippy's planner:
   lattice is anchored there, as SET_KINEMATIC_POSITION anchored it live);
 - appends every recorded phase to its trapq ("toolhead", or an extruder's)
   at its live print_time, so the MCU clocks come out on the live timeline;
+- runs each TIMED_SCRIPTS entry (print_time, gcode) with its lookahead
+  callbacks fired at that print_time, which is where the live host applied
+  it (e.g. SET_PRESSURE_ADVANCE from the program);
 - generates steps in the live background flusher's batch size;
 - records every stepper's queue_step history, like batch_capture.py.
 
@@ -24,9 +27,12 @@ from klippy import printer, toolhead
 from klippy.extras import motion_queuing
 from tools.motion_eval import capture as motion_capture
 
+TIMED_SCRIPTS = "timed_scripts"
+
 
 class ReplayCapture:
     def __init__(self, phases: dict):
+        self.timed_scripts = sorted(phases.pop(TIMED_SCRIPTS, []))
         self.phases = phases
         self.history = None
         self.undrained_serial = False
@@ -61,10 +67,22 @@ class ReplayCapture:
             raise motion_capture.UnsupportedRun(f"no trapq named {name!r}")
         return extruder.get_trapq()
 
+    def run_at(self, print_time: float, script: str) -> None:
+        register = self.toolhead.register_lookahead_callback
+        self.toolhead.register_lookahead_callback = lambda callback: callback(
+            print_time
+        )
+        try:
+            self.printer.lookup_object("gcode").run_script_from_command(script)
+        finally:
+            self.toolhead.register_lookahead_callback = register
+
     def cmd_replay(self, gcmd):
         toolhead_phases = self.phases["toolhead"]
         x, y, z = toolhead_phases[0]["start"]
         self.toolhead.set_position([x, y, z, 0.0])
+        for print_time, script in self.timed_scripts:
+            self.run_at(print_time, script)
         for name, phases in self.phases.items():
             if name != "toolhead":
                 extruder = self._extruders()[name]
