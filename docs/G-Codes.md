@@ -649,7 +649,11 @@ software (see
 
 #### FIRMWARE_RESTART
 `FIRMWARE_RESTART`: This is similar to a RESTART command, but it also
-clears any error state from the micro-controller.
+clears any error state from the micro-controller. It does not wait for
+queued moves: every micro-controller is reset at once, motion still
+buffered is discarded and the steppers stop abruptly, as after M112, so
+the axes must be homed again. RESTART still completes queued moves
+first.
 
 #### HEATER_INTERRUPT
 `HEATER_INTERRUPT`: Interrupts a TEMPERATURE_WAIT command.
