@@ -1,17 +1,19 @@
 """Print interruptions with heaters running: CANCEL_PRINT, PAUSE/RESUME,
 end-of-print macros (M84, BED_MESH_CLEAR), a dwell behind queued travel,
-the #403 purge macro, and FIRMWARE_RESTART mid-print, on one MCU and with
-the XY motors on a second.
+the #403 purge macro, FIRMWARE_RESTART mid-print, and an emergency stop
+while a dwell waits for the buffered motion, on one MCU and with the XY
+motors on a second.
 
 Field reports #406/#416/#369 (CANCEL_PRINT), #362 (BED_MESH_CLEAR in
 END_PRINT) and #370 ended in `Timer too close` or `Missed scheduling of
 next digital out event` on the MCU that drives the heaters, right after a
 `reactor_poller_late` as long as the engine's brake-to-rest: a heater PWM
 update was scheduled from a temperature sample taken before klippy's
-reactor stalled and sent after it. Every scenario keeps two heaters
+reactor stalled and sent after it. Every other scenario keeps two heaters
 saturated (the sim's resting ADC reads ~34C, so the PID refreshes full
 power every ~2.1 s against a 3 s max_duration) and asserts the reactor never
-stalls, no MCU shuts down, and the printer takes commands afterwards.
+stalls, no MCU shuts down, and the printer takes commands afterwards. The
+emergency stop runs with the heaters off, so it lands on a live MCU.
 """
 
 import pathlib
@@ -32,6 +34,10 @@ PRINT_TIMEOUT_S = 600
 MARK_PIN_NAME = "soft_pwm_pin"
 MARK_PIN_LINE = 37
 RESTART_DEADLINE_S = 5.0
+ESTOP_DEADLINE_S = 0.1
+ESTOP_REASON = "Shutdown due to webhooks request"
+DWELL_WAITING = ('"event":"engine_wait_slow"', '"what":"dwell"')
+DWELL_ABORTED_BY_SHUTDOWN = "dwell: shutdown while waiting on the motion engine"
 XY_PIN_LINES = range(0, 6)
 SHAPED_ENDSTOPS = ("gpio200", "gpio201")
 EXTRUDER_SMOOTH_TIME = 0.02
@@ -193,11 +199,11 @@ TOPOLOGIES = {
 }
 
 
-def _boot(sim_world, topology):
+def _boot(sim_world, topology, heater_targets=HEATED_TARGETS):
     config_fn, dual_mcu = TOPOLOGIES[topology]
     world = sim_world(config_fn, dual_mcu=dual_mcu)
     world.gcode_ok("SET_KINEMATIC_POSITION X=100 Y=100 Z=5")
-    for command in HEATED_TARGETS:
+    for command in heater_targets:
         world.gcode_ok(command)
     return world
 
@@ -347,3 +353,38 @@ def test_firmware_restart_mid_print(sim_world, topology, fraction):
     assert world._wait_ready(120.0), world.log_tail()[-4000:]
     _assert_ready_and_moving(world)
     assert world.shutdown_line() is None, world.log_tail()[-4000:]
+
+
+def _dwell_waiting(world):
+    return any(
+        all(key in line for key in DWELL_WAITING)
+        for line in world.events_text().splitlines()
+    )
+
+
+@pytest.mark.parametrize("topology", sorted(TOPOLOGIES))
+def test_emergency_stop_while_dwell_drains(sim_world, topology):
+    world = _boot(sim_world, topology, heater_targets=())
+    _start_print(world, "estop.gcode", tail=["G4 P1"])
+    world.wait_until(
+        lambda: _dwell_waiting(world),
+        timeout=PRINT_TIMEOUT_S,
+        what="the dwell behind the print waiting for the buffered motion",
+        poll=0.05,
+    )
+    world.mark_log()
+    requested_ns = world.vclock.now_ns()
+    world.emergency_stop()
+    world.wait_until(
+        lambda: world._printer_state() == "shutdown",
+        timeout=ESTOP_DEADLINE_S,
+        what="the shutdown emergency_stop requests",
+    )
+    latency_s = (world.vclock.now_ns() - requested_ns) * 1e-9
+    assert latency_s <= ESTOP_DEADLINE_S, latency_s
+    world.expect_log(ESTOP_REASON, timeout=1.0)
+    world.wait_until(
+        lambda: DWELL_ABORTED_BY_SHUTDOWN in world.events_text(),
+        timeout=1.0,
+        what="the pending dwell to abort on the shutdown",
+    )
