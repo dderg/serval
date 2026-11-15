@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import pathlib
 import random
 import tempfile
@@ -49,16 +50,32 @@ def test_junction_limits_do_not_depend_on_flushes(seed):
     assert not v, v[:10]
 
 
+def _limits_before(raw, end):
+    return {i: lim for i, lim in fuzz._junctions(raw).items() if i < end}
+
+
+@pytest.mark.parametrize("setting", ["axes", "steppers", "both"])
 @pytest.mark.parametrize("seed", seeds())
-def test_bounded_junction_limits_do_not_depend_on_lazy_flushes(seed):
+def test_bounded_junction_limits_do_not_depend_on_lazy_flushes(seed, setting):
+    """Up to the first runout stop: a lazy flush can leave so little
+    planned that Klipper stops the toolhead (its own full flush; the
+    default planner's trapq changes with the same flushes), and the move
+    after that stop starts from rest, a different plan."""
     case = corpus_case(seed)
-    v = fuzz.Violations()
     lazy_env = {
         "MOTION_EVAL_LAZY_FLUSH_AT": ",".join(map(str, case.lazy_flush_at))
     }
     with tempfile.TemporaryDirectory() as tmp:
-        section = fuzz.bound_section(fuzz.bound_caps(case, "corexy")["both"])
+        section = fuzz.bound_section(fuzz.bound_caps(case, "corexy")[setting])
         batch = fuzz._run(case, tmp, section)
         lazy = fuzz._run(case, tmp, section, env=lazy_env)
-        fuzz._check_junctions(v, "bounded, lazy flushes", lazy, batch)
-    assert not v, v[:10]
+    runout = fuzz._full_flushes(lazy) - fuzz._full_flushes(batch)
+    end = min(runout, default=math.inf)
+    limits, batch_limits = _limits_before(lazy, end), _limits_before(batch, end)
+    assert limits.keys() == batch_limits.keys()
+    differ = [
+        (i, limits[i], batch_limits[i])
+        for i in sorted(limits)
+        if not fuzz._same_own_limit(limits[i], batch_limits[i])
+    ]
+    assert not differ, differ[:10]
