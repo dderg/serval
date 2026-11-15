@@ -1,0 +1,4 @@
+# [corner_deviation] max_corner_accel bounds the corexy motors (x + y, x - y)
+CONFIG corner_deviation_corexy.cfg
+DICTIONARY atmega2560.dict
+GCODE corner_deviation.gcode

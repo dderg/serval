@@ -215,21 +215,24 @@ defs_kin_shaper = """
 
 defs_corner_deviation = """
     struct cd_step {
-        double tau, v, dv[2], share[2];
+        double tau, v, accel, du[2], leg[2];
     };
     struct cd_shape {
         int n;
         double u0, h;
-        double segmax[32];
+        double wmax[2][32], wmin[2][32];
+        double cdf_pad, cdf_h, cdf_margin;
+        double cdf[3][1569];
+        double total[3];
     };
     struct cd_limiter {
         int n_alpha, n_theta;
         double alpha_step, theta_step;
         double *floor, *w_floor;
         double variance, window, max_corner_accel, short_turn;
-        int has_corner_bound;
-        double density_peak[2];
-        struct cd_shape shape[2];
+        int has_corner_bound, n_rows;
+        double rows[4][2];
+        struct cd_shape shape;
         double min_direction_change, min_xy_share;
         uint64_t limited, step_limited, xy_stops;
         struct cd_step steps[256];
@@ -238,7 +241,7 @@ defs_corner_deviation = """
     double cd_junction_v2(struct cd_limiter *l, double upx, double upy
         , double umx, double umy, double prev_d, double move_d
         , double prev_accel, double move_accel, double prev_max_v2
-        , int chained, double cap_v2);
+        , double move_max_v2, double prev_start_v2, double cap_v2);
 """
 
 defs_kin_idex = """

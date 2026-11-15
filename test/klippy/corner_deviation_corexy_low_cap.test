@@ -1,0 +1,6 @@
+# corexy max_corner_accel below 1.41 x max_accel (a diagonal move alone asks more of a motor)
+CONFIG corner_deviation_corexy_low_cap.cfg
+DICTIONARY atmega2560.dict
+SHOULD_FAIL
+
+G4 P1

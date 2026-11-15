@@ -1,0 +1,6 @@
+# max_corner_accel needs a known linear X/Y stepper map (cartesian, corexy)
+CONFIG corner_deviation_unmapped.cfg
+DICTIONARY atmega2560.dict
+SHOULD_FAIL
+
+G4 P1

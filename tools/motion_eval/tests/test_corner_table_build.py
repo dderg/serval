@@ -35,6 +35,7 @@ class _Move:
         self.move_d = 10.0
         self.accel = 5000.0
         self.max_cruise_v2 = 300.0**2
+        self.max_start_v2 = 0.0
 
 
 def _limiter(cache_dir):
@@ -42,10 +43,11 @@ def _limiter(cache_dir):
     limiter.printer = _Printer()
     limiter.cache_dir = str(cache_dir)
     limiter.max_corner_accel = None
+    limiter.rows = cd.AXIS_ROWS
+    limiter.reported_leg_demand = False
     limiter.toolhead = _Toolhead()
     limiter.corner_accel_key = limiter.corner_accel = None
     limiter.limit = None
-    limiter.last_move = None
     limiter.building = False
     limiter.generation = 0
     limiter.reported_inactive = False

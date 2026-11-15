@@ -40,15 +40,25 @@ max_velocity) and the centripetal acceleration the curve cap allows, with
 CLUSTER_ACCEL_MARGIN for corners within one kernel reach; it is logged
 when a table is ready, reported in the status, and
 recommended_max_accel() inverts it for a motor's acceleration limit. The
-optional max_corner_accel bounds the burst instead, as an upper bound:
-the legs' acceleration along the axis (the largest share among the moves
-in the window) plus the steps of this junction and of the ones before it
-within the kernel's support must fit under it at every time. Each step
-adds dv * |density| at its offset; the offsets are only known to be at
-least the moves' shortest traversal times (from the junction speeds and
-the moves' requested speeds), so the bound takes the largest sum over all
-placements that keep those gaps, per segment of the kernel (Kernel.shape,
-a dynamic programme over the earlier steps).
+optional max_corner_accel bounds the burst instead, per stepper (rows r of
+the kinematics' linear map, STEPPER_ROWS: corexy motors x + y, x - y): at
+every time t of the junction's window, for either sign of r . a(t),
+  v * own(t) + earlier(t) + legs(t) <= max_corner_accel,
+own the junction's burst per unit speed (signed, r . du * w(t), both axis
+kernels), earlier the steps before it within the window (signed, placed
+anywhere their gaps allow: a dynamic programme), legs the moves' own
+acceleration convolved with the kernels, sign-restricted where the
+lookahead's profile shapes allow (the move before the junction is not
+accelerating within prev_decel_time of it, the move after it is not
+decelerating within next_decel_time), free elsewhere, and any later move
+taken in its worst direction at the window's largest acceleration. The
+legs' model of a junction speed holds at every slower one, so the speed
+that fits the model of a faster junction is safe (corner_bound searches
+between them). bound_shape lays both kernels on one window of segments;
+the min-kernel split (common mass min(w_x, w_y) and each axis' excess)
+bounds a leg's convolution on a motor row whose axes have different
+kernels. A move that alone asks a stepper for more than max_corner_accel
+makes the corners touching that stepper stop.
 
 With input shaping inactive on X or Y every direction change stops (as
 square_corner_velocity: 0).
@@ -82,7 +92,19 @@ MIN_XY_SHARE = 1e-6
 FLOOR_MARGIN = 0.10
 CLUSTER_ACCEL_MARGIN = 0.25
 RECOMMEND_TOLERANCE = 1e-6
-SHAPE_NODES = 32
+BOUND_SEGMENTS = 32
+BOUND_CDF_SUB = 16
+BOUND_CDF_NODES = (3 * BOUND_SEGMENTS + 2) * BOUND_CDF_SUB + 1
+BOUND_MAX_ROWS = 4
+DENSITY_TOLERANCE = 1e-9
+AXIS_ROWS = ((1.0, 0.0), (0.0, 1.0))
+COREXY_ROWS = ((1.0, 1.0), (1.0, -1.0))
+STEPPER_ROWS = {
+    "cartesian": AXIS_ROWS,
+    "limited_cartesian": AXIS_ROWS,
+    "corexy": COREXY_ROWS,
+    "limited_corexy": COREXY_ROWS,
+}
 SHORT_MOVE_STOP_DEG = 60.0
 TABLE_CACHE_DIR = "~/.cache/kalico/corner_deviation"
 BUILD_POLL_S = 0.05
@@ -91,17 +113,16 @@ MODULE_SOURCE = pathlib.Path(__file__).read_bytes()
 
 
 class Kernel:
-    """A shaper as shifted weights. For a smoother, shape bounds the
-    executed acceleration of a velocity step dv at time offset u after it,
-    dv * |density(u)|: segmax[i] is the largest |density| over segment i
-    ([u0 + i * h, u0 + (i + 1) * h]), exact over the polynomial (endpoints
-    and critical points)."""
+    """A shaper as shifted weights. For a smoother, density is the
+    normalized density polynomial in tau with its half span and time
+    offset: a velocity step dv at time t_k executes as dv * w(t - t_k),
+    w(u) = density(u + t_offs) for |u + t_offs| <= half span."""
 
-    def __init__(self, shifts, weights, density_peak=0.0, shape=None):
+    def __init__(self, shifts, weights, density_peak=0.0, density=None):
         self.shifts = shifts
         self.weights = weights
         self.density_peak = density_peak
-        self.shape = shape
+        self.density = density
         self.variance = sum(w * s * s for w, s in zip(weights, shifts))
         self.s_lo = min(shifts)
         self.s_hi = max(shifts)
@@ -135,19 +156,6 @@ def _max_abs(poly, critical, lo, hi):
     return max(abs(float(poly(x))) for x in points)
 
 
-def _step_shape(density, critical, hst, t_offs):
-    """Kernel.shape in u = tau - t_offs, the time after the step."""
-    h = 2.0 * hst / SHAPE_NODES
-    return {
-        "u0": -hst - t_offs,
-        "h": h,
-        "segmax": [
-            _max_abs(density, critical, -hst + i * h, -hst + (i + 1) * h)
-            for i in range(SHAPE_NODES)
-        ],
-    }
-
-
 def _smoother_kernel(coeffs, t_sm):
     from numpy.polynomial import Polynomial
 
@@ -170,8 +178,127 @@ def _smoother_kernel(coeffs, t_sm):
         [t_offs - tau for tau in taus],
         [w / total for w in weights],
         _max_abs(density, critical, -hst, hst),
-        _step_shape(density, critical, hst, t_offs),
+        (density, hst, t_offs),
     )
+
+
+def _density_in_u(kernel):
+    """(w, lo, hi): the executed burst per unit velocity step, w(u) on
+    [lo, hi], u the time after the step."""
+    from numpy.polynomial import Polynomial
+
+    density, hst, t_offs = kernel.density
+    return density(Polynomial([t_offs, 1.0])), -hst - t_offs, hst - t_offs
+
+
+def _real_roots(poly, lo, hi):
+    return sorted(
+        r.real for r in poly.roots() if abs(r.imag) < 1e-12 and lo < r.real < hi
+    )
+
+
+def _segment_extrema(w, lo, hi, a, b):
+    """(max, min) of w on [a, b], w being 0 outside [lo, hi]."""
+    inside = (max(a, lo), min(b, hi))
+    values = []
+    if inside[0] < inside[1]:
+        points = [inside[0], inside[1]] + _real_roots(w.deriv(), *inside)
+        values = [float(w(x)) for x in points]
+    if a < lo or b > hi:
+        values.append(0.0)
+    return max(values), min(values)
+
+
+def _piecewise_cdf(np, pieces, u):
+    """Integral up to each u of a function given as (a, b, antiderivative)
+    pieces, zero outside them."""
+    total = np.zeros(len(u))
+    for a, b, anti in pieces:
+        total += anti(np.clip(u, a, b)) - anti(a)
+    return total
+
+
+def bound_shape(kx, ky):
+    """The two smoothers on one window of BOUND_SEGMENTS segments for the
+    max_corner_accel bound (chelper/corner_deviation.c): per axis the
+    exact max and min of the burst w(u) on each segment, and the
+    cumulative masses of the part common to both kernels, min(w_x, w_y),
+    and of each axis' excess over it on a grid BOUND_CDF_SUB times finer
+    than the window's, padded by a window and a segment on either side,
+    with a bound of the linear interpolation error between grid nodes."""
+    import numpy as np
+
+    kernels = [_density_in_u(k) for k in (kx, ky)]
+    for w, lo, hi in kernels:
+        values = w(np.linspace(lo, hi, 4096))
+        if values.min() < -DENSITY_TOLERANCE * values.max():
+            raise ValueError("smoother density is negative")
+    u0 = min(lo for _, lo, _ in kernels)
+    u1 = max(hi for _, _, hi in kernels)
+    h = (u1 - u0) / BOUND_SEGMENTS
+    wmax, wmin = [], []
+    for w, lo, hi in kernels:
+        extrema = [
+            _segment_extrema(w, lo, hi, u0 + i * h, u0 + (i + 1) * h)
+            for i in range(BOUND_SEGMENTS)
+        ]
+        wmax.append([e[0] for e in extrema])
+        wmin.append([max(e[1], 0.0) for e in extrema])
+    pieces = _mass_pieces(np, kernels)
+    pad = (BOUND_SEGMENTS + 1) * h
+    cdf_h = h / BOUND_CDF_SUB
+    nodes = u0 - pad + cdf_h * np.arange(BOUND_CDF_NODES)
+    cdf, slope = [], 0.0
+    for mass in pieces:
+        cdf.append(
+            _piecewise_cdf(np, [(a, b, p.integ()) for a, b, p in mass], nodes)
+        )
+        slope = max(slope, _largest_slope(mass))
+    return {
+        "u0": u0,
+        "h": h,
+        "wmax": wmax,
+        "wmin": wmin,
+        "cdf_pad": pad,
+        "cdf_h": cdf_h,
+        "cdf_margin": cdf_h**2 / 8.0 * slope,
+        "cdf": [c.tolist() for c in cdf],
+        "total": [float(c[-1]) for c in cdf],
+    }
+
+
+def _mass_pieces(np, kernels):
+    """The densities of the common mass min(w_x, w_y) and of each axis'
+    excess over it as (a, b, polynomial) pieces between the supports'
+    edges and the kernels' crossings."""
+    from numpy.polynomial import Polynomial
+
+    (wx, lox, hix), (wy, loy, hiy) = kernels
+    zero = Polynomial([0.0])
+    cuts = sorted({lox, hix, loy, hiy})
+    lo, hi = max(lox, loy), min(hix, hiy)
+    if lo < hi:
+        cuts = sorted(set(cuts) | set(_real_roots(wx - wy, lo, hi)))
+    out = ([], [], [])
+    for a, b in zip(cuts[:-1], cuts[1:]):
+        mid = 0.5 * (a + b)
+        px = wx if lox <= mid <= hix else zero
+        py = wy if loy <= mid <= hiy else zero
+        common = px if px(mid) <= py(mid) else py
+        for mass, poly in zip(out, (common, px - common, py - common)):
+            mass.append((a, b, poly))
+    return out
+
+
+def _largest_slope(pieces):
+    """The largest |density'| of a density given as (a, b, polynomial)
+    pieces (exact: piece ends and the critical points of the slope)."""
+    largest = 0.0
+    for a, b, poly in pieces:
+        d = poly.deriv()
+        for x in [a, b] + _real_roots(d.deriv(), a, b):
+            largest = max(largest, abs(float(d(x))))
+    return largest
 
 
 def build_table_arrays(kx, ky):
@@ -268,7 +395,7 @@ class JunctionLimit:
     accel at w = v / accel, floor, the shaper floor per unit accel, and
     w_floor, the largest w whose corner stays within it."""
 
-    def __init__(self, arrays, kx, ky, max_corner_accel):
+    def __init__(self, arrays, kx, ky, max_corner_accel, rows=AXIS_ROWS):
         ffi, lib = chelper.get_ffi()
         self.junction_v2 = lib.cd_junction_v2
         self.accel_model = CornerAccel(arrays, kx, ky)
@@ -282,22 +409,36 @@ class JunctionLimit:
         c.variance = max(kx.variance, ky.variance)
         c.window = max(kx.s_hi, ky.s_hi, -kx.s_lo, -ky.s_lo)
         c.has_corner_bound = max_corner_accel is not None and bool(
-            kx.density_peak or ky.density_peak
+            kx.density or ky.density
         )
         c.max_corner_accel = max_corner_accel or 0.0
-        c.density_peak[0] = kx.density_peak
-        c.density_peak[1] = ky.density_peak
-        for axis, kernel in enumerate((kx, ky)):
-            shape = kernel.shape
-            if shape is None:
-                continue
-            c.shape[axis].n = len(shape["segmax"])
-            c.shape[axis].u0 = shape["u0"]
-            c.shape[axis].h = shape["h"]
-            c.shape[axis].segmax = shape["segmax"]
+        if c.has_corner_bound:
+            self._set_bound(c, kx, ky, rows)
         c.min_direction_change = MIN_DIRECTION_CHANGE
         c.min_xy_share = MIN_XY_SHARE
         c.short_turn = math.radians(SHORT_MOVE_STOP_DEG)
+
+    def _set_bound(self, c, kx, ky, rows):
+        if not (kx.density and ky.density):
+            raise ValueError(
+                "max_corner_accel needs an input smoother on both X and Y"
+            )
+        if not 0 < len(rows) <= BOUND_MAX_ROWS:
+            raise ValueError("max_corner_accel: %d rows" % (len(rows),))
+        c.n_rows = len(rows)
+        for i, row in enumerate(rows):
+            c.rows[i] = row
+        shape = bound_shape(kx, ky)
+        sh = c.shape
+        sh.n = BOUND_SEGMENTS
+        for key in ("u0", "h", "cdf_pad", "cdf_h", "cdf_margin"):
+            setattr(sh, key, shape[key])
+        for axis in range(2):
+            sh.wmax[axis] = shape["wmax"][axis]
+            sh.wmin[axis] = shape["wmin"][axis]
+        for mass in range(len(shape["cdf"])):
+            sh.cdf[mass] = shape["cdf"][mass]
+            sh.total[mass] = shape["total"][mass]
 
     def _doubles(self, ffi, values):
         array = ffi.new("double[]", [float(v) for v in values])
@@ -471,6 +612,32 @@ class CornerDeviation:
                 "[corner_deviation] replaces square_corner_velocity;"
                 " remove square_corner_velocity from [printer]"
             )
+        self.rows = AXIS_ROWS
+        if self.max_corner_accel is not None:
+            kinematics = printer_section.get("kinematics")
+            if kinematics not in STEPPER_ROWS:
+                raise config.error(
+                    "[corner_deviation] max_corner_accel bounds the"
+                    " steppers through the kinematics' linear map, known for"
+                    " %s; kinematics %s has none"
+                    % (", ".join(sorted(STEPPER_ROWS)), kinematics)
+                )
+            self.rows = STEPPER_ROWS[kinematics]
+            self.leg_demand = max(math.hypot(*row) for row in self.rows)
+            max_accel = printer_section.getfloat("max_accel", above=0.0)
+            if self.max_corner_accel < self.leg_demand * max_accel:
+                raise config.error(
+                    "[corner_deviation] max_corner_accel %.0f bounds each"
+                    " %s stepper (not the X/Y axes) and is below the"
+                    " %.0f mm/s^2 a straight move at max_accel %.0f asks"
+                    " of one; every corner touching it would stop"
+                    % (
+                        self.max_corner_accel,
+                        kinematics,
+                        self.leg_demand * max_accel,
+                        max_accel,
+                    )
+                )
         self.cache_dir = os.path.expanduser(
             config.get("table_cache_dir", TABLE_CACHE_DIR)
         )
@@ -492,8 +659,8 @@ class CornerDeviation:
         self.ready = False
         self.input_shaper = None
         self.limit = None
-        self.last_move = None
         self.reported_inactive = False
+        self.reported_leg_demand = False
         self.building = False
         self.corner_accel_key = self.corner_accel = None
         self.generation = 0
@@ -574,7 +741,9 @@ class CornerDeviation:
         try:
             kx, ky = (kernel_from_spec(s) for s in specs)
             arrays = table_arrays(specs, kx, ky, self.cache_dir)
-            limit = JunctionLimit(arrays, kx, ky, self.max_corner_accel)
+            limit = JunctionLimit(
+                arrays, kx, ky, self.max_corner_accel, self.rows
+            )
             result = (limit, None)
         except Exception as e:
             logging.exception("corner_deviation: table build failed")
@@ -678,9 +847,21 @@ class CornerDeviation:
                 )
                 self.reported_inactive = True
             return 0.0
+        if (
+            self.max_corner_accel is not None
+            and not self.reported_leg_demand
+            and move.accel * self.leg_demand > self.max_corner_accel
+        ):
+            logging.warning(
+                "corner_deviation: accel %.0f asks up to %.0f mm/s^2 of a"
+                " stepper, above max_corner_accel %.0f; corners touching it"
+                " stop",
+                move.accel,
+                move.accel * self.leg_demand,
+                self.max_corner_accel,
+            )
+            self.reported_leg_demand = True
         prev_r, move_r = prev_move.axes_r, move.axes_r
-        chained_from = self.last_move
-        self.last_move = move
         return limit.junction_v2(
             limit.c,
             prev_r[0],
@@ -692,7 +873,8 @@ class CornerDeviation:
             prev_move.accel,
             move.accel,
             prev_move.max_cruise_v2,
-            prev_move is chained_from,
+            move.max_cruise_v2,
+            prev_move.max_start_v2,
             cap_v2,
         )
 
