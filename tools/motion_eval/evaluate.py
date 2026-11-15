@@ -180,9 +180,13 @@ def executed_motion(cap, dt):
     return seg, epochs, t_start, n, jump_v, motion
 
 
-def analyze(raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT) -> dict:
+def analyze(
+    raw, dt=DEFAULT_DT, sample_dt=DEFAULT_SAMPLE_DT, executed=None
+) -> dict:
     cap = raw.capture
-    seg, epochs, t_start, n, jump_v, motion = executed_motion(cap, dt)
+    if executed is None:
+        executed = executed_motion(cap, dt)
+    seg, epochs, t_start, n, jump_v, motion = executed
     t = t_start + dt * np.arange(n)
     exec_pos = np.stack([motion[a].pos for a in analysis.AXES], axis=-1)
     exec_vel = np.stack([motion[a].vel for a in analysis.AXES], axis=-1)

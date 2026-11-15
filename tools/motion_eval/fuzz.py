@@ -681,9 +681,10 @@ def _check_shaped_at(v, name, raw, caps, dt):
     within another W: the floor and the stop exemption look that far.
     caps: (max_corner_accel, max_corner_stepper_accel) of a bounded run,
     None in floor mode."""
-    result = evaluate.analyze(raw, dt=dt, sample_dt=None)
+    executed = evaluate.executed_motion(raw.capture, dt)
+    result = evaluate.analyze(raw, dt=dt, sample_dt=None, executed=executed)
     moves = raw.capture["moves"]
-    seg, epochs, t0, n, _, motion = evaluate.executed_motion(raw.capture, dt)
+    seg, epochs, t0, n, _, motion = executed
     vertices = result["executed"]["vertices"]
     t_arrive = np.array(vertices["t_arrive"])
     t_leave = np.array(vertices["t_leave"])
@@ -785,6 +786,16 @@ def _same_own_limit(a, b):
     return True
 
 
+def _limiter_key(kinematics, caps):
+    """The C limiter's cap and rows for a run's caps (None in floor mode):
+    runs with one key plan identically (cartesian rows are its axes, so
+    its stepper and both settings repeat the axis one)."""
+    if caps is None:
+        return None
+    stepper_rows = corner_deviation.STEPPER_ROWS[kinematics]
+    return corner_deviation.CornerCaps(*caps, stepper_rows).limiter()
+
+
 def check(case):
     v = Violations()
     out = {"seed": case.seed, "config": case.config}
@@ -804,6 +815,7 @@ def check(case):
         if None in defaults.values():
             out["violations"] = v
             return out
+        checked = {}
         for name, kinematics, section, caps in plan:
             if name not in runs:
                 continue
@@ -812,16 +824,28 @@ def check(case):
             _check_moves(v, name, moves)
             if section is None:
                 continue
-            try:
-                result, metrics = _check_shaped(v, name, raw, caps)
-            except analysis.ModelMismatch as e:
-                v.check(False, "%s: harness model mismatch: %s", name, e)
-                continue
-            out[name] = {
-                "print_time_s": result["print_time_s"],
-                "corner_max_mm": result["executed"]["corners"]["max_mm"],
-                **metrics,
-            }
+            limiter = (kinematics, _limiter_key(kinematics, caps))
+            twin = checked.get(limiter)
+            if twin is not None:
+                v.check(
+                    moves == runs[twin].capture["moves"],
+                    "%s: trapq differs from %s, which has the same limiter",
+                    name,
+                    twin,
+                )
+                out[name] = out[twin]
+            else:
+                try:
+                    result, metrics = _check_shaped(v, name, raw, caps)
+                except analysis.ModelMismatch as e:
+                    v.check(False, "%s: harness model mismatch: %s", name, e)
+                    continue
+                out[name] = {
+                    "print_time_s": result["print_time_s"],
+                    "corner_max_mm": result["executed"]["corners"]["max_mm"],
+                    **metrics,
+                }
+                checked[limiter] = name
             v.check(
                 [m["accel"] for m in moves]
                 == [m["accel"] for m in default.capture["moves"]],
