@@ -38,6 +38,13 @@ ESTOP_DEADLINE_S = 0.1
 ESTOP_REASON = "Shutdown due to webhooks request"
 DWELL_WAITING = ('"event":"engine_wait_slow"', '"what":"dwell"')
 DWELL_ABORTED_BY_SHUTDOWN = "dwell: shutdown while waiting on the motion engine"
+REPORTER_CANCEL_ORDER = "  SDCARD_RESET_FILE\n  BASE_CANCEL_PRINT\n"
+STOCK_CANCEL_ORDER = "  BASE_CANCEL_PRINT\n"
+CANCEL_MACRO_ORDERS = {
+    "reporter_order": (REPORTER_CANCEL_ORDER, "standby"),
+    "stock_order": (STOCK_CANCEL_ORDER, "cancelled"),
+}
+CANCEL_MARK_FRACTION = 0.05
 XY_PIN_LINES = range(0, 6)
 SHAPED_ENDSTOPS = ("gpio200", "gpio201")
 EXTRUDER_SMOOTH_TIME = 0.02
@@ -199,9 +206,20 @@ TOPOLOGIES = {
 }
 
 
-def _boot(sim_world, topology, heater_targets=HEATED_TARGETS):
+def _boot(
+    sim_world,
+    topology,
+    heater_targets=HEATED_TARGETS,
+    cancel_order=REPORTER_CANCEL_ORDER,
+):
     config_fn, dual_mcu = TOPOLOGIES[topology]
-    world = sim_world(config_fn, dual_mcu=dual_mcu)
+
+    def config(world):
+        text = config_fn(world)
+        assert REPORTER_CANCEL_ORDER in text, REPORTER_CANCEL_ORDER
+        return text.replace(REPORTER_CANCEL_ORDER, cancel_order)
+
+    world = sim_world(config, dual_mcu=dual_mcu)
     world.gcode_ok("SET_KINEMATIC_POSITION X=100 Y=100 Z=5")
     for command in heater_targets:
         world.gcode_ok(command)
@@ -276,16 +294,21 @@ def test_dwell_behind_travel(sim_world, topology):
     _assert_clean(world)
 
 
+@pytest.mark.parametrize("macro_order", sorted(CANCEL_MACRO_ORDERS))
 @pytest.mark.parametrize("topology", sorted(TOPOLOGIES))
-def test_cancel_print_mid_print(sim_world, topology):
-    world = _boot(sim_world, topology)
-    _start_print(world, "cancel.gcode", mark_fraction=0.2)
+def test_cancel_print_mid_print(sim_world, topology, macro_order):
+    cancel_order, end_state = CANCEL_MACRO_ORDERS[macro_order]
+    world = _boot(sim_world, topology, cancel_order=cancel_order)
+    _start_print(world, "cancel.gcode", mark_fraction=CANCEL_MARK_FRACTION)
     _wait_mark(world)
+    sd_card = world.status({"virtual_sdcard": None})["virtual_sdcard"]
+    assert sd_card["is_active"], sd_card
     world.gcode_ok("CANCEL_PRINT", timeout=120)
     world.gcode_ok("M400", timeout=120)
     _assert_clean(world)
-    state = world.status({"print_stats": None})["print_stats"]["state"]
-    assert state == "cancelled"
+    status = world.status({"print_stats": None, "virtual_sdcard": None})
+    assert status["print_stats"]["state"] == end_state, status
+    assert not status["virtual_sdcard"]["is_active"], status
     _assert_ready_and_moving(world)
 
 
