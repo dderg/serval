@@ -118,11 +118,13 @@ def test_the_soak_session_pauses_mid_print_then_prints_again_on_the_mesh():
         Act.RESUME,
         Act.START_PRINT,
     ]
-    planned_s = scenarios.soak_gcode.PLANNED_PRINT_S
+    planned_s = scenarios.soak_gcode.SESSION_PRINT.planned_print_s
     assert soak.timeline[1].delay_s == planned_s / 2
     assert soak.timeline_timeout_s > 2 * planned_s
     assert soak.config == scenarios.MESH_CONFIG
     assert soak.gcode.setup == (scenarios.LOAD_WAVY_MESH,)
-    assert soak.gcode.describe() == "tools/bench/gcode/generated/soak.gcode"
+    assert soak.gcode.describe() == (
+        "tools/bench/gcode/generated/soak_session.gcode"
+    )
     assert set(scenarios.SOAK_CHECKS) <= set(soak.checks)
     assert ISSUE.match(soak.guards)
