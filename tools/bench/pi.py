@@ -6,15 +6,26 @@ import json
 import re
 import shlex
 import subprocess
+import sys
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 PI_SSH = "bench-pi"
 PI_HOST = "192.168.1.149"
+PI_HOST_KEY_ALIAS = "bench-pi.local"
+PI_ADDRESS = (
+    "-o",
+    f"HostName={PI_HOST}",
+    "-o",
+    f"HostKeyAlias={PI_HOST_KEY_ALIAS}",
+)
+SSH = ("ssh", *PI_ADDRESS, PI_SSH)
 MOONRAKER = f"http://{PI_HOST}:7125"
 PI_CONFIG = "printer_data/config/printer.cfg"
 PI_LOGS = "printer_data/logs"
@@ -23,6 +34,17 @@ READY_TIMEOUT_S = 60.0
 HTTP_TIMEOUT_S = 30.0
 SCP_ATTEMPTS = 3
 SCP_RETRY_DELAY_S = 2.0
+SSH_ATTEMPTS = 4
+SSH_RETRY_DELAY_S = 5.0
+SSH_TRANSPORT_EXIT = 255
+SSH_UNREACHED = re.compile(
+    r"Could not resolve hostname|Connection refused|Connection timed out"
+    r"|No route to host|Network is unreachable|kex_exchange_identification"
+)
+SSH_DROPPED = re.compile(
+    r"closed by remote host|Broken pipe|Connection reset|Connection closed"
+)
+DRIVER_SIDE_EXIT = 3
 FORBIDDEN_PINS = {
     "PA13": "F401 SWD data pin",
     "PA14": "F401 SWD clock pin",
@@ -37,6 +59,20 @@ KEY_LINE = re.compile(r"^(\w+)\s*[:=]")
 
 class BenchError(RuntimeError):
     pass
+
+
+class HostSideError(BenchError):
+    pass
+
+
+def run_main(main: Callable[[], None]) -> None:
+    try:
+        main()
+    except Exception as exc:
+        if isinstance(exc, BenchError) and not isinstance(exc, HostSideError):
+            raise
+        traceback.print_exc()
+        sys.exit(DRIVER_SIDE_EXIT)
 
 
 def http(
@@ -143,7 +179,7 @@ DEPLOY_IDENTITY = (
 
 def write_deployed(identity: dict) -> None:
     result = subprocess.run(
-        ["ssh", PI_SSH, f"cat > {DEPLOY_RECORD}"],
+        [*SSH, f"cat > {DEPLOY_RECORD}"],
         input=json.dumps(identity, indent=2),
         text=True,
         capture_output=True,
@@ -201,15 +237,32 @@ def restart_klipper() -> None:
     ensure_ready()
 
 
-def ssh(command: str) -> str:
-    result = subprocess.run(
-        ["ssh", PI_SSH, command], capture_output=True, text=True
+def ssh_transport(
+    result: subprocess.CompletedProcess, failure: re.Pattern
+) -> bool:
+    return result.returncode == SSH_TRANSPORT_EXIT and bool(
+        failure.search(result.stderr)
     )
-    if result.returncode != 0:
-        raise BenchError(
-            f"ssh {command!r} failed ({result.returncode}):\n{result.stdout}{result.stderr}"
-        )
-    return result.stdout
+
+
+def ssh(command: str) -> str:
+    for attempt in range(SSH_ATTEMPTS):
+        if attempt:
+            time.sleep(SSH_RETRY_DELAY_S)
+        result = subprocess.run([*SSH, command], capture_output=True, text=True)
+        if not ssh_transport(result, SSH_UNREACHED):
+            break
+    if result.returncode == 0:
+        return result.stdout
+    failure = (
+        f"ssh {command!r} failed ({result.returncode}):\n"
+        f"{result.stdout}{result.stderr}"
+    )
+    if ssh_transport(result, SSH_UNREACHED):
+        raise HostSideError(f"{failure}\nafter {SSH_ATTEMPTS} attempts")
+    if ssh_transport(result, SSH_DROPPED):
+        raise HostSideError(failure)
+    raise BenchError(failure)
 
 
 def _scp(args: list[str]) -> None:
@@ -221,19 +274,21 @@ def _scp(args: list[str]) -> None:
         if result.returncode == 0:
             return
         errors.append(f"exit {result.returncode}: {result.stderr.strip()}")
-    raise BenchError(
+    transport = result.returncode == SSH_TRANSPORT_EXIT
+    failure = HostSideError if transport else BenchError
+    raise failure(
         f"{' '.join(args)} failed after {SCP_ATTEMPTS} attempts: "
         + " | ".join(errors)
     )
 
 
 def scp_to_pi(local: Path, remote: str) -> None:
-    _scp(["scp", "-q", str(local), f"{PI_SSH}:{remote}"])
+    _scp(["scp", "-q", *PI_ADDRESS, str(local), f"{PI_SSH}:{remote}"])
 
 
 def scp_from_pi(remote: str, local: Path, recursive: bool = False) -> None:
     _scp(
-        ["scp", "-q"]
+        ["scp", "-q", *PI_ADDRESS]
         + (["-r"] if recursive else [])
         + [f"{PI_SSH}:{remote}", str(local)]
     )

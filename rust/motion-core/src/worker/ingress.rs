@@ -13,6 +13,7 @@ use motion_pipeline::{
 };
 
 use super::dispatch::WorkerLinks;
+use super::intake_gate::{self, IntakeGate};
 use super::{ExecutionTimeline, HomeDripParams, NudgeParams, StreamMsg, fatal};
 use crate::dispatch_record::{DispatchRecorder, DrainCause};
 use crate::lock_ext::LockExt;
@@ -26,6 +27,32 @@ pub(super) use pacer::Pacer;
 /// rule only holds then, and a stream whose moves keep arriving is paced by
 /// [`BusyRunwayWatch`] instead.
 pub(super) struct InboxFoundEmpty(());
+
+/// Why the pacer braked a stream to rest.
+#[derive(Debug, Clone, Copy)]
+enum BrakeCause {
+    /// The runway fell while moves kept arriving.
+    BusyRunwayFalling,
+    /// The inbox was found empty with the runway at the reserve.
+    RunwayExhausted,
+}
+
+/// What a brake to rest is measured to cost, the reserve's two terms.
+#[derive(Debug, Clone, Copy)]
+enum ReserveCost {
+    /// Runway lost while planning, between two pacer decisions.
+    PlanningStep,
+    /// Runway the brake itself consumed.
+    Drain,
+}
+
+/// What handed planned motion on: one planning step, or a drain, which
+/// hands on everything the planning front held.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Handoff {
+    Step,
+    Drain,
+}
 
 pub(super) struct Ingress {
     pub(super) config: StreamConfig,
@@ -47,6 +74,7 @@ pub(super) struct Ingress {
     pub(super) moves_sent: u64,
     pub(super) dispatch_record: Option<Arc<DispatchRecorder>>,
     pub(super) pump: crossbeam_channel::Sender<crate::pump::PumpMsg>,
+    pub(super) intake: Arc<IntakeGate>,
 }
 
 impl Ingress {
@@ -59,10 +87,27 @@ impl Ingress {
     /// has not reached yet: resumed at the default lead, it braked again
     /// within a few planning steps, a stop per move. A machine already at
     /// rest (a jog the prime timed out on) resumes at the default lead.
-    fn pacer_brake(&mut self) {
-        let motion_ahead = self.timeline.frontier.runway_secs() > 0.0;
+    fn pacer_brake(&mut self, cause: BrakeCause) {
+        let runway_s = self.timeline.frontier.runway_secs();
+        let cap_s = self.intake.cap_secs();
+        let peak_ahead_s = self.intake.take_peak_ahead();
+        let planned_from_s = self.pipeline.planned_through_s();
+        let ordered = Instant::now();
         self.drain_and_fence_as(DrainCause::PacerBrake);
-        if !motion_ahead || self.links.shutting_down.load(Ordering::Acquire) {
+        tracing::info!(
+            subsystem = "motion",
+            event = "pipe_drain",
+            ?cause,
+            runway_s,
+            reserve_s = self.pacer.reserve_secs(),
+            cap_s,
+            peak_ahead_s,
+            drained_s = self.pipeline.planned_through_s() - planned_from_s,
+            dispatch_wait_s = ordered.elapsed().as_secs_f64(),
+            t_us = motion_pipeline::timing::mono_us(),
+            "[pipe] pacer braked the stream to rest"
+        );
+        if runway_s <= 0.0 || self.links.shutting_down.load(Ordering::Acquire) {
             return;
         }
         let reserve_s = self.pacer.reserve_secs();
@@ -87,12 +132,11 @@ impl Ingress {
                 match rx.try_recv() {
                     Ok(msg) => Some(msg),
                     Err(crossbeam_channel::TryRecvError::Empty) => {
-                        let runway_before_s = self.timeline.frontier.runway_secs();
+                        let runway_before_s = self.watch_runway();
                         let planned_from_s = self.pipeline.planned_through_s();
                         let planned = self.pipeline.idle();
-                        self.hold_for_throttle(planned_from_s);
-                        self.pacer
-                            .note_step(runway_before_s, self.timeline.frontier.runway_secs());
+                        self.note_planned(planned_from_s, Handoff::Step);
+                        self.note_planning_step(runway_before_s);
                         if !planned {
                             if self.links.shutting_down.load(Ordering::Acquire) {
                                 return;
@@ -101,7 +145,7 @@ impl Ingress {
                         }
                         match self.drain_or_runway(InboxFoundEmpty(())) {
                             None => continue,
-                            Some(wait) => match rx.recv_timeout(wait) {
+                            Some(wait) => match self.recv_reopening_intake(&rx, Some(wait)) {
                                 Ok(msg) => Some(msg),
                                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => None,
@@ -111,19 +155,23 @@ impl Ingress {
                     Err(crossbeam_channel::TryRecvError::Disconnected) => None,
                 }
             } else {
-                rx.recv().ok()
+                self.recv_reopening_intake(&rx, None).ok()
             };
             let Some(msg) = received else {
                 self.drain_and_fence();
                 return;
             };
-            self.links.wakeup.notify_space_freed();
+            if let StreamMsg::Move(m) = &msg {
+                self.intake.leave(intake_gate::shortest_ns(m));
+            }
+            if self.intake.admits() {
+                self.links.wakeup.notify_space_freed();
+            }
             match msg {
                 StreamMsg::Move(m) => {
-                    let runway_before_s = self.timeline.frontier.runway_secs();
+                    let runway_before_s = self.watch_runway();
                     self.handle_move(m);
-                    self.pacer
-                        .note_step(runway_before_s, self.timeline.frontier.runway_secs());
+                    self.note_planning_step(runway_before_s);
                     self.brake_if_busy_runway_falls();
                 }
                 other => {
@@ -135,23 +183,111 @@ impl Ingress {
         }
     }
 
+    /// Waits up to `limit` (without one on `None`) for the next message,
+    /// waking a submitter the intake refused the moment the playhead has
+    /// made room for its move.
+    fn recv_reopening_intake(
+        &self,
+        rx: &Receiver<StreamMsg>,
+        limit: Option<Duration>,
+    ) -> Result<StreamMsg, crossbeam_channel::RecvTimeoutError> {
+        let deadline = limit.map(|limit| Instant::now() + limit);
+        loop {
+            let reopens_in = self.intake.reopens_in();
+            if reopens_in.is_none() {
+                self.links.wakeup.notify_space_freed();
+            }
+            let until_deadline =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            let wait = match (until_deadline, reopens_in) {
+                (Some(until_deadline), Some(reopens_in)) => Some(until_deadline.min(reopens_in)),
+                (until_deadline, reopens_in) => until_deadline.or(reopens_in),
+            };
+            let Some(wait) = wait else {
+                return rx
+                    .recv()
+                    .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected);
+            };
+            match rx.recv_timeout(wait) {
+                Err(crossbeam_channel::RecvTimeoutError::Timeout)
+                    if deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
+                received => return received,
+            }
+        }
+    }
+
+    /// Starts a measured interval: marks the frontier and returns the runway
+    /// now.
+    fn watch_runway(&self) -> f64 {
+        self.timeline.frontier.mark_lowest_lead();
+        self.timeline.frontier.runway_secs()
+    }
+
+    fn note_planning_step(&mut self, runway_before_s: f64) {
+        let Some(lowest_s) = self.timeline.frontier.lowest_lead_secs() else {
+            return;
+        };
+        if self.pacer.note_step(runway_before_s, lowest_s) {
+            self.report_reserve_raised(ReserveCost::PlanningStep, runway_before_s - lowest_s);
+        }
+    }
+
+    /// The pacer measured a costlier brake: the intake's cap follows the
+    /// wider reserve. One that would need more than the reserve cap holds
+    /// warns: a brake costing more than the cap underruns.
+    fn report_reserve_raised(&self, cost: ReserveCost, consumed_s: f64) {
+        let reserve_s = self.pacer.reserve_secs();
+        self.intake.set_reserve(reserve_s);
+        tracing::info!(
+            subsystem = "motion",
+            event = "pacer_reserve_raised",
+            ?cost,
+            consumed_s,
+            reserve_s,
+            "[pacer] costliest brake to rest yet: widening the runway the pacer \
+             keeps for the next one"
+        );
+        if self.pacer.reserve_capped() {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "pacer_reserve_capped",
+                ?cost,
+                consumed_s,
+                reserve_s,
+                "[pacer] this host's brakes to rest need more runway than the \
+                 reserve cap holds: a brake costing more than the cap will underrun"
+            );
+        }
+    }
+
     fn send(&mut self, item: StreamInput) {
         if self.links.shutting_down.load(Ordering::Acquire) {
             return;
         }
         let planned_from_s = self.pipeline.planned_through_s();
         let is_move = matches!(item, StreamInput::Move(_));
+        let handoff = if matches!(item, StreamInput::Drain) {
+            Handoff::Drain
+        } else {
+            Handoff::Step
+        };
         if !self.pipeline.feed(item) && !self.links.shutting_down.load(Ordering::Acquire) {
             fatal("execution owner closed during planning");
         }
         if is_move {
             self.moves_sent += 1;
         }
-        self.hold_for_throttle(planned_from_s);
+        self.note_planned(planned_from_s, handoff);
     }
 
-    fn hold_for_throttle(&mut self, planned_from_s: f64) {
+    /// Planning ran from `planned_from_s`: the intake's peak counts what it
+    /// handed on, and a throttled producer waits out its share of it.
+    fn note_planned(&mut self, planned_from_s: f64, handoff: Handoff) {
         let planned_to_s = self.pipeline.planned_through_s();
+        self.intake.set_planned_through(planned_to_s);
+        if handoff == Handoff::Step {
+            self.intake.note_ahead();
+        }
         if let Some(throttle) = &mut self.throttle {
             std::thread::sleep(throttle.hold(planned_from_s, planned_to_s));
         }
@@ -190,13 +326,14 @@ impl Ingress {
     /// Drain the lookahead and fence: the pipeline is empty and the full
     /// braked-to-rest trajectory is dispatched when this returns, so no
     /// intake remains uncommitted. Every drain runs through here, so every
-    /// drain measures the traversal the pacer's reserve has to cover.
+    /// drain measures the runway a brake to rest consumes.
     fn drain_and_fence(&mut self) -> BarrierAck {
         self.drain_and_fence_as(DrainCause::Requested)
     }
 
     fn drain_and_fence_as(&mut self, cause: DrainCause) -> BarrierAck {
-        let sent = Instant::now();
+        let runway_before_s = self.watch_runway();
+        self.timeline.anchor.lock_ok().release_prime();
         self.send(StreamInput::Drain);
         self.pacer.note_reset();
         let ack = self.barrier();
@@ -206,15 +343,11 @@ impl Ingress {
                 fatal(&error);
             }
         }
-        let latency_s = sent.elapsed().as_secs_f64();
-        if self.pacer.note_drain(latency_s) {
-            tracing::info!(
-                subsystem = "motion",
-                event = "pacer_reserve_raised",
-                latency_s,
-                reserve_s = self.pacer.reserve_secs(),
-                "[pacer] slowest brake-to-rest yet — widening the runway the \
-                 pacer keeps for the next one"
+        let lowest_s = self.timeline.frontier.lowest_lead_secs();
+        if self.pacer.note_drain(runway_before_s, lowest_s) {
+            self.report_reserve_raised(
+                ReserveCost::Drain,
+                runway_before_s - lowest_s.unwrap_or(runway_before_s),
             );
         }
         ack
@@ -247,8 +380,22 @@ impl Ingress {
         }
         advance_odometer(&mut self.odometer, &m);
         self.last_line = m.source.start_line;
+        if !self.pacer.undrained() {
+            self.prime_start();
+        }
         self.send(m.into());
         self.pacer.note_move(Instant::now());
+    }
+
+    /// The first move of a stream setting off from rest: it starts playing
+    /// no sooner than [`Pacer::primed_start_secs`] from now.
+    fn prime_start(&self) {
+        let host_now = self.timeline.router.lock_ok().host_now_secs();
+        self.timeline.anchor.lock_ok().prime_start(
+            host_now,
+            self.pacer.primed_start_secs(),
+            self.pacer.reserve_secs(),
+        );
     }
 
     /// The pacer's decision while moves keep arriving. A saturated inbox
@@ -257,21 +404,12 @@ impl Ingress {
     /// [`BusyRunwayWatch`] for when that brakes.
     fn brake_if_busy_runway_falls(&mut self) {
         let runway_s = self.timeline.frontier.runway_secs();
-        let reserve_s = self.pacer.reserve_secs();
         if !self.pacer.busy_brake_due(runway_s) {
             return;
         }
-        tracing::debug!(
-            subsystem = "motion",
-            event = "pipe_drain",
-            runway_s,
-            reserve_s,
-            t_us = motion_pipeline::timing::mono_us(),
-            "[pipe] runway falling behind a busy inbox — draining pipeline to rest"
-        );
         #[cfg(test)]
         self.links.pacer_drains.busy.fetch_add(1, Ordering::SeqCst);
-        self.pacer_brake();
+        self.pacer_brake(BrakeCause::BusyRunwayFalling);
     }
 
     /// The pacer's decision when the inbox is silent while the pipeline
@@ -286,16 +424,9 @@ impl Ingress {
         {
             return Some(wait);
         }
-        tracing::debug!(
-            subsystem = "motion",
-            event = "pipe_drain",
-            runway_s,
-            t_us = motion_pipeline::timing::mono_us(),
-            "[pipe] runway exhausted — draining pipeline to rest"
-        );
         #[cfg(test)]
         self.links.pacer_drains.idle.fetch_add(1, Ordering::SeqCst);
-        self.pacer_brake();
+        self.pacer_brake(BrakeCause::RunwayExhausted);
         None
     }
 

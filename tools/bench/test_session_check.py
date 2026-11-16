@@ -27,14 +27,18 @@ KNOWN_BAD = [
     (
         "main-pause_resume",
         "stop_after_pause",
-        r"motion did not stop before \+30\.3 s \(#844\)",
+        r"motion did not stop before \+30\.3 s \(#860\)",
     ),
     (
         "main-pause_cancel",
         "stop_after_pause",
-        r"motion did not stop before \+28\.1 s \(#844\)",
+        r"motion did not stop before \+28\.1 s \(#860\)",
     ),
-    ("main-cancel_plain", "stop_after_cancel", r"6\.740 s > 6 s \(#844\)"),
+    (
+        "main-cancel_plain",
+        "stop_account_after_cancel",
+        r"no closing pacer brake \(pipe_drain RunwayExhausted\)",
+    ),
     (
         "main-firmware_restart",
         "stop_after_firmware_restart",
@@ -45,6 +49,12 @@ KNOWN_BAD = [
     ("main-estop_restart_abort", "post_check", r"Klippy Disconnected"),
     ("reactor_drain-estop_restart_abort", "journal", r"status=6/ABRT"),
     ("reactor_drain-estop_g4", "journal", r"status=6/ABRT"),
+    ("pacer_land-pause_sparse", "stop_after_pause", r"> 12 s \(#860\)"),
+    (
+        "pacer_land-pause_sparse",
+        "stop_account_after_pause",
+        r"no closing pacer brake",
+    ),
 ]
 
 KNOWN_GOOD = [
@@ -56,8 +66,11 @@ KNOWN_GOOD = [
     ("pacer_runway-cancel_then_print", "gaps"),
     ("pacer_runway-cancel_then_print", "pacer_reserve"),
     ("pacer_runway-pause_resume", "stop_after_pause"),
+    ("pacer_runway-pause_resume", "stop_account_after_pause"),
     ("pacer_runway-pause_cancel", "stop_after_pause"),
+    ("pacer_runway-pause_cancel", "stop_account_after_pause"),
     ("pacer_runway-cancel_plain", "stop_after_cancel"),
+    ("pacer_runway-cancel_plain", "stop_account_after_cancel"),
     ("reactor_drain-firmware_restart", "stop_after_firmware_restart"),
     ("reactor_drain-cancel_macro_mesh", "reactor"),
     ("reactor_drain-estop", "journal"),
@@ -65,6 +78,11 @@ KNOWN_GOOD = [
     ("reactor_drain-estop_g4", "stop_after_emergency_stop"),
     ("main-estop", "stop_after_emergency_stop"),
     ("main-estop", "shutdown"),
+    ("pacer_land-estop", "shutdown"),
+    ("pacer_land-estop_g4", "shutdown"),
+    ("pacer_land-cancel_plain", "stop_after_cancel"),
+    ("pacer_land-cancel_plain", "stop_account_after_cancel"),
+    ("pacer_land-cancel_then_print", "second_print"),
 ]
 
 PASSING_SESSIONS = [
@@ -76,6 +94,10 @@ PASSING_SESSIONS = [
     "reactor_drain-cancel_macro_mesh",
     "reactor_drain-firmware_restart",
     "reactor_drain-estop",
+    "pacer_land-estop",
+    "pacer_land-estop_g4",
+    "pacer_land-cancel_plain",
+    "pacer_land-cancel_then_print",
 ]
 
 
@@ -187,3 +209,42 @@ def test_an_estop_timed_from_a_stalled_reactors_reply_finds_no_motion():
     verdict = _verdicts(evidence)["stop_after_emergency_stop"]
     assert not verdict.ok
     assert "no motion in flight" in verdict.detail
+
+
+def _closing_brake(evidence: dict) -> dict:
+    return next(e for e in evidence["events"] if e["event"] == "pipe_drain")
+
+
+def test_a_stop_past_the_engine_account_fails():
+    evidence = _evidence("pacer_runway-cancel_plain")
+    brake = _closing_brake(evidence)
+    brake["peak_ahead_s"] = 0.0
+    brake["drained_s"] = 0.0
+    verdict = _verdicts(evidence)["stop_account_after_cancel"]
+    assert not verdict.ok
+    assert "> the engine account 0.000 s" in verdict.detail
+
+
+def test_a_stop_with_no_closing_brake_logged_fails():
+    evidence = _evidence("pacer_runway-pause_resume")
+    evidence["events"].remove(_closing_brake(evidence))
+    verdict = _verdicts(evidence)["stop_account_after_pause"]
+    assert not verdict.ok
+    assert "no closing pacer brake" in verdict.detail
+
+
+def test_a_tail_running_into_the_next_action_without_a_fresh_stream_fails():
+    evidence = _evidence("pacer_land-cancel_plain")
+    evidence["events"] = [
+        e for e in evidence["events"] if e["event"] != "anchor_decision"
+    ]
+    verdict = _verdicts(evidence)["stop_after_cancel"]
+    assert not verdict.ok
+    assert "motion did not stop before +25.6 s" in verdict.detail
+
+
+def test_a_cancelled_tail_is_timed_to_the_rest_before_the_fresh_stream():
+    verdict = _verdicts(_evidence("pacer_land-cancel_plain"))[
+        "stop_after_cancel"
+    ]
+    assert "stopped after 6.393 s <= 12 s (#860)" in verdict.detail

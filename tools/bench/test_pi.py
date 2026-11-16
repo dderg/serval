@@ -38,6 +38,101 @@ def test_scp_failing_every_attempt_fails_loudly_with_its_stderr(monkeypatch):
     assert f"{pi.SCP_ATTEMPTS} attempts" in str(raised.value)
 
 
+UNRESOLVED = (
+    "ssh: Could not resolve hostname bench-pi.local: "
+    "Temporary failure in name resolution"
+)
+
+
+def _ssh_results(*outcomes):
+    pending = iter(outcomes)
+    calls = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        code, stderr = next(pending)
+        return subprocess.CompletedProcess(args, code, "out", stderr)
+
+    return run, calls
+
+
+def test_ssh_and_scp_reach_the_pi_at_its_address_through_the_alias(
+    monkeypatch,
+):
+    run, calls = _ssh_results((0, ""), (0, ""))
+    monkeypatch.setattr(pi.subprocess, "run", run)
+    pi.ssh("true")
+    pi.scp_to_pi(Path("klipper.elf"), "/tmp/klipper.elf")
+    assert pi.PI_ADDRESS[:2] == ("-o", f"HostName={pi.PI_HOST}")
+    assert calls[0] == ["ssh", *pi.PI_ADDRESS, pi.PI_SSH, "true"]
+    assert calls[1][:-2] == ["scp", "-q", *pi.PI_ADDRESS]
+
+
+def test_an_ssh_that_never_reached_the_pi_is_retried(monkeypatch):
+    run, calls = _ssh_results((255, UNRESOLVED), (0, ""))
+    monkeypatch.setattr(pi.subprocess, "run", run)
+    monkeypatch.setattr(pi.time, "sleep", lambda _s: None)
+    assert pi.ssh("journalctl -u klipper") == "out"
+    assert len(calls) == 2
+
+
+def test_a_pi_unreachable_on_every_attempt_is_a_host_side_error(monkeypatch):
+    run, calls = _ssh_results(*[(255, UNRESOLVED)] * pi.SSH_ATTEMPTS)
+    monkeypatch.setattr(pi.subprocess, "run", run)
+    monkeypatch.setattr(pi.time, "sleep", lambda _s: None)
+    with pytest.raises(pi.HostSideError, match="Could not resolve hostname"):
+        pi.ssh("journalctl -u klipper")
+    assert len(calls) == pi.SSH_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    "code, stderr", [(1, "No such file"), (255, "exited 255 on the Pi")]
+)
+def test_a_command_that_ran_on_the_pi_is_not_retried(monkeypatch, code, stderr):
+    run, calls = _ssh_results((code, stderr))
+    monkeypatch.setattr(pi.subprocess, "run", run)
+    with pytest.raises(pi.BenchError) as raised:
+        pi.ssh("false")
+    assert not isinstance(raised.value, pi.HostSideError)
+    assert len(calls) == 1
+
+
+def test_an_scp_that_never_reached_the_pi_is_a_host_side_error(monkeypatch):
+    run, _ = _ssh_results(*[(255, UNRESOLVED)] * pi.SCP_ATTEMPTS)
+    monkeypatch.setattr(pi.subprocess, "run", run)
+    monkeypatch.setattr(pi.time, "sleep", lambda _s: None)
+    with pytest.raises(pi.HostSideError):
+        pi.scp_from_pi("/tmp/tap*.bin", Path("/run"))
+
+
+def _exit_code(main) -> int:
+    with pytest.raises(SystemExit) as exited:
+        pi.run_main(main)
+    return exited.value.code
+
+
+def test_a_runner_that_never_reached_the_pi_exits_driver_side():
+    def main():
+        raise pi.HostSideError(UNRESOLVED)
+
+    assert _exit_code(main) == pi.DRIVER_SIDE_EXIT
+
+
+def test_a_runner_failing_on_a_local_exception_exits_driver_side():
+    def main():
+        raise FileNotFoundError("run.json")
+
+    assert _exit_code(main) == pi.DRIVER_SIDE_EXIT
+
+
+def test_a_printer_side_failure_leaves_the_runner_as_a_bench_error():
+    def main():
+        raise pi.BenchError("klippy did not reach ready")
+
+    with pytest.raises(pi.BenchError, match="did not reach ready"):
+        pi.run_main(main)
+
+
 class _Printer:
     def __init__(self, settles_in: str):
         self.state = settles_in

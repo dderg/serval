@@ -6,7 +6,8 @@ uv run python tools/bench/session_check.py --evidence <session_evidence.json>
 From a run dir it writes session_evidence.json (session_evidence.py) and
 session_checks.json next to run.json. Prints one line per check and exits
 1 when any fails. Every scenario gets the generic checks; the stop latency,
-second-print and pacer-reserve checks are declared per scenario.
+engine account, second-print and pacer-reserve checks are declared per
+scenario.
 """
 
 from __future__ import annotations
@@ -29,11 +30,14 @@ from session_scenarios import (
     SecondPrintLikeFirst,
     SpecificCheck,
     StopsWithin,
+    StopsWithinEngineAccount,
 )
 
 EVIDENCE_FILE = "session_evidence.json"
 CHECKS_FILE = "session_checks.json"
 STOPPED_QUIET_S = 1.0
+PI_CLOCK_SKEW_S = 0.05
+FRESH_STREAM = "anchor_decision"
 IN_FLIGHT_SLACK_S = session_evidence.SPAN_JOIN_S
 TERMINATING = frozenset(act.value for act in TERMINATING_ACTS)
 PAUSE_ENDS = frozenset({Act.RESUME.value, Act.CANCEL.value})
@@ -42,6 +46,7 @@ ESTOP_SHUTDOWN_REASONS = frozenset(
 )
 SHUTDOWN_EVENTS = frozenset({"klippy_shutdown", "mcu_shutdown"})
 JOURNAL_LINES_SHOWN = 3
+CLOSING_BRAKE_CAUSE = "RunwayExhausted"
 
 
 @dataclass(frozen=True)
@@ -127,7 +132,19 @@ class Evidence:
         return intervals
 
     def spans_within(self, lo: float, hi: float) -> list[list]:
-        return [s for s in self.spans if s[0] < hi and s[1] > lo]
+        return [s for s in self.spans if lo <= s[0] < hi]
+
+    def anchored_between(self, lo: float, hi: float) -> bool:
+        return any(
+            lo - PI_CLOCK_SKEW_S <= anchor["t"] <= hi + PI_CLOCK_SKEW_S
+            for anchor in self.named(FRESH_STREAM)
+        )
+
+    def next_action_moved(self, ended: float, boundary: float) -> bool:
+        following = [s for s in self.spans if s[0] > ended]
+        if not following or following[0][0] < boundary:
+            return False
+        return self.anchored_between(max(ended, boundary), following[0][0])
 
     def ready_before_post_check(self) -> str | None:
         before = [s for s in self.states if s["t"] <= self.settled_at()]
@@ -174,7 +191,7 @@ def shutdown_check(evidence: Evidence) -> Verdict:
         if e["event"] in SHUTDOWN_EVENTS
         and not (
             e["reason"] in ESTOP_SHUTDOWN_REASONS
-            and any(stop <= e["t"] for stop in stops)
+            and any(stop <= e["t"] + PI_CLOCK_SKEW_S for stop in stops)
         )
     ]
     if unexpected:
@@ -250,9 +267,12 @@ def stop_latency(evidence: Evidence, mark: float) -> tuple[float | None, str]:
     if not flying:
         return None, "no motion in flight when it was sent"
     for index in range(flying[0], len(spans)):
+        ended = spans[index][1]
         resumed = spans[index + 1][0] if index + 1 < len(spans) else boundary
-        if resumed - spans[index][1] >= STOPPED_QUIET_S:
-            return max(spans[index][1] - mark, 0.0), ""
+        if resumed - ended >= STOPPED_QUIET_S or evidence.next_action_moved(
+            ended, boundary
+        ):
+            return max(ended - mark, 0.0), ""
     return None, f"motion did not stop before {evidence.at(boundary)}"
 
 
@@ -274,6 +294,58 @@ def stop_check(evidence: Evidence, check: StopsWithin) -> Verdict:
         ok = ok and check.bound.holds(latency)
         judged = check.bound.judge("stopped after", latency)
         details.append(f"at {evidence.at(mark)}: {judged}")
+    return Verdict(name, ok, "; ".join(details))
+
+
+def closing_brake(evidence: Evidence, mark: float) -> dict | None:
+    boundary = evidence.next_boundary(mark)
+    brakes = [
+        brake
+        for brake in evidence.named("pipe_drain")
+        if mark <= brake["t"] <= boundary
+        and brake["cause"] == CLOSING_BRAKE_CAUSE
+    ]
+    return brakes[0] if brakes else None
+
+
+def stop_accounted(evidence: Evidence, request: dict) -> tuple[bool, str]:
+    mark = request["sent"]
+    latency, why = stop_latency(evidence, mark)
+    if latency is None:
+        return False, why
+    if request["returned"] is None:
+        return False, "the request never returned"
+    brake = closing_brake(evidence, mark)
+    if brake is None:
+        boundary = evidence.at(evidence.next_boundary(mark))
+        return False, (
+            f"no closing pacer brake (pipe_drain {CLOSING_BRAKE_CAUSE}) "
+            f"before {boundary}"
+        )
+    after_feed = mark + latency - request["returned"]
+    account = brake["peak_ahead_s"] + brake["drained_s"]
+    held = after_feed <= account
+    relation = "<=" if held else ">"
+    return held, (
+        f"moved {after_feed:.3f} s after the request returned {relation} "
+        f"the engine account {account:.3f} s (peak_ahead_s "
+        f"{brake['peak_ahead_s']:.3f} + drained_s {brake['drained_s']:.3f})"
+    )
+
+
+def account_check(
+    evidence: Evidence, check: StopsWithinEngineAccount
+) -> Verdict:
+    name = f"stop_account_after_{check.act.value}"
+    requests = [a for a in evidence.actions if a["act"] == check.act.value]
+    if not requests:
+        return Verdict(name, False, f"no {check.act.value} was sent")
+    ok = True
+    details = []
+    for request in requests:
+        held, detail = stop_accounted(evidence, request)
+        ok = ok and held
+        details.append(f"at {evidence.at(request['sent'])}: {detail}")
     return Verdict(name, ok, "; ".join(details))
 
 
@@ -313,6 +385,8 @@ def reserve_check(evidence: Evidence, check: ReserveBounded) -> Verdict:
 def specific_check(evidence: Evidence, check: SpecificCheck) -> Verdict:
     if isinstance(check, StopsWithin):
         return stop_check(evidence, check)
+    if isinstance(check, StopsWithinEngineAccount):
+        return account_check(evidence, check)
     if isinstance(check, SecondPrintLikeFirst):
         return second_print_check(evidence, check)
     return reserve_check(evidence, check)

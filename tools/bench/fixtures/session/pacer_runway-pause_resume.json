@@ -140,6 +140,20 @@
    "print_id": "print-1794786977"
   },
   {
+   "t": 1794787000.119,
+   "event": "pipe_drain",
+   "cap_s": 2.29,
+   "cause": "RunwayExhausted",
+   "drained_s": 2.40532006052406,
+   "level": "info",
+   "peak_ahead_s": 4.577183581087095,
+   "print_id": "print-1794786977",
+   "reserve_s": 0.29,
+   "runway_s": 0.289936806,
+   "source": "host-rust",
+   "t_us": 201695456
+  },
+  {
    "t": 1794787007.651,
    "event": "print.resume",
    "level": "info",

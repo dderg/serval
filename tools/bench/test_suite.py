@@ -240,3 +240,36 @@ def test_a_session_row_without_a_verdict_is_an_error(monkeypatch, tmp_path):
     result = suite.run_row(suite.SessionRow(suite.SCENARIOS[0]), tmp_path, 1.0)
     assert not result["passed"]
     assert result["error"].startswith("session_check.py")
+
+
+def _failing_runner(returncode):
+    calls = []
+
+    def python(script, *args, timeout_s):
+        calls.append(" ".join([script, *args[:1]]))
+        if script == "session.py":
+            return _completed(returncode, stderr="the runner's last words")
+        return _completed(0)
+
+    return python, calls
+
+
+def test_a_driver_side_runner_failure_leaves_the_target_alone(
+    monkeypatch, tmp_path
+):
+    python, calls = _failing_runner(suite.pi.DRIVER_SIDE_EXIT)
+    monkeypatch.setattr(suite, "python", python)
+    result = suite.run_row(suite.SessionRow(suite.SCENARIOS[0]), tmp_path, 1.0)
+    assert not any(call.startswith("deploy.py") for call in calls)
+    assert "recovered_with_reset_target" not in result
+    assert result["error"] == "session.py: the runner's last words"
+    assert not result["passed"]
+
+
+def test_a_printer_side_runner_failure_resets_the_target(monkeypatch, tmp_path):
+    python, calls = _failing_runner(1)
+    monkeypatch.setattr(suite, "python", python)
+    result = suite.run_row(suite.SessionRow(suite.SCENARIOS[0]), tmp_path, 1.0)
+    assert "deploy.py reset-target" in calls
+    assert result["recovered_with_reset_target"]
+    assert not result["passed"]

@@ -29,6 +29,15 @@ const REPLAN_BATCH_MOVES: usize = 64;
 /// decides whether planning keeps up with the print.
 const QUIET_PLAN_MIN_MOVES: usize = 32;
 
+/// Stream time, at the moves' own feedrates, after which a batch re-plans
+/// however few moves it holds: sparse moves would otherwise wait for
+/// `REPLAN_BATCH_MOVES` arrivals, and on a first layer 64 moves are 1.5 s of
+/// motion at the median and 8 s at worst, all of it uncommitted, so the
+/// pacer cannot count it as runway and a pause cannot stop short of it. It
+/// adds at most one plan per this much stream, and none to dense moves,
+/// whose batches fill by count first (64 top-layer moves are under 0.1 s).
+const REPLAN_BATCH_S: f64 = 0.5;
+
 /// Moves enter the window once their ratio in reach has settled (see
 /// [`ExtrusionReach`]): a move's budget never changes after it is planned,
 /// so the forward ceilings the finality barrier rests on stay final.
@@ -39,6 +48,7 @@ pub struct Planner {
     budgets: Vec<ExtrusionBudget>,
     entry_v: f64,
     moves_since_plan: usize,
+    unplanned_s: f64,
     config: StreamConfig,
     workers: Arc<WorkerPool>,
     step_capacity_log: StepCapacityLog,
@@ -56,6 +66,7 @@ impl Planner {
             budgets: Vec::new(),
             entry_v: 0.0,
             moves_since_plan: 0,
+            unplanned_s: 0.0,
             config,
             workers,
             step_capacity_log: StepCapacityLog::default(),
@@ -84,7 +95,7 @@ impl Planner {
         if self.moves_since_plan < QUIET_PLAN_MIN_MOVES {
             return true;
         }
-        self.moves_since_plan = 0;
+        self.start_batch();
         self.emit_committable(output)
     }
 
@@ -104,7 +115,7 @@ impl Planner {
                 self.moves.clear();
                 self.budgets.clear();
                 self.entry_v = 0.0;
-                self.moves_since_plan = 0;
+                self.start_batch();
             }
             Control::Dwell { .. }
             | Control::SetAxisChains(_)
@@ -130,15 +141,17 @@ impl Planner {
     }
 
     fn absorb_released(&mut self, m: Move, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
+        self.unplanned_s += m.shortest_secs();
         self.reach.push(m);
         self.admit_settled();
         self.moves_since_plan += 1;
         if self.moves_since_plan < REPLAN_BATCH_MOVES
+            && self.unplanned_s < REPLAN_BATCH_S
             && self.moves.len() < self.config.max_buffer_moves
         {
             return true;
         }
-        self.moves_since_plan = 0;
+        self.start_batch();
         if !self.emit_committable(output) {
             return false;
         }
@@ -155,6 +168,11 @@ impl Planner {
             return self.drain_to_rest(output) && output(PlannedItem::Drain);
         }
         true
+    }
+
+    fn start_batch(&mut self) {
+        self.moves_since_plan = 0;
+        self.unplanned_s = 0.0;
     }
 
     fn admit_settled(&mut self) {
@@ -214,7 +232,7 @@ impl Planner {
     /// Materialize the brake-to-rest: plan the whole window to terminal rest
     /// and emit everything.
     fn drain_to_rest(&mut self, output: &mut impl FnMut(PlannedItem) -> bool) -> bool {
-        self.moves_since_plan = 0;
+        self.start_batch();
         let reach = &mut self.reach;
         self.approaches.flush(&mut |piece| reach.push(piece));
         self.reach.close();

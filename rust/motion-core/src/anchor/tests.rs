@@ -548,3 +548,53 @@ fn without_a_pacer_brake_resumes_keep_the_default_lead_and_rest_floor() {
     assert_eq!((epoch, t0_new), (StreamEpoch::Continuation, t0));
     assert!(!a.is_parked());
 }
+
+const PRIME_START_IN_S: f64 = 0.54;
+const PRIME_LEAD_S: f64 = 0.29;
+
+#[test]
+fn a_primed_stream_committed_at_once_waits_out_its_prime() {
+    let mut a = Anchor::new();
+    a.prime_start(100.0, PRIME_START_IN_S, PRIME_LEAD_S);
+    let (t0, epoch) = a.anchor_segment(0.0, 0.01, 100.0);
+    assert_eq!(epoch, StreamEpoch::Reposition);
+    assert!((t0 - (100.0 + PRIME_START_IN_S)).abs() < 1e-9, "t0 {t0}");
+}
+
+#[test]
+fn a_primed_stream_committed_late_starts_its_lead_ahead() {
+    let mut a = Anchor::new();
+    a.prime_start(100.0, PRIME_START_IN_S, PRIME_LEAD_S);
+    let dispatched = 100.0 + PRIME_START_IN_S;
+    let (t0, _) = a.anchor_segment(0.0, 0.01, dispatched);
+    assert!((t0 - (dispatched + PRIME_LEAD_S)).abs() < 1e-9, "t0 {t0}");
+}
+
+#[test]
+fn a_released_prime_starts_at_the_default_lead() {
+    let mut a = Anchor::new();
+    a.prime_start(100.0, PRIME_START_IN_S, PRIME_LEAD_S);
+    a.release_prime();
+    let (t0, _) = a.anchor_segment(0.0, 0.01, 100.0);
+    assert!((t0 - (100.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9, "t0 {t0}");
+}
+
+#[test]
+fn a_stream_still_playing_its_drained_tail_continues_unprimed() {
+    let mut a = primed(true);
+    let now = 100.0 + DEFAULT_LEAD_SECS + 1.0 - PARKED_REANCHOR_FLOOR_SECS - 0.1;
+    a.prime_start(now, PRIME_START_IN_S, PRIME_LEAD_S);
+    let (t0, epoch) = a.anchor_segment(1.0, 2.0, now);
+    assert_eq!(epoch, StreamEpoch::Continuation);
+    assert!((t0 - (100.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9, "t0 {t0}");
+}
+
+#[test]
+fn a_claim_on_a_primed_stream_never_follows_its_start_once_released() {
+    let mut a = Anchor::new();
+    a.prime_start(100.0, PRIME_START_IN_S, PRIME_LEAD_S);
+    let claimed = a.claim_earliest_start(100.0).unwrap();
+    a.release_prime();
+    let (t0, _) = a.anchor_segment(0.0, 0.01, 100.0);
+    assert_eq!(a.start_verdict(t0), Ok(()), "claimed {claimed}, start {t0}");
+}

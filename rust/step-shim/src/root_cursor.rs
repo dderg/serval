@@ -48,6 +48,14 @@ impl Slope {
     }
 }
 
+/// How far short of a lattice line, in microsteps, a position still reaches
+/// it. A rest the planner lands on a line (60 mm, or 100.1 mm, at 80 steps/mm)
+/// carries a few ulps of roundoff to either side of it, and without the band
+/// that roundoff decided whether the motor rested a whole microstep short.
+/// An ulp of a 1 m coordinate is 1e-11 of a 0.0125 mm microstep; a decel to
+/// rest at 10 m/s^2 crosses the band in 50 ns.
+const LINE_REACH_STEPS: f64 = 1e-9;
+
 #[derive(Debug, Clone, Copy)]
 struct Lattice {
     origin_mm: f64,
@@ -60,7 +68,9 @@ impl Lattice {
     }
 
     fn threshold(self, microstep_mm: f64, slope: Slope) -> f64 {
-        self.origin_mm + (self.step_count + i64::from(slope.advance())) as f64 * microstep_mm
+        let advance = slope.advance();
+        let line = self.origin_mm + (self.step_count + i64::from(advance)) as f64 * microstep_mm;
+        line - f64::from(advance) * LINE_REACH_STEPS * microstep_mm
     }
 }
 
@@ -694,7 +704,9 @@ impl StepRootCursor {
         let view = lane.view;
         let t_from = self.stream_time(lane, from)?;
         let t_to = self.stream_time(lane, to)?;
-        let nominal = self.frame().nominal_position(self.microstep_mm);
+        let lattice = self.frame();
+        let falling = lattice.threshold(self.microstep_mm, Slope::Falling);
+        let rising = lattice.threshold(self.microstep_mm, Slope::Rising);
         if let Some((hull_from, hull_to)) = clocks_covered(model, view, t_from, t_to) {
             let (mut lower, mut upper) = model
                 .expect("a covered window has a model")
@@ -704,7 +716,7 @@ impl StepRootCursor {
                 lower = lower.min(from_position);
                 upper = upper.max(from_position);
             }
-            return Ok(lower <= nominal - self.microstep_mm || upper >= nominal + self.microstep_mm);
+            return Ok(lower <= falling || upper >= rising);
         }
         let bounds = view
             .signal
@@ -730,7 +742,7 @@ impl StepRootCursor {
             .max(to_position)
             .max(from_position + bounds.velocity_max.max(0.0) * duration)
             + slack;
-        Ok(lower <= nominal - self.microstep_mm || upper >= nominal + self.microstep_mm)
+        Ok(lower <= falling || upper >= rising)
     }
 
     fn certified_slope(

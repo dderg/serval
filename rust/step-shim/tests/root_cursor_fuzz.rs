@@ -14,6 +14,9 @@ const MAX_DEGREE: usize = 3;
 const MAX_SEGMENTS: usize = 3;
 const MIN_LOG10_AMPLITUDE_MM: f64 = -14.0;
 const SOURCE_AXIS: usize = 2;
+/// The cursor's own reach band: a position this many microsteps short of a
+/// lattice line reaches it.
+const LINE_REACH_STEPS: f64 = 1e-9;
 
 /// How the cursor learns where the rotor sits before the first root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,9 +30,9 @@ enum Anchor {
 }
 
 /// A position placed against a lattice threshold, to the last bit the
-/// coordinate can express. The lattice is hysteresis-free: a step fires the
-/// moment a position *reaches* a threshold, so `Exact` owes that step,
-/// `UlpShort` owes nothing, and `UlpPast` owes the same one step. At a base
+/// coordinate can express. A step fires the moment a position comes within
+/// the reach band of a threshold, so `Exact`, `UlpShort` and `UlpPast` owe
+/// that step and `BandShort`, twice the band short, owes nothing. At a base
 /// coordinate of hundreds of millimetres an ulp is ten orders of magnitude
 /// under a microstep, which is where a threshold comparison and a
 /// difference-against-nominal comparison stop agreeing.
@@ -38,12 +41,16 @@ enum Offset {
     Exact(i64),
     UlpShort(i64),
     UlpPast(i64),
+    BandShort(i64),
 }
 
 impl Offset {
     fn level(self) -> i64 {
         match self {
-            Self::Exact(level) | Self::UlpShort(level) | Self::UlpPast(level) => level,
+            Self::Exact(level)
+            | Self::UlpShort(level)
+            | Self::UlpPast(level)
+            | Self::BandShort(level) => level,
         }
     }
 }
@@ -183,12 +190,13 @@ fn max_amplitude_mm(clocks: u64, microstep_mm: f64, degree: usize, segments: usi
 }
 
 fn arb_offset(levels: std::ops::RangeInclusive<i64>) -> impl Strategy<Value = Offset> {
-    (levels, 0..3usize, any::<bool>()).prop_map(|(level, kind, negate)| {
+    (levels, 0..4usize, any::<bool>()).prop_map(|(level, kind, negate)| {
         let level = if negate { -level } else { level };
         match kind {
             0 => Offset::Exact(level),
             1 => Offset::UlpShort(level),
-            _ => Offset::UlpPast(level),
+            2 => Offset::UlpPast(level),
+            _ => Offset::BandShort(level),
         }
     })
 }
@@ -310,20 +318,26 @@ impl Lattice {
         self.origin_mm + (self.step_count + advance) as f64 * microstep_mm
     }
 
+    fn reach(&self, microstep_mm: f64, advance: i64) -> f64 {
+        self.threshold(microstep_mm, advance) - advance as f64 * LINE_REACH_STEPS * microstep_mm
+    }
+
     fn offset_position(&self, microstep_mm: f64, offset: Offset) -> f64 {
         let level = self.threshold(microstep_mm, offset.level());
         let away = level + offset.level() as f64;
+        let toward_nominal = -(offset.level().signum() as f64);
         match offset {
             Offset::Exact(_) => level,
             Offset::UlpShort(_) => libm::nextafter(level, self.threshold(microstep_mm, 0)),
             Offset::UlpPast(_) => libm::nextafter(level, away),
+            Offset::BandShort(_) => level + toward_nominal * 2.0 * LINE_REACH_STEPS * microstep_mm,
         }
     }
 }
 
-/// Every clock of every view, in order, against the hysteresis-free lattice
-/// the cursor walks: a step fires the first clock the position reaches the
-/// next threshold in either direction.
+/// Every clock of every view, in order, against the lattice the cursor
+/// walks: a step fires the first clock the position comes within the reach
+/// band of the next threshold in either direction.
 fn walk_lattice(case: &Case, views: &[ClockedMotorSpan]) -> (Lattice, Vec<StepRoot>) {
     let microstep_mm = case.microstep_mm;
     let first = views.first().expect("at least the run");
@@ -339,16 +353,16 @@ fn walk_lattice(case: &Case, views: &[ClockedMotorSpan]) -> (Lattice, Vec<StepRo
         let position = |clock: u64| view.position_at_clock(clock).expect("a clock in the view");
         for clock in view.start_clock + 1..=view.end_clock {
             let p = position(clock);
-            let advance = if p >= lattice.threshold(microstep_mm, 1) {
+            let advance = if p >= lattice.reach(microstep_mm, 1) {
                 1
-            } else if p <= lattice.threshold(microstep_mm, -1) {
+            } else if p <= lattice.reach(microstep_mm, -1) {
                 -1
             } else {
                 continue;
             };
             lattice.step_count += advance;
             assert!(
-                p < lattice.threshold(microstep_mm, 1) && p > lattice.threshold(microstep_mm, -1),
+                p < lattice.reach(microstep_mm, 1) && p > lattice.reach(microstep_mm, -1),
                 "the generator let the signal cross two lattice levels in one clock"
             );
             roots.push(StepRoot {

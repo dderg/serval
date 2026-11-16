@@ -11,6 +11,7 @@ use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
 
 mod dispatch;
 mod ingress;
+mod intake_gate;
 mod producer_throttle;
 mod pump_sink;
 
@@ -25,7 +26,20 @@ use pump_sink::{Projection, PumpSink};
 #[derive(Debug, Default)]
 pub struct CommittedFrontier {
     deadline: Mutex<Option<Instant>>,
+    watch: Mutex<LeadWatch>,
     unexecuted: bool,
+}
+
+/// What the frontier went through since the pacer last marked it.
+#[derive(Debug, Default, Clone, Copy)]
+enum LeadWatch {
+    #[default]
+    Quiet,
+    /// The least runway left ahead of the playhead when an advance arrived.
+    Lowest(f64),
+    /// A reset or a halt threw the committed timeline away: none of its
+    /// runway was consumed.
+    Discarded,
 }
 
 /// The runway of a pipeline no MCU executes: nothing ever plays its
@@ -36,17 +50,46 @@ impl CommittedFrontier {
     fn unexecuted() -> Self {
         Self {
             deadline: Mutex::default(),
+            watch: Mutex::default(),
             unexecuted: true,
         }
     }
 
     pub fn advance_to(&self, deadline: Instant) {
         let mut guard = self.deadline.lock_ok();
+        let lead_s = guard.map_or(0.0, |d| {
+            d.saturating_duration_since(Instant::now()).as_secs_f64()
+        });
+        let mut watch = self.watch.lock_ok();
+        *watch = match *watch {
+            LeadWatch::Quiet => LeadWatch::Lowest(lead_s),
+            LeadWatch::Lowest(lowest_s) => LeadWatch::Lowest(lowest_s.min(lead_s)),
+            LeadWatch::Discarded => LeadWatch::Discarded,
+        };
         *guard = Some(guard.map_or(deadline, |d| d.max(deadline)));
+    }
+
+    pub(crate) fn mark_lowest_lead(&self) {
+        *self.watch.lock_ok() = LeadWatch::Quiet;
+    }
+
+    /// The least runway left ahead of the playhead since the last mark;
+    /// `None` once a reset or halt discarded the timeline.
+    pub(crate) fn lowest_lead_secs(&self) -> Option<f64> {
+        let runway_s = self.runway_secs();
+        if self.unexecuted {
+            return Some(runway_s);
+        }
+        match *self.watch.lock_ok() {
+            LeadWatch::Quiet => Some(runway_s),
+            LeadWatch::Lowest(lowest_s) => Some(lowest_s.min(runway_s)),
+            LeadWatch::Discarded => None,
+        }
     }
 
     pub fn clear(&self) {
         *self.deadline.lock_ok() = None;
+        *self.watch.lock_ok() = LeadWatch::Discarded;
     }
 
     pub fn runway_secs(&self) -> f64 {
@@ -120,6 +163,7 @@ pub struct NudgeParams {
 /// Every slot in the pipe is queued-command latency (fan changes ride fences
 /// behind the buffered moves), so this covers host reactor scheduling gaps
 /// and nothing more; the submitter parks on the feed wakeup when it fills.
+/// The intake gate bounds the moves among them by time.
 pub const INPUT_CHANNEL_CAP: usize = 16;
 const SHUTDOWN_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -183,6 +227,7 @@ pub struct StreamWorkerHandle {
     sender: Sender<StreamMsg>,
     join_handle: Option<JoinHandle<()>>,
     links: Arc<WorkerLinks>,
+    intake: Arc<intake_gate::IntakeGate>,
     execution_control: Sender<crate::pump::PumpMsg>,
 }
 
@@ -200,7 +245,7 @@ impl std::fmt::Display for StreamWorkerError {
             Self::ExecutionHalted(reason) => write!(f, "execution halted: {reason}"),
             Self::ChannelFull => write!(
                 f,
-                "stream worker input channel full ({INPUT_CHANNEL_CAP} moves)"
+                "stream worker intake full ({INPUT_CHANNEL_CAP} moves, or the runway cap)"
             ),
         }
     }
@@ -394,6 +439,12 @@ impl StreamWorkerHandle {
             None => pipeline,
         }
         .into_staged(move |item| trajectory.send(item).is_ok());
+        let pacer = ingress::Pacer::default();
+        let intake = Arc::new(intake_gate::IntakeGate::new(
+            Arc::clone(&timeline.frontier),
+            Arc::clone(&links),
+            pacer.reserve_secs(),
+        ));
         let ingress = ingress::Ingress {
             config,
             odometer: home_pos,
@@ -401,12 +452,13 @@ impl StreamWorkerHandle {
             pipeline,
             links: Arc::clone(&links),
             timeline,
-            pacer: ingress::Pacer::default(),
+            pacer,
             throttle: producer_throttle::ProducerThrottle::from_env(),
             last_line: 0,
             moves_sent: 0,
             dispatch_record,
             pump: pump.clone(),
+            intake: Arc::clone(&intake),
         };
         let join = thread::Builder::new()
             .name("kalico-planning".to_string())
@@ -416,12 +468,37 @@ impl StreamWorkerHandle {
             sender: tx,
             join_handle: Some(join),
             links,
+            intake,
             execution_control: pump,
         }
     }
 
+    /// Non-blocking, like every submit: `ChannelFull` means the caller must
+    /// park on the feed wakeup and retry, whether the inbox is full or the
+    /// motion queued ahead of the playhead has reached the runway cap.
     pub fn submit_move(&self, m: geometry::Move) -> Result<(), StreamWorkerError> {
-        self.try_send_arming(StreamMsg::Move(m))
+        if !self.intake_admits() {
+            return Err(StreamWorkerError::ChannelFull);
+        }
+        let queued_ns = intake_gate::shortest_ns(&m);
+        self.intake.enter(queued_ns);
+        let sent = self.try_send_arming(StreamMsg::Move(m));
+        match sent {
+            Ok(()) => self.intake.note_ahead(),
+            Err(_) => self.intake.leave(queued_ns),
+        }
+        sent
+    }
+
+    /// Arms the feed wakeup on a closed intake gate; the post-arm recheck
+    /// closes the race where the ingress reopened it (and found the wakeup
+    /// unarmed) in between.
+    fn intake_admits(&self) -> bool {
+        if self.intake.admits() {
+            return true;
+        }
+        self.links.wakeup.arm();
+        self.intake.admits()
     }
 
     /// Non-blocking send that arms the feed wakeup on a full channel: the

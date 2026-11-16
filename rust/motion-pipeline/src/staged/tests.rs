@@ -316,3 +316,24 @@ fn a_reset_queued_behind_segments_reaches_the_sink_after_them_and_restarts_time(
         "the first segment after the reset restarts the timeline"
     );
 }
+
+#[test]
+fn a_reset_restarts_the_planned_stream_time() {
+    let mut staged = pipeline().into_staged(|_| true);
+    for item in zigzag_moves(20) {
+        assert!(staged.feed(item));
+    }
+    assert!(staged.feed(StreamInput::Drain));
+    assert!(staged.planned_through_s() > 0.0);
+
+    assert!(staged.feed(StreamInput::Control(Control::Reset {
+        pos: vec![0.0, 20.0, 0.0, 16.0],
+    })));
+
+    assert_eq!(
+        staged.planned_through_s(),
+        0.0,
+        "the timeline restarts at zero after a reset"
+    );
+    assert!(staged.finish());
+}

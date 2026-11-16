@@ -4,10 +4,27 @@
 
 use std::time::{Duration, Instant};
 
-use crate::anchor::LOW_MARGIN_WARN_SECS;
+use crate::anchor::{DEFAULT_LEAD_SECS, LOW_MARGIN_WARN_SECS};
 
-const DRAIN_RESERVE_FLOOR_S: f64 = 0.5;
 pub(super) const DRAIN_RESERVE_SAFETY: f64 = 2.0;
+
+/// The runway one brake to rest is taken to consume until a costlier one is
+/// measured: half the lead a fresh stream starts with, so a stream that
+/// just set off can still wait out the other half for its producer. 1.4x
+/// the slowest drain the Pi 5 bench measured with motion in flight
+/// (0.09 s, 2026-11-15). Braking with only the transport floor left
+/// anchored the drained trajectory at the floor or below it (#846); taking
+/// a brake to cost more than the fresh lead braked every stream start the
+/// producer paused at.
+const UNMEASURED_BRAKE_S: f64 = DEFAULT_LEAD_SECS / 2.0;
+
+/// The most runway the pacer keeps for braking. The intake keeps the
+/// runway at the reserve plus the pump's stall headroom, so every second of
+/// reserve holds PAUSE and CANCEL_PRINT back a second longer. A host whose
+/// measured brake would need more is capped here rather than aborted: a
+/// brake that costs less than the cap still stops in time, and one that
+/// costs more underruns, which the anchor fails loudly.
+pub(super) const RESERVE_CAP_S: f64 = 2.0;
 
 // TODO: expose as a config knob if 250 ms turns out wrong for slower feeds.
 const STARTUP_PRIME_S: f64 = 0.250;
@@ -70,25 +87,47 @@ pub(in crate::worker) struct Pacer {
 
 impl Pacer {
     /// The runway the pacer keeps for braking to rest: a multiple of one
-    /// brake to rest.
+    /// brake to rest, at most [`RESERVE_CAP_S`].
     pub(in crate::worker) fn reserve_secs(&self) -> f64 {
-        (self.one_brake_secs() * DRAIN_RESERVE_SAFETY).max(DRAIN_RESERVE_FLOOR_S)
+        (self.one_brake_secs() * DRAIN_RESERVE_SAFETY).min(RESERVE_CAP_S)
+    }
+
+    /// Whether the brakes measured need more reserve than the cap gives.
+    pub(in crate::worker) fn reserve_capped(&self) -> bool {
+        self.one_brake_secs() * DRAIN_RESERVE_SAFETY > RESERVE_CAP_S
+    }
+
+    /// How long after its first move a stream setting off from rest starts
+    /// playing at the earliest: its prime, then the reserve, so a producer
+    /// still filling its planning front can lose a planning step's runway
+    /// and brake.
+    pub(in crate::worker) fn primed_start_secs(&self) -> f64 {
+        STARTUP_PRIME_S + self.reserve_secs()
     }
 
     /// The runway one brake to rest consumes, measured from the last
     /// moment the pacer could decide on it: the most runway it lost while
-    /// planning between two decisions, the slowest drain, and the transport
-    /// floor the brake's trajectory must still arrive ahead of the playhead
-    /// by.
+    /// planning between two decisions, the costliest drain, and the
+    /// transport floor the brake's trajectory must still arrive ahead of the
+    /// playhead by.
     fn one_brake_secs(&self) -> f64 {
-        self.worst_blind_drop_s + self.worst_drain_s + LOW_MARGIN_WARN_SECS
+        (self.worst_blind_drop_s + self.worst_drain_s).max(UNMEASURED_BRAKE_S)
+            + LOW_MARGIN_WARN_SECS
     }
 
-    /// The runway fell from `before_s` to `after_s` while the ingress
-    /// planned, unable to pace. Runway the dispatcher kept extending while
-    /// planning waited on it costs nothing.
-    pub(in crate::worker) fn note_step(&mut self, before_s: f64, after_s: f64) {
-        self.worst_blind_drop_s = self.worst_blind_drop_s.max(before_s - after_s);
+    /// The runway fell from `before_s` to as little as `lowest_s` while the
+    /// ingress planned, unable to pace. Runway the dispatcher kept extending
+    /// while planning waited on it costs nothing. True when it widened the
+    /// reserve.
+    pub(in crate::worker) fn note_step(&mut self, before_s: f64, lowest_s: f64) -> bool {
+        let dropped_s = before_s - lowest_s;
+        self.widens(|pacer| pacer.worst_blind_drop_s = pacer.worst_blind_drop_s.max(dropped_s))
+    }
+
+    fn widens(&mut self, measure: impl FnOnce(&mut Self)) -> bool {
+        let one_brake_s = self.one_brake_secs();
+        measure(self);
+        self.one_brake_secs() > one_brake_s
     }
 
     pub(in crate::worker) fn undrained(&self) -> bool {
@@ -103,16 +142,20 @@ impl Pacer {
         self.undrained_since = None;
     }
 
-    /// A brake to rest finished after `latency_s`; true when it is the
-    /// slowest yet and widened the reserve.
-    pub(in crate::worker) fn note_drain(&mut self, latency_s: f64) -> bool {
+    /// A brake to rest finished. It consumed the runway between `before_s`,
+    /// when it was ordered, and `lowest_s`, the least left ahead of the
+    /// playhead until its trajectory was dispatched: time spent waiting on a
+    /// playhead that kept the committed end as far ahead costs nothing, and a
+    /// timeline a reset or halt discarded (`None`) consumed nothing. True
+    /// when it widened the reserve.
+    pub(in crate::worker) fn note_drain(&mut self, before_s: f64, lowest_s: Option<f64>) -> bool {
         self.undrained_since = None;
         self.busy.reset();
-        if latency_s <= self.worst_drain_s {
+        let Some(lowest_s) = lowest_s else {
             return false;
-        }
-        self.worst_drain_s = latency_s;
-        true
+        };
+        let consumed_s = before_s - lowest_s;
+        self.widens(|pacer| pacer.worst_drain_s = pacer.worst_drain_s.max(consumed_s))
     }
 
     /// Whether a stream whose moves keep arriving must brake now.
@@ -132,9 +175,9 @@ impl Pacer {
         at_rest: bool,
         now: Instant,
     ) -> IdleVerdict {
-        let wait_s = runway_s - self.reserve_secs();
-        if wait_s > 0.0 {
-            return IdleVerdict::Wait(Duration::from_secs_f64(wait_s));
+        let wait = whole_nanos(runway_s - self.reserve_secs());
+        if !wait.is_zero() {
+            return IdleVerdict::Wait(wait);
         }
         let Some(since) = self.undrained_since else {
             return IdleVerdict::Brake;
@@ -147,12 +190,20 @@ impl Pacer {
         if at_rest {
             return IdleVerdict::Wait(prime_left);
         }
-        let spare_runway_s = runway_s - self.one_brake_secs();
-        if spare_runway_s <= 0.0 {
+        let spare_runway = whole_nanos(runway_s - self.one_brake_secs());
+        if spare_runway.is_zero() {
             return IdleVerdict::Brake;
         }
-        IdleVerdict::Wait(prime_left.min(Duration::from_secs_f64(spare_runway_s)))
+        IdleVerdict::Wait(prime_left.min(spare_runway))
     }
+}
+
+/// `secs` as a wait the clock can time, zero when none is left. A wait
+/// shorter than the clock's nanosecond returns at once, and in the
+/// simulator, whose clock stands still while a host thread runs, the
+/// planning thread then asked again forever.
+fn whole_nanos(secs: f64) -> Duration {
+    Duration::from_secs_f64(secs.max(0.0))
 }
 
 #[cfg(test)]

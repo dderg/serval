@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -113,6 +114,8 @@ def rsync_changes(tree: Path, files: list[str]) -> list[str]:
     result = subprocess.run(
         [
             "rsync",
+            "-e",
+            shlex.join(["ssh", *pi.PI_ADDRESS]),
             "-rlpgoD",
             "--checksum",
             "-i",
@@ -176,8 +179,7 @@ def cmd_sync(tree: Path) -> None:
         print("rust/ changed: building native on the Pi", flush=True)
         build = subprocess.run(
             [
-                "ssh",
-                pi.PI_SSH,
+                *pi.SSH,
                 "cd klipper && . ~/.cargo/env && ./scripts/build-native.sh",
             ],
         )

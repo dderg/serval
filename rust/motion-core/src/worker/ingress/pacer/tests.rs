@@ -55,13 +55,54 @@ fn a_busy_stream_that_falls_from_the_reserve_past_half_of_it_unobserved_brakes_a
 #[test]
 fn the_reserve_covers_a_brake_after_the_most_runway_lost_planning_blind() {
     let mut pacer = Pacer::default();
-    pacer.note_drain(0.3);
+    pacer.note_drain(0.3, Some(0.0));
     pacer.note_step(1.0, 0.6);
     pacer.note_step(0.6, 0.9);
     assert!(
         (pacer.reserve_secs() - DRAIN_RESERVE_SAFETY * (0.3 + 0.4 + LOW_MARGIN_WARN_SECS)).abs()
             < 1e-12
     );
+}
+
+#[test]
+fn a_brake_whose_committed_end_kept_its_lead_costs_no_runway() {
+    let mut pacer = Pacer::default();
+    assert!(!pacer.note_drain(5.0, Some(5.0)));
+    assert_eq!(pacer.reserve_secs(), Pacer::default().reserve_secs());
+}
+
+#[test]
+fn a_brake_whose_timeline_a_halt_discarded_costs_no_runway() {
+    let mut pacer = Pacer::default();
+    assert!(!pacer.note_drain(16.7, None));
+    assert_eq!(pacer.reserve_secs(), Pacer::default().reserve_secs());
+}
+
+/// A sample this costly may be a one-off stall. Capped, the pacer still
+/// brakes every stop that costs up to the cap; one that costs more
+/// underruns, which the anchor fails loudly. Aborting on the sample alone
+/// would end prints a stutter could have carried.
+#[test]
+fn a_brake_costing_more_than_the_reserve_cap_holds_caps_the_reserve() {
+    let mut pacer = Pacer::default();
+    assert!(pacer.note_drain(1.5, Some(0.0)));
+    assert_eq!(pacer.reserve_secs(), RESERVE_CAP_S);
+    assert!(pacer.reserve_capped());
+}
+
+#[test]
+fn planning_that_loses_more_runway_than_the_reserve_cap_holds_caps_the_reserve() {
+    let mut pacer = Pacer::default();
+    assert!(pacer.note_step(2.0, 0.5));
+    assert_eq!(pacer.reserve_secs(), RESERVE_CAP_S);
+    assert!(pacer.reserve_capped());
+}
+
+#[test]
+fn a_reserve_under_the_cap_is_not_capped() {
+    let mut pacer = Pacer::default();
+    assert!(pacer.note_step(0.6, 0.2));
+    assert!(!pacer.reserve_capped());
 }
 
 #[test]
@@ -139,7 +180,7 @@ impl StarvedPrint {
     fn new(starvation: Starvation) -> Self {
         let mut pacer = Pacer::default();
         if starvation.measured_before_start {
-            pacer.note_drain(starvation.drain_latency_s);
+            pacer.note_drain(starvation.drain_latency_s, Some(0.0));
         }
         Self {
             starvation,
@@ -189,11 +230,14 @@ impl StarvedPrint {
     fn brake(&mut self) -> Result<(), String> {
         let in_flight = !self.anchor.is_parked();
         let latency_s = self.starvation.drain_latency_s;
+        let before_s = self.runway_s();
         self.now += latency_s / 2.0;
+        let at_dispatch_s = self.runway_s();
         self.dispatch(BRAKE_S)?;
         self.now += latency_s / 2.0;
         self.anchor.mark_parked();
-        self.pacer.note_drain(latency_s);
+        self.pacer
+            .note_drain(before_s, Some(at_dispatch_s.min(self.runway_s())));
         if in_flight {
             self.anchor.require_resume_lead(self.pacer.reserve_secs())?;
         }
@@ -276,7 +320,7 @@ fn a_starved_stream_in_flight_brakes_before_its_prime_runs_out() {
 fn a_stream_in_flight_waits_out_its_prime_only_while_one_brake_still_fits() {
     let base = Instant::now();
     let mut pacer = Pacer::default();
-    pacer.note_drain(0.2);
+    pacer.note_drain(0.2, Some(0.0));
     pacer.note_step(0.6, 0.55);
     pacer.note_move(base);
     let one_brake_s = 0.2 + 0.05 + LOW_MARGIN_WARN_SECS;
@@ -300,5 +344,45 @@ fn a_stream_in_flight_waits_out_its_prime_only_while_one_brake_still_fits() {
         pacer.idle_verdict(0.3, false, base + Duration::from_secs(1)),
         IdleVerdict::Brake,
         "an expired prime brakes under the reserve"
+    );
+}
+
+/// A drained continuation must be dispatched the transport floor ahead of
+/// the playhead. Braking with only that floor left, as a pacer that had
+/// measured no brake yet did, anchored it exactly at the floor or below:
+/// `LowMarginFatal` at print start whenever the first moves were held back
+/// (kernel-free pressure advance on shaped X/Y, issue triage NEW-2).
+#[test]
+fn a_fresh_pacer_brakes_motion_in_flight_while_an_unmeasured_brake_still_fits() {
+    let base = Instant::now();
+    let mut pacer = Pacer::default();
+    pacer.note_move(base);
+    assert_eq!(
+        pacer.idle_verdict(0.1, false, base),
+        IdleVerdict::Brake,
+        "0.1 s of runway in flight is less than a brake no pacer has measured yet"
+    );
+}
+
+/// The planning thread waits by its verdict and asks again. In the
+/// simulator the clock stands still while a host thread runs, so a wait
+/// that rounds to zero nanoseconds returns at once and the next verdict is
+/// the same: the thread spun at 99 % CPU on a frozen clock. A real clock
+/// moves on, so the same wait is due.
+#[test]
+fn a_wait_shorter_than_a_nanosecond_is_due() {
+    const SUB_NANOSECOND_S: f64 = 1.0e-10;
+    let base = Instant::now();
+    let mut pacer = Pacer::default();
+    assert_eq!(
+        pacer.idle_verdict(pacer.reserve_secs() + SUB_NANOSECOND_S, false, base),
+        IdleVerdict::Brake,
+        "the runway past the reserve has run out"
+    );
+    pacer.note_move(base);
+    assert_eq!(
+        pacer.idle_verdict(pacer.one_brake_secs() + SUB_NANOSECOND_S, false, base),
+        IdleVerdict::Brake,
+        "the runway past one brake has run out"
     );
 }

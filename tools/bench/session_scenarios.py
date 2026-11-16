@@ -64,7 +64,8 @@ class Bound:
 MID_PRINT_GAP_S = Bound(1.0, "#843")
 SECOND_PRINT_SLOWDOWN = Bound(0.10, "#843", Unit.RATIO)
 PACER_RESERVE_S = Bound(2.0, "#843")
-PAUSE_CANCEL_STOP_S = Bound(6.0, "#844")
+PAUSE_CANCEL_STOP_S_UNTIL_860 = Bound(12.0, "#860")
+PAUSE_CANCEL_STOP_S_AFTER_860 = Bound(6.0, "#860")
 FIRMWARE_RESTART_STOP_S = Bound(6.0, "#844")
 EMERGENCY_STOP_S = Bound(0.1, "#406")
 REACTOR_STALL_ISSUE = "#406"
@@ -121,6 +122,11 @@ class StopsWithin:
 
 
 @dataclass(frozen=True)
+class StopsWithinEngineAccount:
+    act: Act
+
+
+@dataclass(frozen=True)
 class SecondPrintLikeFirst:
     bound: Bound = SECOND_PRINT_SLOWDOWN
 
@@ -130,7 +136,12 @@ class ReserveBounded:
     bound: Bound = PACER_RESERVE_S
 
 
-SpecificCheck = StopsWithin | SecondPrintLikeFirst | ReserveBounded
+SpecificCheck = (
+    StopsWithin
+    | StopsWithinEngineAccount
+    | SecondPrintLikeFirst
+    | ReserveBounded
+)
 
 
 @dataclass(frozen=True)
@@ -206,13 +217,26 @@ def zigzag_moves() -> tuple[str, ...]:
 MESH_CONFIG = Config(fragments=(PRINT_MACROS, BED_MESH_WAVY))
 MESH_PRINT = Gcode(setup=(LOAD_WAVY_MESH,))
 SHORT_PRINT = Gcode(limit=SHORT_PRINT_LINES)
+SPARSE_PRINT = Gcode(limit=len(run.PREAMBLE), tail=zigzag_moves())
 START = Action(Act.START_PRINT)
 NEXT_PRINT = Action(Act.START_PRINT, NEXT_PRINT_AFTER_S, After.PRINT_END)
 ESTOP_RECOVERY = (
     Action(Act.FIRMWARE_RESTART, ESTOP_RECOVERY_AFTER_S),
     Action(Act.WAIT, RESTART_WATCH_S),
 )
-PAUSE_STOP = StopsWithin(Act.PAUSE, PAUSE_CANCEL_STOP_S)
+PAUSE_STOP = (
+    StopsWithin(Act.PAUSE, PAUSE_CANCEL_STOP_S_UNTIL_860),
+    StopsWithinEngineAccount(Act.PAUSE),
+)
+CANCEL_STOP = (
+    StopsWithin(Act.CANCEL, PAUSE_CANCEL_STOP_S_UNTIL_860),
+    StopsWithinEngineAccount(Act.CANCEL),
+)
+PAUSE_THEN_RESUME = (
+    START,
+    Action(Act.PAUSE, INTERRUPT_AFTER_S),
+    Action(Act.RESUME, PAUSE_HELD_S),
+)
 
 SCENARIOS = (
     Scenario(
@@ -264,14 +288,10 @@ SCENARIOS = (
         "pause_resume",
         "#844",
         Gcode(),
-        (
-            START,
-            Action(Act.PAUSE, INTERRUPT_AFTER_S),
-            Action(Act.RESUME, PAUSE_HELD_S),
-        ),
+        PAUSE_THEN_RESUME,
         (Outcome.COMPLETE,),
         NotAnalyzed.INTERRUPTED,
-        checks=(PAUSE_STOP,),
+        checks=PAUSE_STOP,
     ),
     Scenario(
         "pause_cancel",
@@ -284,7 +304,7 @@ SCENARIOS = (
         ),
         (Outcome.CANCELLED,),
         NotAnalyzed.INTERRUPTED,
-        checks=(PAUSE_STOP,),
+        checks=PAUSE_STOP,
     ),
     Scenario(
         "cancel_plain",
@@ -293,7 +313,16 @@ SCENARIOS = (
         (START, Action(Act.CANCEL, INTERRUPT_AFTER_S)),
         (Outcome.CANCELLED,),
         NotAnalyzed.INTERRUPTED,
-        checks=(StopsWithin(Act.CANCEL, PAUSE_CANCEL_STOP_S),),
+        checks=CANCEL_STOP,
+    ),
+    Scenario(
+        "pause_sparse",
+        "#860",
+        SPARSE_PRINT,
+        PAUSE_THEN_RESUME,
+        (Outcome.COMPLETE,),
+        NotAnalyzed.INTERRUPTED,
+        checks=PAUSE_STOP,
     ),
     Scenario(
         "cancel_macro_mesh",
