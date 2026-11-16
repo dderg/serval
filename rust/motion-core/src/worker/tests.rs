@@ -1408,11 +1408,29 @@ fn drain_requests_refuse_a_full_channel_instead_of_blocking() {
 /// The production feed parks on the wakeup fd and retries on `ChannelFull`;
 /// tests that outrun the input channel spin the same retry.
 fn submit_move_retrying(h: &StreamWorkerHandle, line_no: u32, start: [f64; 3], end: [f64; 3]) {
+    assert!(submit_move_until(h, line_no, start, end, || false));
+}
+
+/// [`submit_move_retrying`] for a test that wants an outcome, not every
+/// move in: gives up, returning `false`, once `satisfied` holds while the
+/// intake refuses. A mock clock stands still while the intake's runway
+/// counts real time, so a burst the worker took in one step can shut the
+/// intake for longer than the retry waits.
+fn submit_move_until(
+    h: &StreamWorkerHandle,
+    line_no: u32,
+    start: [f64; 3],
+    end: [f64; 3],
+    satisfied: impl Fn() -> bool,
+) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match h.submit_move(line(line_no, start, end)) {
-            Ok(()) => return,
+            Ok(()) => return true,
             Err(StreamWorkerError::ChannelFull) => {
+                if satisfied() {
+                    return false;
+                }
                 assert!(
                     std::time::Instant::now() < deadline,
                     "input channel stayed full for 5s — pipeline stalled"
@@ -1816,17 +1834,19 @@ fn startup_prime_drains_after_timeout_for_sparse_input() {
 /// A sink whose clock, as the second segment lands, jumps to
 /// `jump_past_second_start_s` past that segment's stream start: a producer
 /// blind for that long right after it committed the first piece of a
-/// stream that set off from rest.
+/// stream that set off from rest. Not once `flushing`: a drain dispatches
+/// its pieces back to back, so no producer is blind between them.
 struct StallAfterFirstSink {
     inner: AnchoredSink,
     clock: Arc<host_rt::clock::MockClock>,
     jump_past_second_start_s: f64,
     dispatched: usize,
+    flushing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SegmentSink for StallAfterFirstSink {
     fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
-        if self.dispatched == 1 {
+        if self.dispatched == 1 && !self.flushing.load(Ordering::SeqCst) {
             self.clock.advance(Duration::from_secs_f64(
                 seg.t_start + self.jump_past_second_start_s,
             ));
@@ -1856,8 +1876,29 @@ impl SegmentSink for StallAfterFirstSink {
 /// and the playhead overran the committed end mid-motion. On two slow
 /// cores the same start braked to rest instead (the planning step cost
 /// more than the runway the default lead leaves above one brake).
+///
+/// The commits come from the worker running while the strokes arrive. A
+/// worker the scheduler holds back until the test has submitted every stroke
+/// commits nothing but the flush's drain, which is no producer going blind:
+/// that attempt is discarded and run again.
 #[test]
 fn a_producer_blind_right_after_its_first_commit_keeps_ahead_of_the_playhead() {
+    const ATTEMPTS: usize = 8;
+    let (opened_with, first_move_host) = (0..ATTEMPTS)
+        .find_map(|_| blind_producer_attempt())
+        .unwrap_or_else(|| {
+            panic!("the worker committed nothing before the flush in {ATTEMPTS} attempts")
+        });
+    assert!(
+        opened_with[0] - first_move_host >= ingress::Pacer::default().primed_start_secs() - 1e-9,
+        "the stream started {}s after its first move",
+        opened_with[0] - first_move_host
+    );
+}
+
+/// The stream's start hosts and its first move's host time, or `None` when
+/// the worker committed less than two segments before the flush.
+fn blind_producer_attempt() -> Option<(Vec<f64>, f64)> {
     const STALL_PAST_THE_DEFAULT_LEAD_S: f64 = 0.1;
     const STROKE_MM: f64 = 40.0;
     const MAX_STROKES: u32 = 32;
@@ -1874,36 +1915,31 @@ fn a_producer_blind_right_after_its_first_commit_keeps_ahead_of_the_playhead() {
     let inner = AnchoredSink::on(&timeline);
     let starts_host = Arc::clone(&inner.starts_host);
     let first_move_host = timeline.router.lock_ok().host_now_secs();
+    let flushing = Arc::<std::sync::atomic::AtomicBool>::default();
     let sink = StallAfterFirstSink {
         inner,
         clock,
         jump_past_second_start_s: crate::anchor::DEFAULT_LEAD_SECS + STALL_PAST_THE_DEFAULT_LEAD_S,
         dispatched: 0,
+        flushing: Arc::clone(&flushing),
     };
     let mut h = spawn_on_timeline(cfg(), AxisChainSet::default(), vec![0.0; 3], sink, timeline);
 
+    let opened = || starts_host.lock_ok().len() >= 2;
     let mut at = [0.0; 3];
     for line_no in 1..=MAX_STROKES {
-        if starts_host.lock_ok().len() >= 2 {
+        let end = [if at[0] > 0.0 { 0.0 } else { STROKE_MM }, 0.0, 0.0];
+        if !submit_move_until(&h, line_no, at, end, opened) || opened() {
             break;
         }
-        let end = [if at[0] > 0.0 { 0.0 } else { STROKE_MM }, 0.0, 0.0];
-        submit_move_retrying(&h, line_no, at, end);
         at = end;
     }
     let opened_with = starts_host.lock_ok().clone();
+    flushing.store(true, Ordering::SeqCst);
     h.flush().unwrap();
     h.shutdown();
 
-    assert!(
-        opened_with.len() >= 2,
-        "{MAX_STROKES} strokes committed only {opened_with:?} before the flush"
-    );
-    assert!(
-        opened_with[0] - first_move_host >= ingress::Pacer::default().primed_start_secs() - 1e-9,
-        "the stream started {}s after its first move",
-        opened_with[0] - first_move_host
-    );
+    (opened_with.len() >= 2).then_some((opened_with, first_move_host))
 }
 
 #[test]
