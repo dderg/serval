@@ -23,9 +23,6 @@ static struct {
     time_t start_sec;
     // Flags for tracking irq_enable()/irq_disable()
     uint32_t must_wake_timers;
-    // Set by timer_kick(): the next dispatch is wanted even though the
-    // timer list head is not due yet
-    uint32_t kicked;
     // Time of next software timer (also used to convert from ticks to systime)
     uint32_t next_wake_counter;
     struct timespec next_wake;
@@ -137,7 +134,6 @@ timer_kick(void)
     sim_vtime_pacer_set_floor((uint64_t)now.tv_sec * NSECS + now.tv_nsec);
 #endif
     struct itimerspec it = { .it_interval = {0, 0}, .it_value = {0, 1} };
-    TimerInfo.kicked = 1;
     timer_settime(TimerInfo.t_alarm, TIMER_ABSTIME, &it, NULL);
 }
 
@@ -147,30 +143,39 @@ timer_kick(void)
 #define TIMER_MIN_TRY_TICKS timer_from_us(2)
 
 static void
+timer_pace_floor(uint32_t time)
+{
+#if CONFIG_MCU_SIM
+    struct timespec wake = timespec_from_time(time);
+    sim_vtime_pacer_set_floor((uint64_t)wake.tv_sec * NSECS + wake.tv_nsec);
+#endif
+}
+
+static void
+timer_arm(uint32_t next)
+{
+    struct itimerspec it;
+    it.it_interval = (struct timespec){0, 0};
+    TimerInfo.next_wake = it.it_value = timespec_from_time(next);
+    TimerInfo.next_wake_counter = next;
+    TimerInfo.must_wake_timers = 0;
+    timer_settime(TimerInfo.t_alarm, TIMER_ABSTIME, &it, NULL);
+}
+
+static void
 timer_dispatch_due(void)
 {
-    // A signal from an alarm that was superseded by a later one is
-    // delivered after the re-arm; dispatching on it would run a timer
-    // before its waketime. Only a kick, or a head that is due, dispatches.
-    uint32_t kicked = TimerInfo.kicked;
-    TimerInfo.kicked = 0;
-    if (!kicked && timer_is_before(timer_read_time(), TimerInfo.next_wake_counter)) {
-        struct itimerspec rearm;
-        rearm.it_interval = (struct timespec){0, 0};
-        rearm.it_value = TimerInfo.next_wake;
-        TimerInfo.must_wake_timers = 0;
-        timer_settime(TimerInfo.t_alarm, TIMER_ABSTIME, &rearm, NULL);
+    uint32_t head = sched_peek_timer()->waketime;
+    if (timer_is_before(timer_read_time(), head)) {
+        timer_pace_floor(head);
+        timer_arm(head);
         return;
     }
     uint32_t repeat_count = TIMER_REPEAT_COUNT, next;
     for (;;) {
         // Run the next software timer
         next = sched_timer_dispatch();
-#if CONFIG_MCU_SIM
-        struct timespec wake = timespec_from_time(next);
-        sim_vtime_pacer_set_floor(
-            (uint64_t)wake.tv_sec * NSECS + wake.tv_nsec);
-#endif
+        timer_pace_floor(next);
 
         repeat_count--;
         uint32_t lrt = TimerInfo.last_read_time;
@@ -230,13 +235,7 @@ timer_dispatch_due(void)
         }
     }
 
-    // Schedule SIGALRM signal
-    struct itimerspec it;
-    it.it_interval = (struct timespec){0, 0};
-    TimerInfo.next_wake = it.it_value = timespec_from_time(next);
-    TimerInfo.next_wake_counter = next;
-    TimerInfo.must_wake_timers = 0;
-    timer_settime(TimerInfo.t_alarm, TIMER_ABSTIME, &it, NULL);
+    timer_arm(next);
 }
 
 static uint32_t timer_busy_ticks;
