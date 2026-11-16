@@ -46,6 +46,11 @@ class DetachedEngine:
     def frontier_print_time(self, mcu_handle):
         return self.frontier
 
+    def submit_dwell(self, duration_s):
+        self._engine.dwell_start(duration_s)
+        while not self._engine.pipeline_request_poll():
+            pass
+
     def dwell_until(self, print_time, mcu_handle):
         raise RuntimeError(
             "dwell_until needs an MCU clock; the parity gate has none"

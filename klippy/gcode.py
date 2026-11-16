@@ -462,7 +462,8 @@ class GCodeDispatch:
             gcmd.respond_info(msg)
 
     def request_restart(self, result):
-        if self.is_printer_ready:
+        mcu_reset_discards_queued_motion = result == "firmware_restart"
+        if self.is_printer_ready and not mcu_reset_discards_queued_motion:
             toolhead = self.printer.lookup_object("toolhead")
             print_time = toolhead.get_last_move_time()
             if result == "exit":
