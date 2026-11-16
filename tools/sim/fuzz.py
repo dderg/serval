@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""Seeded full-stack scenario fuzzer (tools/sim/fuzzing).
+
+Run through tools/sim/run.sh, which mounts .sim-fuzz/ for the results:
+
+    tools/sim/run.sh fuzz --seeds 1000..1999 [--jobs 8] [--budget-s 3600] [--minimize]
+    tools/sim/run.sh fuzz --seed 1234                 # replay one seed
+    tools/sim/run.sh fuzz --replay .sim-fuzz/<run>/seed-1234/minimized
+
+One line per scenario (PASS, or FAIL and the violated check). A failure
+keeps its directory: the scenario (scenario.json, timeline.txt and the
+rendered printer.cfg / print_*.gcode), the world's logs, result.json and
+repro.txt.
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import concurrent.futures
+import json
+import os
+import pathlib
+import shutil
+import signal
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT))
+
+from tools.sim.fuzzing import execute, minimize, scenario  # noqa: E402
+from tools.sim.fuzzing.checks import ROOT_CAUSES, Check  # noqa: E402
+from tools.sim.fuzzing.execute import FAIL, PASS  # noqa: E402
+
+DEFAULT_JOBS = 8
+WORKER_TIMEOUT_S = 900
+RESULT_FILE = "result.json"
+REPRO_FILE = "repro.txt"
+MINIMIZED_DIR = "minimized"
+
+
+def _seed_range(text: str) -> range:
+    low, _, high = text.partition("..")
+    return range(int(low), int(high) + 1)
+
+
+def _parse(argv) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    which = parser.add_mutually_exclusive_group(required=True)
+    which.add_argument("--seeds", type=_seed_range, help="inclusive range A..B")
+    which.add_argument("--seed", type=int)
+    which.add_argument(
+        "--replay", type=pathlib.Path, help="a saved scenario directory"
+    )
+    which.add_argument("--worker", type=pathlib.Path, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=int(os.environ.get("SIM_FUZZ_JOBS", DEFAULT_JOBS)),
+    )
+    parser.add_argument("--budget-s", type=float, default=None)
+    parser.add_argument("--minimize", action="store_true")
+    parser.add_argument("--keep-passing", action="store_true")
+    parser.add_argument(
+        "--out-root", type=pathlib.Path, default=REPO_ROOT / ".sim-fuzz"
+    )
+    return parser.parse_args(argv)
+
+
+def run_worker(directory: pathlib.Path) -> dict:
+    chosen = scenario.load(directory)
+    with tempfile.TemporaryDirectory(prefix=f"fz{chosen.seed}-") as tmp:
+        return execute.run_scenario(chosen, pathlib.Path(tmp), directory)
+
+
+# ------------------------------------------------------------- parent
+
+
+def _spawn(directory: pathlib.Path) -> dict:
+    command = [
+        sys.executable,
+        str(pathlib.Path(__file__).resolve()),
+        "--worker",
+        str(directory),
+    ]
+    log = (directory / "worker.log").open("wb")
+    process = subprocess.Popen(
+        command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+    )
+    try:
+        process.wait(timeout=WORKER_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+    log.close()
+    result_path = directory / RESULT_FILE
+    if result_path.exists():
+        return json.loads(result_path.read_text())
+    tail = (directory / "worker.log").read_text(errors="replace")[-2000:]
+    return {
+        "seed": scenario.load(directory).seed,
+        "status": FAIL,
+        "check": Check.HARNESS.value,
+        "signature": f"{Check.HARNESS.value}: worker died (rc={process.returncode})",
+        "evidence": tail,
+        "violations": [],
+        "notes": [],
+        "real_s": WORKER_TIMEOUT_S,
+        "virtual_s": 0.0,
+        "summary": "",
+    }
+
+
+def _line(result: dict) -> str:
+    head = f"seed {result['seed']} {result['status']}"
+    timing = f"{result['real_s']:.1f}s {result['virtual_s']:.1f}v"
+    if result["status"] == PASS:
+        return f"{head} {timing} {result['summary']}"
+    return f"{head} {result['check']} {timing} {result['signature']}"
+
+
+def _repro(
+    directory: pathlib.Path, out_root: pathlib.Path, seed_mode: bool, seed: int
+) -> str:
+    if seed_mode:
+        return f"tools/sim/run.sh fuzz --seed {seed}"
+    relative = directory.resolve().relative_to(out_root.resolve().parent)
+    return f"tools/sim/run.sh fuzz --replay {relative}"
+
+
+class Runner:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        self.run_dir = args.out_root / f"run-{stamp}-{os.getpid()}"
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs)
+
+    def evaluate(self, directory: pathlib.Path, seed_mode: bool) -> dict:
+        result = _spawn(directory)
+        result["dir"] = str(directory.relative_to(self.run_dir))
+        (directory / RESULT_FILE).write_text(
+            json.dumps(result, indent=1) + "\n"
+        )
+        if result["status"] == FAIL:
+            repro = _repro(
+                directory, self.args.out_root, seed_mode, result["seed"]
+            )
+            (directory / REPRO_FILE).write_text(repro + "\n")
+        elif not (
+            self.args.keep_passing
+            or self.args.seed is not None
+            or self.args.replay
+        ):
+            shutil.rmtree(directory, ignore_errors=True)
+        return result
+
+    def _prepare(self, chosen: scenario.Scenario, name: str) -> pathlib.Path:
+        directory = self.run_dir / name
+        scenario.save(chosen, directory)
+        return directory
+
+    def run_seeds(self, seeds) -> list[dict]:
+        started = time.monotonic()
+        futures = []
+        for seed in seeds:
+            if (
+                self.args.budget_s
+                and time.monotonic() - started > self.args.budget_s
+            ):
+                break
+            futures.append(self.pool.submit(self._seed, seed))
+            while sum(not f.done() for f in futures) >= self.args.jobs:
+                time.sleep(0.2)
+        return [future.result() for future in futures]
+
+    def _seed(self, seed: int) -> dict:
+        directory = self._prepare(scenario.generate(seed), f"seed-{seed}")
+        result = self.evaluate(directory, seed_mode=True)
+        print(_line(result), flush=True)
+        return result
+
+    def replay(self, source: pathlib.Path) -> dict:
+        chosen = scenario.load(source)
+        directory = self._prepare(chosen, f"replay-{chosen.seed}")
+        result = self.evaluate(directory, seed_mode=False)
+        print(_line(result), flush=True)
+        return result
+
+    def minimize(self, result: dict) -> dict:
+        source = result["dir"]
+        original = scenario.load(self.run_dir / source)
+        counter = iter(range(1_000_000))
+
+        def reproduces(options) -> list[bool]:
+            dirs = [
+                self._prepare(o, f"{source}/try-{next(counter)}")
+                for o in options
+            ]
+            outcomes = list(
+                self.pool.map(lambda d: self.evaluate(d, seed_mode=False), dirs)
+            )
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            return [_same_failure(result, outcome) for outcome in outcomes]
+
+        smallest = minimize.minimize(original, reproduces, self.args.jobs)
+        target = self._prepare(smallest, f"{source}/{MINIMIZED_DIR}")
+        final = self.evaluate(target, seed_mode=False)
+        print(f"minimized {source}: {_line(final)}", flush=True)
+        return final
+
+
+def _same_failure(reference: dict, outcome: dict) -> bool:
+    """The same check; for a panic, fatal event or MCU shutdown also the
+    same message, so the minimizer cannot slide onto another root cause."""
+    if outcome["status"] != FAIL or outcome["check"] != reference["check"]:
+        return False
+    if Check(reference["check"]) in ROOT_CAUSES:
+        return outcome["signature"] == reference["signature"]
+    return True
+
+
+def _summary(results: list[dict], wall_s: float) -> str:
+    failures = [r for r in results if r["status"] == FAIL]
+    by_signature = collections.defaultdict(list)
+    for result in failures:
+        by_signature[result["signature"]].append(result["seed"])
+    real = [r["real_s"] for r in results]
+    lines = [
+        f"{len(results)} scenarios: {len(results) - len(failures)} pass, {len(failures)} fail",
+        f"real s per scenario: median {statistics.median(real):.1f}, "
+        f"p90 {sorted(real)[int(0.9 * (len(real) - 1))]:.1f}; wall {wall_s:.0f} s, "
+        f"{3600 * len(results) / max(wall_s, 1e-9):.0f} scenarios/hour",
+    ]
+    for signature, seeds in sorted(
+        by_signature.items(), key=lambda kv: -len(kv[1])
+    ):
+        lines.append(f"  {len(seeds):4d}  {signature}  seeds {seeds[:12]}")
+    return "\n".join(lines)
+
+
+def main(argv=None) -> int:
+    args = _parse(argv)
+    if args.worker:
+        result = run_worker(args.worker)
+        (args.worker / RESULT_FILE).write_text(
+            json.dumps(result, indent=1) + "\n"
+        )
+        return 0
+    runner = Runner(args)
+    started = time.monotonic()
+    if args.replay:
+        results = [runner.replay(args.replay)]
+    else:
+        seeds = [args.seed] if args.seed is not None else args.seeds
+        results = runner.run_seeds(seeds)
+    if args.minimize:
+        for result in [r for r in results if r["status"] == FAIL]:
+            runner.minimize(result)
+    summary = _summary(results, time.monotonic() - started)
+    (runner.run_dir / "summary.txt").write_text(summary + "\n")
+    (runner.run_dir / "results.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in results)
+    )
+    print(summary)
+    print(f"results: {runner.run_dir}")
+    return 1 if any(r["status"] == FAIL for r in results) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

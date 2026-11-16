@@ -18,6 +18,9 @@ tools/sim/run.sh serve              # long-lived printer for Moonraker
 tools/sim/run.sh shell              # poke around inside the image
 tools/sim/run.sh test --branch X    # any mode for another branch; the mode comes first
 SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
+tools/sim/run.sh fuzz --seeds 1..500 --minimize   # scenario fuzzer (below)
+tools/sim/run.sh fuzz --seed 1234                  # replay one seed
+tools/sim/run.sh fuzz --replay .sim-fuzz/<run>/seed-1234/minimized
 ```
 
 ## Layout
@@ -33,6 +36,7 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
 | `preload/` | libvtime + libsim_intercept LD_PRELOAD shims |
 | `configs/` | MACH_LINUX firmware build configs (CONFIG_MCU_SIM=y) |
 | `fetch_plugins.sh` | Pins the dderg/beacon_klipper `motion-stack-rename` fork |
+| `fuzz.py`, `fuzzing/` | Seeded scenario fuzzer: printer, print program and user-action timeline from one seed |
 
 ## How the pieces fit
 
@@ -191,6 +195,28 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
   (`test_print_pressure.py`) instead runs free at its speed whether or not
   klippy keeps up — the throughput gate for a host that must keep pace
   with real time.
+
+## Scenario fuzzer
+
+`fuzz.py` draws a scenario from one integer seed (`fuzzing/scenario.py`):
+a printer from the `configs.py` bases with its limits, per-axis shapers,
+extruder chain, bed mesh, heaters, macros and idle timeout
+(`fuzzing/printer.py`); one or two print programs composed of segments
+(slices of `gcode/voron_*.gcode`, perimeters, infill, strokes, tiny
+segments, zigzags, travel, Z, limit changes, extrude-only, retracts,
+rests, G92, relative/absolute E, step-lattice coordinates;
+`fuzzing/program.py`); and a timeline of user actions at print-time marks
+(`fuzzing/timeline.py`). `fuzzing/driver.py` runs it on a fresh world and
+raises the first violated invariant (`fuzzing/checks.py` names each and
+where its threshold comes from). Rest probes in the print file (M400, a
+mark pin, a dwell) let a paced wait read every motor's step counter at
+each rest. Worlds run 8 at a time (`--jobs`, `SIM_FUZZ_JOBS`); a failure
+keeps `.sim-fuzz/<run>/seed-N/` with the scenario (`scenario.json`,
+`timeline.txt`, rendered `printer.cfg` and `print_*.gcode`), the world's
+logs, `result.json` and `repro.txt`; `--minimize` shrinks it into
+`minimized/` while the same check still fails. `test_fuzz_smoke.py` runs
+a fixed seed set in the e2e suite; `./scripts/ci.sh sim-fuzz` runs fresh
+seeds.
 
 ## CI
 

@@ -16,6 +16,9 @@
 #   ./run.sh --no-cache               # force a full rebuild
 #   ./run.sh --privileged             # SCHED_FIFO for jitter-sensitive runs
 #   SIM_JITTER=3 ./run.sh test        # share a cpuset with 3 bursty CPU burners
+#   ./run.sh fuzz --seeds 1..500      # seeded scenario fuzzer; results in .sim-fuzz/
+#   ./run.sh fuzz --seed 1234         # replay one seed
+#   ./run.sh fuzz --replay DIR        # replay a saved (e.g. minimized) scenario
 
 set -euo pipefail
 
@@ -75,7 +78,7 @@ KEEP_LOGS=""
 VERBOSE=""
 
 case "${1:-}" in
-    test|serve|shell|save-image)
+    test|serve|shell|save-image|fuzz)
         MODE="$1"
         shift
         ;;
@@ -83,6 +86,10 @@ esac
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --replay)
+            EXTRA_ARGS+=("$1" "$(realpath "$2")")
+            shift 2
+            ;;
         --branch|-b)
             BRANCH="$2"
             shift 2
@@ -252,6 +259,24 @@ case "$MODE" in
         if [[ -n "$KEEP_LOGS" && "$(id -u)" != 0 ]]; then
             docker run --rm -v "$KEEP_LOGS:/sim-logs" --entrypoint chown \
                 "$IMAGE_TAG" -R "$(id -u):$(id -g)" /sim-logs >/dev/null 2>&1 || true
+        fi
+        exit "$rc"
+        ;;
+    fuzz)
+        # Worlds run in the container's /tmp (unix socket paths must stay
+        # short); failures, minimized scenarios and summaries land in
+        # .sim-fuzz/, mounted at its host path so repro paths read the same
+        # on both sides.
+        FUZZ_ROOT="$REPO_ROOT/.sim-fuzz"
+        mkdir -p "$FUZZ_ROOT"
+        [[ -n "${SIM_FUZZ_JOBS:-}" ]] && DOCKER_ARGS+=(-e SIM_FUZZ_JOBS)
+        rc=0
+        docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} -v "$FUZZ_ROOT:$FUZZ_ROOT" \
+            --entrypoint python3 "$IMAGE_TAG" tools/sim/fuzz.py --out-root "$FUZZ_ROOT" \
+            ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || rc=$?
+        if [[ "$(id -u)" != 0 ]]; then
+            docker run --rm -v "$FUZZ_ROOT:$FUZZ_ROOT" --entrypoint chown \
+                "$IMAGE_TAG" -R "$(id -u):$(id -g)" "$FUZZ_ROOT" >/dev/null 2>&1 || true
         fi
         exit "$rc"
         ;;
