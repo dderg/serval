@@ -1,0 +1,159 @@
+{
+ "run_dir": "/home/dderg/bench/runs/reactor-drain/20261116-013615-firmware_restart",
+ "head": "cf06ef6b3041473c6ce46e69d01f46660329aada",
+ "scenario": "firmware_restart",
+ "window": [
+  1794789378.6372,
+  1794789421.687
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794789379.6376214,
+   "returned": 1794789379.6376214,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "firmware_restart",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794789400.157403,
+   "returned": 1794789404.4550605,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794789379.6777,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794789404.4551,
+   "klippy": "unreachable HTTPError",
+   "klippy_message": "",
+   "print": null,
+   "print_message": null
+  },
+  {
+   "t": 1794789413.8503,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "standby",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794789419.1433554,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794789421.404797,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "standby",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794789392.337,
+   1794789404.4324,
+   112529
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794789379.677,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794789379",
+   "file": "bench_20261116-013615-firmware_restart.gcode"
+  },
+  {
+   "t": 1794789379.677,
+   "event": "pacer_reserve_raised",
+   "latency_s": 5.1037e-05,
+   "level": "info",
+   "print_id": "print-1794789379",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794789404.431,
+   "event": "mcu_reset",
+   "level": "info",
+   "mcu": "mcu"
+  },
+  {
+   "t": 1794789405.584,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794789379",
+   "outcome": "reset",
+   "reason": "",
+   "duration_s": 0.0,
+   "filament_mm": 0.0
+  },
+  {
+   "t": 1794789419.504,
+   "event": "pacer_reserve_raised",
+   "latency_s": 5.5444e-05,
+   "level": "info",
+   "print_id": "",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794789420.363,
+   "event": "pacer_reserve_raised",
+   "latency_s": 0.011904116,
+   "level": "info",
+   "print_id": "",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  }
+ ],
+ "journal": []
+}

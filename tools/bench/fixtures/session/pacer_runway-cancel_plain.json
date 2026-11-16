@@ -1,0 +1,126 @@
+{
+ "run_dir": "/home/dderg/bench/runs/sweep-pacer-runway-2/20261116-010131-cancel_plain",
+ "head": "0bae8f1a04e774fb37e5c71009c2f8b153445501",
+ "scenario": "cancel_plain",
+ "window": [
+  1794787294.7519,
+  1794787323.5224
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794787295.752178,
+   "returned": 1794787295.752178,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "cancel",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794787315.8137999,
+   "returned": 1794787316.2826297,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794787295.7765,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794787316.2826,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794787321.7725332,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794787323.3477154,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794787309.427,
+   1794787320.4827,
+   104579
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794787295.777,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794787295",
+   "file": "bench_20261116-010131-cancel_plain.gcode"
+  },
+  {
+   "t": 1794787316.28,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794787295"
+  },
+  {
+   "t": 1794787316.28,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794787295",
+   "outcome": "cancelled",
+   "reason": "",
+   "duration_s": 20.50293295099982,
+   "filament_mm": 18.186369999999997
+  }
+ ],
+ "journal": []
+}

@@ -15,7 +15,7 @@ A Pi 5 runs klippy against an STM32F401 printer MCU; an F407 board on this box r
   uv run python tools/bench/lock.py hold -- bash my_session.sh
   ```
 
-  Children inherit `BENCH_LOCK_TOKEN` and re-enter the lock; anything else waits. Never kill another holder.
+  Children inherit `BENCH_LOCK_TOKEN` and re-enter the lock; anything else waits. They also inherit the locked file description, so the lock outlives a killed holder until its last child exits. `~/bench/.lock` names the holder (pid, command, cwd, worktree, start). A run whose deploy record changed under it fails, and the suite aborts when the Pi no longer runs the tree it synced. Never kill another holder.
 - **Always `sync` first.** The Pi runs whatever was last synced; `run.json` → `deployed` (HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree) says which code a run tested. Another agent's uncommitted edits in your worktree ship with `sync`. To test a clean ref: `git worktree add /tmp/x <ref>` then `deploy.py sync --tree /tmp/x`.
 - Offline-only work needs no lock. Fail loudly: don't patch production code from the bench to make a run pass.
 
@@ -23,10 +23,13 @@ A Pi 5 runs klippy against an STM32F401 printer MCU; an F407 board on this box r
 
 ```bash
 uv run python tools/bench/suite.py --quick      # first_layers, speed_ladder, epochs (~6 min)
-uv run python tools/bench/suite.py              # full matrix incl. dense_top and a throttled-host row
+uv run python tools/bench/suite.py              # full matrix incl. dense_top and a throttled-host row, then the session rows
+uv run python tools/bench/suite.py --group session [--tree DIR]   # 12 one-klippy-session rows: bed mesh, print twice, pause/cancel/restart/e-stop latency, reactor stalls, e-stop recovery
 ```
 
-Takes the lock once, syncs, runs + analyzes each row, prints a table, writes `~/bench/suites/<ts>/summary.json` (per row: print state/error, analyzer ok + failed checks, stalls, abs_max per motor, deployed identity, run dir) and exits non-zero if any row fails. `--expect-fail <row>` is the only way to tolerate a known failure; there is no built-in allowlist.
+Takes the lock once, syncs (`--tree DIR`: that worktree), runs + judges each row, prints a table, writes `~/bench/suites/<ts>/summary.json` (per row: print state/error, analyzer ok + failed checks, stalls, abs_max per motor, deployed identity, run dir) and exits non-zero if any row fails. `--expect-fail <row>` is the only way to tolerate a known failure; there is no built-in allowlist.
+
+Session rows (`session_scenarios.py`, README "Session rows") keep one klippy session through a timeline of actions; `session.py <scenario>` runs one, `session_check.py <run_dir>` judges it (actions, print outcomes, journal aborts, shutdowns, `reactor_poller_late`, mid-print gaps, post-check moves, plus per-row stop latency, second-print duration and pacer reserve, each bound naming its issue). Failed checks carry their reason in `failed_checks`. Session rows are never analyzed (mesh, interruptions or several prints).
 
 ## Loop
 

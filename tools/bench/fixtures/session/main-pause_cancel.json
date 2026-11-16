@@ -1,0 +1,157 @@
+{
+ "run_dir": "/home/dderg/bench/runs/sweep-interrupt/20261115-210802-pause_cancel",
+ "head": "0b90eeaf39191ef3a83d4c2f78ddb53883d6e2ae",
+ "scenario": "pause_cancel",
+ "window": [
+  1794773286.4596,
+  1794773338.0438
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794773287.459893,
+   "returned": 1794773287.459893,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "pause",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794773307.485449,
+   "returned": 1794773307.6079588,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "cancel",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794773315.5464225,
+   "returned": 1794773315.555961,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794773287.5856,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794773307.608,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "paused",
+   "print_message": ""
+  },
+  {
+   "t": 1794773315.556,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794773321.027138,
+  "lines": [
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794773337.9563737,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794773302.1448,
+   1794773320.7572,
+   161539
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794773287.587,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794773287",
+   "file": "bench_20261115-210802-pause_cancel.gcode"
+  },
+  {
+   "t": 1794773287.588,
+   "event": "pacer_reserve_raised",
+   "latency_s": 0.000123036,
+   "level": "info",
+   "print_id": "print-1794773287",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773307.603,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794773287"
+  },
+  {
+   "t": 1794773315.557,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794773287",
+   "outcome": "cancelled",
+   "reason": "",
+   "duration_s": 27.97021131600195,
+   "filament_mm": 66.42654000000005
+  },
+  {
+   "t": 1794773321.315,
+   "event": "pacer_reserve_raised",
+   "latency_s": 0.04318643,
+   "level": "info",
+   "print_id": "",
+   "reserve_s": 3.4103323319999994,
+   "source": "host-rust"
+  }
+ ],
+ "journal": [],
+ "fixture_note": "the source run fetched no journal; its journal list is empty, not clean"
+}

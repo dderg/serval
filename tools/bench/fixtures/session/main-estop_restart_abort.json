@@ -1,0 +1,204 @@
+{
+ "run_dir": "/home/dderg/bench/runs/reactor-drain-ab/20261115-234714-estop",
+ "head": "0b90eeaf39191ef3a83d4c2f78ddb53883d6e2ae",
+ "scenario": "estop",
+ "window": [
+  1794782838.5949,
+  1794782870.1868
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794782839.596896,
+   "returned": 1794782839.596896,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "emergency_stop",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794782859.6284769,
+   "returned": 1794782859.6412458,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "firmware_restart",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794782864.895141,
+   "returned": 1794782866.9126923,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794782839.6128,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794782859.6412,
+   "klippy": "shutdown",
+   "klippy_message": "Shutdown due to webhooks request",
+   "print": "error",
+   "print_message": "motion pipe space: shutdown while waiting on the motion engine"
+  },
+  {
+   "t": 1794782867.1653,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "standby",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794782867.16635,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": false,
+    "error": "HTTP 503: {\"error\":{\"code\":503,\"message\":\"Klippy Disconnected\",\"traceback\":\"Traceback (most recent call last):\\n\\n  File \\\"/home/pi/moonraker/moonraker/components/application.py\\\", line 714, in _process_http_request\\n    result = await self.api_defintion.request(\\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n        args, req_type, transport, ip, self.current_user\\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": false,
+    "error": "HTTP 503: {\"error\":{\"code\":503,\"message\":\"Klippy Host not connected\",\"traceback\":\"Traceback (most recent call last):\\n\\n  File \\\"/home/pi/moonraker/moonraker/components/application.py\\\", line 714, in _process_http_request\\n    result = await self.api_defintion.request(\\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n        args, req_type, transport, ip, self.current_user\\n        ^^^^^^^^^^^^^^^^^^^^^^^^^"
+   },
+   {
+    "line": "M400",
+    "ok": false,
+    "error": "HTTP 503: {\"error\":{\"code\":503,\"message\":\"Klippy Host not connected\",\"traceback\":\"Traceback (most recent call last):\\n\\n  File \\\"/home/pi/moonraker/moonraker/components/application.py\\\", line 714, in _process_http_request\\n    result = await self.api_defintion.request(\\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n        args, req_type, transport, ip, self.current_user\\n        ^^^^^^^^^^^^^^^^^^^^^^^^^"
+   }
+  ],
+  "after": {
+   "t": 1794782870.17687,
+   "klippy": "unreachable HTTPError",
+   "klippy_message": "",
+   "print": null,
+   "print_message": null,
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794782852.3817,
+   1794782859.6408,
+   70188
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794782839.611,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794782839",
+   "file": "bench_20261115-234714-estop.gcode"
+  },
+  {
+   "t": 1794782839.612,
+   "event": "pacer_reserve_raised",
+   "latency_s": 4.8963e-05,
+   "level": "info",
+   "print_id": "print-1794782839",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794782859.639,
+   "event": "klippy_shutdown",
+   "level": "error",
+   "reason": "Shutdown due to webhooks request"
+  },
+  {
+   "t": 1794782859.642,
+   "event": "mcu_shutdown",
+   "level": "info",
+   "mcu": "mcu",
+   "reason": "Command request"
+  },
+  {
+   "t": 1794782859.747,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794782839",
+   "outcome": "error",
+   "reason": "motion pipe space: shutdown while waiting on the motion engine",
+   "duration_s": 20.13520476600388,
+   "filament_mm": 70.43844000000006
+  },
+  {
+   "t": 1794782865.039,
+   "event": "endpoint_death",
+   "fault_code": -203,
+   "level": "error",
+   "mcu_id": 0,
+   "print_id": "",
+   "reason": "stepcompress mcu 0: barrier deadline of 5.000 s of mcu clock expired \u2014 [oid=3 seq=949087710 sent but unacked for 5.005 s]; received acks: [oid 0 acked 949087709, oid 1 acked 949087709, oid 2 acked 949087709, oid 3 acked 949087709]. 0 frames backlogged, 60 move slots in flight of 1008. The retirement cohort, every cut awaiting reconciliation, and every drain behind them cannot be released. link: last inbound 3 ms ago, 0 unacked frames, front frame retransmitted 0x",
+   "source": "host-rust"
+  },
+  {
+   "t": 1794782865.131,
+   "event": "pacer_reserve_raised",
+   "latency_s": 0.081038809,
+   "level": "info",
+   "print_id": "",
+   "reserve_s": 33.55168517,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794782865.152,
+   "event": "mcu_reset",
+   "level": "info",
+   "mcu": "mcu"
+  },
+  {
+   "t": 1794782867.186,
+   "event": "pacer_reserve_raised",
+   "latency_s": 3.4574e-05,
+   "level": "info",
+   "print_id": "",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794782870.04,
+   "event": "endpoint_death_watchdog_abort",
+   "grace_secs": 5,
+   "level": "error",
+   "mcu_id": 0,
+   "print_id": "",
+   "source": "host-rust"
+  }
+ ],
+ "journal": [
+  "Nov 15 23:47:50 bench-pi systemd[1]: klipper.service: Main process exited, code=killed, status=6/ABRT",
+  "Nov 15 23:47:50 bench-pi systemd[1]: klipper.service: Failed with result 'signal'."
+ ]
+}
