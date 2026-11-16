@@ -394,7 +394,8 @@ impl PyMotionEngine {
                 None,
                 Box::new(move |_| {
                     if !reported.swap(true, Ordering::AcqRel) {
-                        let _ = pump_control.send(motion_core::pump::PumpMsg::McuShutdown { mcu_id });
+                        let _ =
+                            pump_control.send(motion_core::pump::PumpMsg::McuShutdown { mcu_id });
                     }
                 }),
             )
