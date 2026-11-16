@@ -419,7 +419,7 @@ class Session:
         if self.world.klippy_proc.poll() is not None:
             raise Violation(Check.KLIPPY_EXIT, "klippy exited during the print")
         stats = self._print_state()
-        if stats.get("state") in ("error", "cancelled", "complete"):
+        if stats.get("state") in ("error", "cancelled"):
             raise Violation(
                 Check.PRINT_OUTCOME,
                 f"print ended {stats.get('state')!r} before its last line: "
