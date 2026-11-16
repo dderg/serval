@@ -8,6 +8,10 @@ use super::{
 };
 use motion_core::lock_ext::LockExt;
 use motion_pipeline::live_config::step_capacity::StepCapacityInput;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+const MCU_SHUTDOWN_FRAMES: [&str; 2] = ["shutdown", "is_shutdown"];
+
 fn escalate_endpoint_death(latch: &Arc<EndpointDeathLatch>, mcu_id: u32, reason: &str) {
     if report_endpoint_death(latch, mcu_id, reason) {
         arm_endpoint_death_watchdog(Arc::clone(latch), mcu_id);
@@ -231,6 +235,7 @@ impl PyMotionEngine {
                     cfg.mcu_id
                 ))
             })?;
+            self.register_mcu_shutdown_interceptor(io, cfg.mcu_id, pump_control)?;
             let measured_freq = clock_of(cfg.mcu_id).map(|(_, f)| f).ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
                     "init_planner: mcu {} has no clock estimate; a lane's spans must use the \
@@ -369,6 +374,35 @@ impl PyMotionEngine {
             transports,
             detached: None,
         })
+    }
+
+    /// Tell the pump, once, that this mcu reported shutdown: from then on it
+    /// drops every command and acks no barrier, so streaming to it stops
+    /// instead of timing its silence out as a dead endpoint.
+    fn register_mcu_shutdown_interceptor(
+        &self,
+        io: &Arc<McuHostIo>,
+        mcu_id: u32,
+        pump_control: &crossbeam_channel::Sender<motion_core::pump::PumpMsg>,
+    ) -> PyResult<()> {
+        let reported = Arc::new(AtomicBool::new(false));
+        for frame in MCU_SHUTDOWN_FRAMES {
+            let reported = Arc::clone(&reported);
+            let pump_control = pump_control.clone();
+            io.register_frame_interceptor(
+                frame,
+                None,
+                Box::new(move |_| {
+                    if !reported.swap(true, Ordering::AcqRel) {
+                        let _ = pump_control.send(motion_core::pump::PumpMsg::McuShutdown { mcu_id });
+                    }
+                }),
+            )
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!("mcu {mcu_id}: cannot intercept {frame}: {e:?}"))
+            })?;
+        }
+        Ok(())
     }
 
     /// Route an endpoint's barrier receipt back to the pump. Both serial
@@ -531,7 +565,6 @@ impl PyMotionEngine {
         let handle = std::thread::Builder::new()
             .name("live-position-poll".into())
             .spawn(move || {
-                use std::sync::atomic::Ordering;
                 let period = std::time::Duration::from_millis(200);
                 let timeout = std::time::Duration::from_millis(250);
                 const WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
