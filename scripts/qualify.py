@@ -11,23 +11,33 @@ latest qualified-* tag, not from main.
 
 `run` checks REV (default origin/main) out clean in the scratch tree
 RUN_TREE (cargo target pending_baselines.target_dir_for(RUN_TREE)), builds
-its engine, takes the bench lock once for everything after, and runs STAGES
-in order, stopping at the first that fails:
-- deploy: deploy.py sync and ensure-target; the F401 must report REV's
-  firmware build id (flashed through flash-target when it did not);
-- suite: the full suite.py; a row may fail only through --expect-fail
+its engine and runs its units in order, stopping at the first that fails.
+`run` never holds the bench lock: each unit's tool takes its own holds of
+at most lock.MAX_HOLD_S, each restoring the bench it starts from:
+- deploy: deploy.py build-target without the lock, then one hold
+  (`qualify.py deploy`) of deploy.py settle, sync and ensure-target; the
+  F401 must report REV's firmware build id and the deploy record name it;
+- suite-<k>: suite.py --row ... for each hold tools/bench/hold_plan.py
+  plans over the full suite; a row may fail only through --expect-fail
   ROW=ISSUE, recorded with its issue;
-- soak: suite.py --group soak;
-- pi: throughput_pi.py on REV's tree, judged by
-  `throughput_gate.py --qualify pi-window`; its timing (sync, build on the
-  Pi, every replay) goes into the record;
+- soak-<row>: suite.py --row ROW for each soak row;
+- pi: throughput_pi.py on REV's tree, judged without the lock by
+  `throughput_gate.py --qualify pi-window`;
 - calibration: `throughput_gate.py --qualify calibration`; a stale one is
   re-measured by throughput_recheck.py, judged again and committed on a
   local branch for a normal PR (qualification never pushes commits).
-A pass pushes an annotated tag on REV whose message is the JSON summary
-(parse_message reads it back); the record lives in QUALIFICATIONS/<tag>/.
-A failure tags nothing and prints the failed stage, its rows and the bisect
-command per failed row.
+Every unit leaves QUALIFICATIONS/<rev>/units/<unit>.json (its key, verdict,
+times, holds, facts) and <unit>.log. The key is REV, the F401 target build
+id, the unit's rows and their --expect-fail issues, and the sha256 of the
+Pi identity read over ssh without the lock (serial, model, kernel, OS, Pi
+firmware, dpkg status, boot config, rustc, klippy's python, the capture
+board build). A rerun of `run REV` skips a unit that passed with the same
+key within QUALIFY_WINDOW_S, so a lost hold costs only its unit, and
+rewrites QUALIFICATIONS/<rev>/qualification.json. When every unit passed
+with the current key within the window, an annotated tag on REV carries the
+JSON summary (parse_message reads it back): the units with their holds, the
+bench seconds and the Pi identity. A failure tags nothing and prints the
+failed unit, its rows and the bisect command per failed row.
 
 `status` prints the last qualified tag and the qualification debt: the
 first-parent merges on origin/main since it, and how many touch each of
@@ -36,9 +46,10 @@ landing.
 
 `bisect` searches the first-parent merges after the last qualified tag (or
 --good) up to --bad (default origin/main) for the first on which one suite
-row fails, in one lock hold: the row as --bad defines it runs from RUN_TREE
-through `suite.py --row NAME --tree CANDIDATE_TREE`, the candidate checked
-out clean, its engine built and synced the way ab.py deploys a ref.
+row fails: per candidate, the row as --bad defines it runs from RUN_TREE
+through `suite.py --row NAME --tree CANDIDATE_TREE` in a hold suite.py
+takes, the candidate checked out clean, its engine built and synced the way
+ab.py deploys a ref.
 """
 
 from __future__ import annotations
@@ -46,6 +57,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import enum
+import hashlib
 import importlib
 import itertools
 import json
@@ -74,21 +86,44 @@ CANDIDATE_TREE = SCRATCH / "candidate"
 TARGET_PURPOSE = "qualify"
 LOCK_NAME = "qualify"
 LOCK_TIMEOUT_S = 14400
+QUALIFY_WINDOW_S = 24 * 60 * 60
+SETTLE_WORST_S = 2 * 60
+SYNC_AND_PI_BUILD_WORST_S = 8 * 60
+F401_REFLASH_S = 3 * 60
+DEPLOY_HOLD_S = SETTLE_WORST_S + SYNC_AND_PI_BUILD_WORST_S + F401_REFLASH_S
 RUN_COMMAND = "uv run python scripts/qualify.py run"
 BENCH = Path("tools") / "bench"
 F401_CONFIG = BENCH / "f401.config"
 PI_WINDOW = BENCH / "pi_window.json"
 BASELINE = BENCH / "throughput_baseline.json"
 UV_PYTHON = ("uv", "run", "python")
+DEPLOY_TOOL = (*UV_PYTHON, str(BENCH / "deploy.py"))
 ENGINE_BUILD = ("make", "-f", "Makefile.rust", "motion-engine-fast")
 GATE = ("python3", "scripts/throughput_gate.py", "--qualify")
-SOAK_SCOPE = ("--group", "soak")
 SUMMARY_LINE = re.compile(r"^summary: (\S+summary\.json)$", re.M)
+SETTLED_LINE = "settled: "
 FAIL_LINE = "FAIL: "
 PR_MERGE = re.compile(r"^Merge pull request #(\d+)")
 EXPECT_FAIL = re.compile(r"^(?P<row>\w+)=#?(?P<issue>\d+)$")
 RECORD_FILE = "qualification.json"
+UNITS_DIR = "units"
+DEPLOY = "deploy"
+DEPLOY_HANDOFF = "deploy-hold.json"
 FIELD_SEP, RECORD_SEP = "\x1f", "\x1e"
+PI_FACTS = {
+    "serial": "tr -d '\\0' < /proc/device-tree/serial-number",
+    "model": "tr -d '\\0' < /proc/device-tree/model",
+    "kernel": "uname -r",
+    "os": '. /etc/os-release && echo "$PRETTY_NAME"',
+    "pi_firmware": "vcgencmd version",
+    "rust_toolchains": ". ~/.cargo/env && rustup toolchain list",
+    "klippy_python": "~/klippy-env/bin/python -V",
+}
+PI_FILES = {
+    "dpkg_status": "/var/lib/dpkg/status",
+    "config_txt": "/boot/firmware/config.txt",
+    "cmdline_txt": "/boot/firmware/cmdline.txt",
+}
 
 
 class QualifyError(RuntimeError):
@@ -294,6 +329,12 @@ class Outcome:
     passed: bool
     facts: dict = field(default_factory=dict)
     failures: tuple[str, ...] = ()
+    holds: tuple[dict, ...] = ()
+
+
+def identity_sha256(identity: dict) -> str:
+    canonical = json.dumps(identity, sort_keys=True).encode()
+    return hashlib.sha256(canonical).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -302,40 +343,201 @@ class Context:
     tree: Path
     record: Path
     expected: dict[str, int]
-    soak_rows: frozenset[str]
+    target_id: str
+    identity: dict
+
+    def key(self, unit: Unit) -> dict:
+        return {
+            "rev": self.rev,
+            "target_build_id": self.target_id,
+            "rows": list(unit.rows),
+            "expect_fail": {
+                row: self.expected[row]
+                for row in sorted(unit.rows)
+                if row in self.expected
+            },
+            "pi_identity_sha256": identity_sha256(self.identity),
+        }
 
 
 @dataclass(frozen=True)
-class Stage:
+class Unit:
     name: str
-    run: Callable[[Context], Outcome]
+    run: Callable[[Context, Unit], Outcome]
+    rows: tuple[str, ...] = ()
+    detail: Detail = Detail.TALLIES
 
 
-def run_stages(stages: list[Stage], context: Context) -> list[dict]:
-    done = []
-    for stage in stages:
-        print(f"qualify: stage {stage.name}", flush=True)
-        started = time.monotonic()
-        try:
-            outcome = stage.run(context)
-        except QualifyError as exc:
-            outcome = Outcome(False, failures=(str(exc),))
-        done.append(
-            {
-                "stage": stage.name,
-                "seconds": round(time.monotonic() - started),
-                "passed": outcome.passed,
-                "failures": list(outcome.failures),
-                **outcome.facts,
-            }
+def utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def iso(moment: datetime.datetime) -> str:
+    return moment.isoformat(timespec="seconds")
+
+
+def hours(seconds: float) -> str:
+    return f"{seconds / 3600:.1f} h"
+
+
+def unit_path(record: Path, name: str) -> Path:
+    return record / UNITS_DIR / f"{name}.json"
+
+
+def recorded(record: Path, name: str) -> dict | None:
+    path = unit_path(record, name)
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def age_s(entry: dict, now: datetime.datetime) -> float:
+    finished = datetime.datetime.fromisoformat(entry["finished"])
+    return (now - finished).total_seconds()
+
+
+def changed_basis(entry: dict, key: dict, identity: dict) -> list[str]:
+    changed = [name for name in key if entry["key"].get(name) != key[name]]
+    if "pi_identity_sha256" in changed:
+        before = entry["pi_identity"]
+        changed += [
+            f"pi {name}"
+            for name in identity
+            if before.get(name) != identity[name]
+        ]
+    return changed
+
+
+def stale_reason(
+    entry: dict | None, key: dict, identity: dict, now: datetime.datetime
+) -> str | None:
+    if entry is None:
+        return "no record"
+    if not entry["passed"]:
+        return f"failed at {entry['finished']}"
+    changed = changed_basis(entry, key, identity)
+    if changed:
+        since = f"since it passed at {entry['finished']}"
+        return f"{', '.join(changed)} changed {since}"
+    if age_s(entry, now) > QUALIFY_WINDOW_S:
+        return (
+            f"passed {hours(age_s(entry, now))} ago, past the "
+            f"{hours(QUALIFY_WINDOW_S)} window"
         )
-        if not outcome.passed:
+    return None
+
+
+def still_valid(entry: dict, now: datetime.datetime) -> str:
+    return (
+        f"passed at {entry['finished']}, {hours(age_s(entry, now))} ago "
+        f"(window {hours(QUALIFY_WINDOW_S)}), with the same rev, F401 build, "
+        "rows, expect-fail issues and Pi identity"
+    )
+
+
+def executed(unit: Unit, context: Context) -> dict:
+    started = utc_now()
+    try:
+        outcome = unit.run(context, unit)
+    except QualifyError as exc:
+        outcome = Outcome(False, failures=(str(exc),))
+    finished = utc_now()
+    return {
+        "unit": unit.name,
+        "key": context.key(unit),
+        "pi_identity": context.identity,
+        "passed": outcome.passed,
+        "started": iso(started),
+        "finished": iso(finished),
+        "seconds": round((finished - started).total_seconds()),
+        "holds": list(outcome.holds),
+        "facts": outcome.facts,
+        "failures": list(outcome.failures),
+    }
+
+
+def run_units(
+    units: list[Unit], context: Context, drift: dict[str, str]
+) -> list[dict]:
+    done = []
+    for unit in units:
+        entry = recorded(context.record, unit.name)
+        now = utc_now()
+        key = context.key(unit)
+        reason = stale_reason(entry, key, context.identity, now)
+        reason = reason or drift.get(unit.name)
+        if reason is None:
+            print(f"qualify: skip {unit.name}: {still_valid(entry, now)}")
+            done.append(entry)
+            continue
+        print(f"qualify: unit {unit.name} ({reason})", flush=True)
+        entry = executed(unit, context)
+        write_json(unit_path(context.record, unit.name), entry)
+        done.append(entry)
+        if not entry["passed"]:
             break
     return done
 
 
+def unpublishable(
+    units: list[Unit], context: Context, now: datetime.datetime
+) -> list[str]:
+    reasons = []
+    for unit in units:
+        entry = recorded(context.record, unit.name)
+        key = context.key(unit)
+        reason = stale_reason(entry, key, context.identity, now)
+        if reason is not None:
+            reasons.append(f"{unit.name}: {reason}")
+    return reasons
+
+
+def published(entry: dict) -> dict:
+    return {
+        name: value
+        for name, value in entry.items()
+        if name not in ("key", "pi_identity")
+    }
+
+
+def summarized(units: list[Unit], context: Context, subject: str) -> dict:
+    entries = [
+        recorded(context.record, unit.name)
+        or {"unit": unit.name, "missing": True, "holds": []}
+        for unit in units
+    ]
+    holds = [hold for entry in entries for hold in entry["holds"]]
+    acquired = [hold for hold in holds if hold["wait_s"] is not None]
+    return {
+        "rev": context.rev,
+        "subject": subject,
+        "record": str(context.record),
+        "updated": iso(utc_now()),
+        "target_build_id": context.target_id,
+        "expect_fail": [
+            {"row": row, "issue": issue}
+            for row, issue in context.expected.items()
+        ],
+        "pi_identity": context.identity,
+        "pi_identity_sha256": identity_sha256(context.identity),
+        "bench_s": round(sum(hold["held_s"] for hold in holds), 1),
+        "lock_wait_s": round(sum(hold["wait_s"] for hold in acquired), 1),
+        "units": [published(entry) for entry in entries],
+    }
+
+
 def bench(tree: Path, name: str) -> ModuleType:
     path = str(tree / BENCH)
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    return importlib.import_module(name)
+
+
+def tree_script(tree: Path, name: str) -> ModuleType:
+    path = str(tree / "scripts")
     if path not in sys.path:
         sys.path.insert(0, path)
     return importlib.import_module(name)
@@ -375,22 +577,132 @@ def tool(context: Context, log: str, *command: str) -> tuple[int, str]:
     return stream(command, context.tree, path, context.tree)
 
 
-def deploy_stage(context: Context) -> Outcome:
+def flagged(flag: str, values: list[str] | tuple[str, ...]) -> list[str]:
+    return [part for value in values for part in (flag, value)]
+
+
+def flashed_target(deployed: dict) -> str | None:
+    return deployed.get("firmware", {}).get("target", {}).get("build_id")
+
+
+def pi_identity(ssh: Callable[[str], str], deployed: dict) -> dict:
+    facts = {name: ssh(command).strip() for name, command in PI_FACTS.items()}
+    listing = ssh(f"sha256sum {' '.join(PI_FILES.values())}")
+    sums = {
+        path: digest
+        for digest, path in (line.split() for line in listing.splitlines())
+    }
+    capture = deployed.get("firmware", {}).get("capture")
+    if capture is None:
+        raise QualifyError(
+            "the Pi's deploy record names no capture board firmware: flash "
+            "it with deploy.py flash-capture"
+        )
+    return {
+        **facts,
+        **{f"{name}_sha256": sums[path] for name, path in PI_FILES.items()},
+        "capture_build_id": capture["build_id"],
+    }
+
+
+def deploy_drift(deployed: dict, target_id: str) -> dict[str, str]:
+    flashed = flashed_target(deployed)
+    if flashed == target_id:
+        return {}
+    return {
+        DEPLOY: f"the deploy record names F401 build {flashed}, not REV's "
+        f"{target_id}: the board was flashed since"
+    }
+
+
+def deploy_unit(context: Context, unit: Unit) -> Outcome:
+    build = (*DEPLOY_TOOL, "build-target", "--tree", str(context.tree))
+    if tool(context, unit.name, *build)[0]:
+        failed = f"deploy.py build-target failed: {unit.name}.log"
+        return Outcome(False, failures=(failed,))
+    handoff = context.record / DEPLOY_HANDOFF
+    handoff.unlink(missing_ok=True)
+    code = hold(context.tree, [DEPLOY, context.rev])
+    expired = bench(context.tree, "lock").HOLD_EXPIRED_EXIT
+    return handed_back(handoff, code, expired)
+
+
+def handed_back(handoff: Path, code: int, expired_exit: int) -> Outcome:
+    if not handoff.exists():
+        failed = f"the deploy hold exited {code} before taking the lock"
+        return Outcome(False, failures=(f"{failed}: {DEPLOY}.log",))
+    handed = json.loads(handoff.read_text())
+    held_s = round(time.time() - handed["hold"]["acquired"], 1)
+    taken = {"held_s": held_s, **handed["hold"], "exit": code}
+    if "outcome" not in handed:
+        cut = " at MAX_HOLD_S" if code == expired_exit else ""
+        failed = f"the deploy hold exited {code}{cut} before it finished"
+        failures = (f"{failed}: {DEPLOY}.log",)
+        return Outcome(False, failures=failures, holds=(taken,))
+    outcome = handed["outcome"]
+    failures = tuple(outcome["failures"])
+    return Outcome(outcome["passed"], outcome["facts"], failures, (taken,))
+
+
+def deploy_hold(rev: str, since: float) -> int:
+    acquired = time.time()
+    record = QUALIFICATIONS / rev
+    handoff = record / DEPLOY_HANDOFF
+    waited_s = round(acquired - since, 1)
+    taken = {"index": 1, "rows": [], "wait_s": waited_s, "acquired": acquired}
+    write_json(handoff, {"hold": taken})
+    builds = bench(RUN_TREE, "firmware_build_id")
+    target_id = builds.target_build_id(RUN_TREE, RUN_TREE / F401_CONFIG)
+    context = Context(rev, RUN_TREE, record, {}, target_id, {})
+    restored, outcome = deployed_in_hold(context)
+    taken |= {
+        "held_s": round(time.time() - acquired, 1),
+        "restored": restored,
+    }
+    verdict = {
+        "passed": outcome.passed,
+        "facts": outcome.facts,
+        "failures": list(outcome.failures),
+    }
+    write_json(handoff, {"hold": taken, "outcome": verdict})
+    return 0 if outcome.passed else 1
+
+
+def deployed_in_hold(context: Context) -> tuple[list[str], Outcome]:
+    remaining_s = bench(context.tree, "lock").remaining_s()
+    if remaining_s < DEPLOY_HOLD_S:
+        short = (
+            f"the hold has {remaining_s:.0f} s left, the deploy plans up to "
+            f"DEPLOY_HOLD_S = {DEPLOY_HOLD_S} s"
+        )
+        return [], Outcome(False, failures=(short,))
+    code, output = tool(context, DEPLOY, *DEPLOY_TOOL, "settle")
+    restored = [
+        line.removeprefix(SETTLED_LINE)
+        for line in output.splitlines()
+        if line.startswith(SETTLED_LINE)
+    ]
+    if code:
+        failed = f"deploy.py settle failed: {DEPLOY}.log"
+        return restored, Outcome(False, failures=(failed,))
+    tree = ("--tree", str(context.tree))
+    if tool(context, DEPLOY, *DEPLOY_TOOL, "sync", *tree)[0]:
+        failed = f"deploy.py sync failed: {DEPLOY}.log"
+        return restored, Outcome(False, failures=(failed,))
     pi = bench(context.tree, "pi")
-    deploy = (*UV_PYTHON, str(BENCH / "deploy.py"))
-    if tool(context, "deploy", *deploy, "sync")[0]:
-        return Outcome(False, failures=("deploy.py sync failed: deploy.log",))
     before = pi.mcu_version()
-    if tool(context, "deploy", *deploy, "ensure-target")[0]:
-        return Outcome(False, failures=("ensure-target failed: deploy.log",))
-    return firmware(context, pi.read_deployed(), before, pi.mcu_version())
+    if tool(context, DEPLOY, *DEPLOY_TOOL, "ensure-target", *tree)[0]:
+        failed = f"ensure-target failed: {DEPLOY}.log"
+        return restored, Outcome(False, failures=(failed,))
+    deployed = pi.read_deployed()
+    return restored, firmware(context, deployed, before, pi.mcu_version())
 
 
 def firmware(
     context: Context, deployed: dict, before: str, reported: str
 ) -> Outcome:
     builds = bench(context.tree, "firmware_build_id")
-    target_id = builds.target_build_id(context.tree, context.tree / F401_CONFIG)
+    target_id = context.target_id
     boards = deployed.get("firmware", {})
     facts = {
         "deployed_head": deployed["head"],
@@ -412,6 +724,12 @@ def firmware(
         )
     if not reported.endswith(target_id):
         failures.append(f"the F401 reports {reported!r}, not {target_id}")
+    if flashed_target(deployed) != target_id:
+        failures.append(
+            f"the deploy record names F401 build {flashed_target(deployed)}, "
+            f"not {target_id}: flash it with deploy.py flash-target so the "
+            "record names what the board runs"
+        )
     return Outcome(not failures, facts, tuple(failures))
 
 
@@ -444,7 +762,30 @@ def row_facts(row: dict) -> dict:
     }
 
 
-def judged_suite(summary_path: Path, code: int, detail: Detail) -> Outcome:
+def foreign_rows(rows: list[dict], context: Context) -> list[str]:
+    foreign = []
+    for row in rows:
+        deployed = row.get("deployed")
+        if deployed is None:
+            continue
+        target = flashed_target(deployed)
+        if (
+            deployed["head"] == context.rev
+            and not deployed["dirty_paths"]
+            and target == context.target_id
+        ):
+            continue
+        foreign.append(
+            f"{row['name']} ran on {deployed['head'][:12]} (dirty: "
+            f"{deployed['dirty_paths']}) with F401 build {target}, not clean "
+            f"{context.rev[:12]} with {context.target_id}"
+        )
+    return foreign
+
+
+def judged_suite(
+    summary_path: Path, code: int, detail: Detail, context: Context
+) -> Outcome:
     summary = json.loads(summary_path.read_text())
     rows = summary["rows"]
     bad = [row for row in rows if row["passed"] == row["expected_fail"]]
@@ -453,6 +794,7 @@ def judged_suite(summary_path: Path, code: int, detail: Detail) -> Outcome:
         f"{', '.join(row.get('failed_checks') or [])} {row.get('error') or ''}"
         for row in bad
     ]
+    failures += foreign_rows(rows, context)
     if summary["aborted"]:
         failures.append(f"aborted: {summary['aborted']}")
     if not summary["step_benchmark"]["within_band"]:
@@ -464,33 +806,28 @@ def judged_suite(summary_path: Path, code: int, detail: Detail) -> Outcome:
     }
     if detail is Detail.ROWS:
         facts["rows"] = [row_facts(row) for row in rows]
-    return Outcome(code == 0 and not failures, facts, tuple(failures))
+    passed = code == 0 and not failures
+    return Outcome(passed, facts, tuple(failures), tuple(summary["holds"]))
 
 
-def suite_run(
-    context: Context,
-    log: str,
-    scope: tuple[str, ...],
-    rows: list[str],
-    detail: Detail,
-) -> Outcome:
-    flags = [flag for row in rows for flag in ("--expect-fail", row)]
-    suite = (*UV_PYTHON, str(BENCH / "suite.py"), *scope, *flags)
-    code, output = tool(context, log, *suite)
+def suite_unit(context: Context, unit: Unit) -> Outcome:
+    tolerated = [row for row in unit.rows if row in context.expected]
+    command = (
+        *UV_PYTHON,
+        str(BENCH / "suite.py"),
+        *flagged("--row", unit.rows),
+        *flagged("--expect-fail", tolerated),
+        "--tree",
+        str(context.tree),
+        "--lock-timeout",
+        str(LOCK_TIMEOUT_S),
+    )
+    code, output = tool(context, unit.name, *command)
     match = SUMMARY_LINE.search(output)
     if match is None:
-        return Outcome(False, failures=(f"suite.py exited {code}: {log}.log",))
-    return judged_suite(Path(match.group(1)), code, detail)
-
-
-def suite_stage(context: Context) -> Outcome:
-    rows = [r for r in context.expected if r not in context.soak_rows]
-    return suite_run(context, "suite", (), rows, Detail.TALLIES)
-
-
-def soak_stage(context: Context) -> Outcome:
-    rows = [r for r in context.expected if r in context.soak_rows]
-    return suite_run(context, "soak", SOAK_SCOPE, rows, Detail.ROWS)
+        failed = f"suite.py exited {code}: {unit.name}.log"
+        return Outcome(False, failures=(failed,))
+    return judged_suite(Path(match.group(1)), code, unit.detail, context)
 
 
 def gate_failures(output: str) -> tuple[str, ...]:
@@ -501,12 +838,13 @@ def gate_failures(output: str) -> tuple[str, ...]:
     )
 
 
-def pi_stage(context: Context) -> Outcome:
-    if tool(context, "pi", "python3", "scripts/throughput_pi.py")[0]:
-        return Outcome(False, failures=("throughput_pi.py failed: pi.log",))
+def pi_unit(context: Context, unit: Unit) -> Outcome:
+    if tool(context, unit.name, "python3", "scripts/throughput_pi.py")[0]:
+        failed = f"throughput_pi.py failed: {unit.name}.log"
+        return Outcome(False, failures=(failed,))
     shutil.copy(context.tree / PI_WINDOW, context.record / PI_WINDOW.name)
     window = json.loads((context.tree / PI_WINDOW).read_text())
-    code, output = tool(context, "pi", *GATE, "pi-window")
+    code, output = tool(context, unit.name, *GATE, "pi-window")
     facts = {
         "pi_window": {
             key: window[key]
@@ -519,24 +857,32 @@ def pi_stage(context: Context) -> Outcome:
         },
         "timing": window["timing"],
     }
-    return Outcome(code == 0, facts, gate_failures(output))
+    holds = tuple(window["timing"]["holds"])
+    return Outcome(code == 0, facts, gate_failures(output), holds)
 
 
-def calibration_stage(context: Context) -> Outcome:
-    code, output = tool(context, "calibration", *GATE, "calibration")
+def recheck_holds(tree: Path) -> tuple[dict, ...]:
+    recheck = tree_script(tree, "throughput_recheck")
+    return tuple(json.loads(recheck.data_path("pi").read_text())["holds"])
+
+
+def calibration_unit(context: Context, unit: Unit) -> Outcome:
+    code, output = tool(context, unit.name, *GATE, "calibration")
     if code == 0:
         stated = output.splitlines()[0]
         facts = {"calibration": {"refreshed": False, "stated": stated}}
         return Outcome(True, facts)
     recheck = ("python3", "scripts/throughput_recheck.py")
-    if tool(context, "calibration", *recheck)[0]:
-        failed = "throughput_recheck.py failed: calibration.log"
+    if tool(context, unit.name, *recheck)[0]:
+        failed = f"throughput_recheck.py failed: {unit.name}.log"
         return Outcome(False, failures=(*gate_failures(output), failed))
-    code, output = tool(context, "calibration", *GATE, "calibration")
+    holds = recheck_holds(context.tree)
+    code, output = tool(context, unit.name, *GATE, "calibration")
     if code:
-        return Outcome(False, failures=gate_failures(output))
+        return Outcome(False, failures=gate_failures(output), holds=holds)
     branch = commit_calibration(context)
-    return Outcome(True, {"calibration": {"refreshed": True, **branch}})
+    facts = {"calibration": {"refreshed": True, **branch}}
+    return Outcome(True, facts, holds=holds)
 
 
 def commit_calibration(context: Context) -> dict[str, str]:
@@ -568,13 +914,30 @@ def commit_calibration(context: Context) -> dict[str, str]:
     return {"branch": branch, "pr_body": str(body), "ship": ship}
 
 
-STAGES = [
-    Stage("deploy", deploy_stage),
-    Stage("suite", suite_stage),
-    Stage("soak", soak_stage),
-    Stage("pi", pi_stage),
-    Stage("calibration", calibration_stage),
-]
+def units_of(
+    suite: ModuleType, plan: Callable[[list[str]], list[list[str]]]
+) -> list[Unit]:
+    names = [row.name for row in suite.ROWS]
+    holds = plan(names)
+    planned = [name for rows in holds for name in rows]
+    if sorted(planned) != sorted(names):
+        raise QualifyError(
+            f"hold_plan.plan({names}) returned {holds}, not every suite row "
+            "exactly once"
+        )
+    return [
+        Unit(DEPLOY, deploy_unit),
+        *(
+            Unit(f"suite-{index}", suite_unit, tuple(rows))
+            for index, rows in enumerate(holds, 1)
+        ),
+        *(
+            Unit(f"soak-{row.name}", suite_unit, (row.name,), Detail.ROWS)
+            for row in suite.SOAK_ROWS
+        ),
+        Unit("pi", pi_unit),
+        Unit("calibration", calibration_unit),
+    ]
 
 
 def checkout(tree: Path, sha: str) -> Path:
@@ -619,75 +982,91 @@ def hold(tree: Path, argv: list[str]) -> int:
     return subprocess.run(held, cwd=tree, check=False).returncode
 
 
-def utc_now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+def refuse_held(lock: ModuleType) -> None:
+    if os.environ.get(lock.TOKEN_ENV):
+        raise QualifyError(
+            f"{lock.TOKEN_ENV} is set: qualify's tools take one hold per "
+            "unit and refuse to run inside another; run it outside lock.py "
+            "hold"
+        )
 
 
 def stamp(now: datetime.datetime) -> str:
     return now.strftime("%Y%m%d-%H%M%S")
 
 
-def run(rev: str, expected: dict[str, int], since: float) -> int:
-    started = utc_now()
-    lock_wait_s = round(started.timestamp() - since)
-    if git("rev-parse", "HEAD", cwd=RUN_TREE) != rev:
-        raise QualifyError(f"{RUN_TREE} moved off {rev} before the lock")
+def run(rev: str, expected: dict[str, int]) -> int:
     suite = bench(RUN_TREE, "suite")
     unknown = sorted(set(expected) - set(suite.ROW_BY_NAME))
     if unknown:
         raise QualifyError(f"--expect-fail names no suite row: {unknown}")
-    record = QUALIFICATIONS / f"run-{stamp(started)}"
-    record.mkdir(parents=True)
-    soak = frozenset(row.name for row in suite.SOAK_ROWS)
-    context = Context(rev, RUN_TREE, record, expected, soak)
-    stages = run_stages(STAGES, context)
-    summary = {
-        "rev": rev,
-        "subject": git("log", "-1", "--format=%s", rev),
-        "started": started.isoformat(timespec="seconds"),
-        "finished": utc_now().isoformat(timespec="seconds"),
-        "seconds": round((utc_now() - started).total_seconds()),
-        "lock_wait_s": lock_wait_s,
-        "expect_fail": [{"row": r, "issue": n} for r, n in expected.items()],
-        "stages": stages,
-    }
-    (record / RECORD_FILE).write_text(json.dumps(summary, indent=2) + "\n")
-    passed = len(stages) == len(STAGES) and stages[-1]["passed"]
-    if not passed:
-        print("\n".join(failure_report(stages, rev)))
+    units = units_of(suite, bench(RUN_TREE, "hold_plan").plan)
+    pi = bench(RUN_TREE, "pi")
+    deployed = pi.read_deployed()
+    builds = bench(RUN_TREE, "firmware_build_id")
+    target_id = builds.target_build_id(RUN_TREE, RUN_TREE / F401_CONFIG)
+    record = QUALIFICATIONS / rev
+    record.mkdir(parents=True, exist_ok=True)
+    identity = pi_identity(pi.ssh, deployed)
+    context = Context(rev, RUN_TREE, record, expected, target_id, identity)
+    subject = git("log", "-1", "--format=%s", rev)
+    return qualified(units, context, subject, deploy_drift(deployed, target_id))
+
+
+def qualified(
+    units: list[Unit], context: Context, subject: str, drift: dict[str, str]
+) -> int:
+    done = run_units(units, context, drift)
+    summary = summarized(units, context, subject)
+    write_json(context.record / RECORD_FILE, summary)
+    if not done[-1]["passed"]:
+        print("\n".join(failure_report(done, context.rev)))
         return 1
-    print(f"qualify: PASS, tagged {publish(record, summary)}")
+    blockers = unpublishable(units, context, utc_now())
+    if blockers:
+        print(f"qualify: no tag on {context.rev[:12]}: {'; '.join(blockers)}")
+        return 1
+    print(f"qualify: PASS, tagged {publish(context.record, summary)}")
     return 0
 
 
-def failure_report(stages: list[dict], rev: str) -> list[str]:
-    failed = stages[-1]
-    lines = [f"qualify: FAIL at stage {failed['stage']} on {rev[:12]}; no tag"]
+def failure_report(done: list[dict], rev: str) -> list[str]:
+    failed = done[-1]
+    lines = [f"qualify: FAIL at unit {failed['unit']} on {rev[:12]}; no tag"]
     lines += [f"  {failure}" for failure in failed["failures"]]
-    rows = failed.get("failed_rows", [])
+    rows = failed["facts"].get("failed_rows", [])
     lines += [
         f"  bisect: uv run python scripts/qualify.py bisect --row {row} "
         f"--bad {rev}"
         for row in rows
     ]
     if not rows:
-        lines.append(f"  no row to bisect: {failed['stage']} judges the tree")
+        lines.append(f"  no row to bisect: {failed['unit']} judges the tree")
+    lines.append(
+        f"  resume: {RUN_COMMAND} {rev} reruns {failed['unit']} and skips "
+        "the units that passed within the window"
+    )
     return lines
 
 
 def publish(record: Path, summary: dict) -> str:
+    tagged = git(
+        "tag", "--list", f"{TAG_PREFIX}*", "--points-at", summary["rev"]
+    ).splitlines()
+    name = tagged[0] if tagged else pushed_tag(summary)
+    write_json(record / RECORD_FILE, {**summary, "tag": name})
+    return name
+
+
+def pushed_tag(summary: dict) -> str:
     local = git("tag", "--list", f"{TAG_PREFIX}*").splitlines()
     remote = git_net("ls-remote", "--tags", "origin", f"{TAG_PREFIX}*")
     remote_names = [
         line.split("refs/tags/")[-1] for line in remote.splitlines()
     ]
     name = next_tag({*local, *remote_names}, utc_now().date())
-    final = QUALIFICATIONS / name
-    summary = {**summary, "tag": name, "record": str(final)}
-    create_tag(name, summary["rev"], summary)
+    create_tag(name, summary["rev"], {**summary, "tag": name})
     git_net("push", "origin", f"refs/tags/{name}")
-    record.rename(final)
-    (final / RECORD_FILE).write_text(json.dumps(summary, indent=2) + "\n")
     return name
 
 
@@ -699,6 +1078,8 @@ def row_passes(runner: Path, candidate: Path, row: str, log: Path) -> bool:
         row,
         "--tree",
         str(candidate),
+        "--lock-timeout",
+        str(LOCK_TIMEOUT_S),
     )
     code, output = stream(suite, runner, log, candidate)
     match = SUMMARY_LINE.search(output)
@@ -747,23 +1128,19 @@ def last_qualified() -> str:
 
 def run_command(args: argparse.Namespace) -> int:
     expected = expect_fail(args.expect_fail)
-    if args.held_since is not None:
-        return run(args.rev, expected, args.held_since)
     with pending.commit_lock(LOCK_NAME):
         sha = checked_out(args.rev)
+        refuse_held(bench(RUN_TREE, "lock"))
         build_engine(RUN_TREE)
-        flags = [f"--expect-fail={row}={n}" for row, n in expected.items()]
-        return hold(RUN_TREE, ["run", sha, *flags])
+        return run(sha, expected)
 
 
 def bisect_command(args: argparse.Namespace) -> int:
-    if args.held_since is not None:
-        return bisect(args.row, args.good, args.bad)
     with pending.commit_lock(LOCK_NAME):
         bad = checked_out(args.bad)
+        refuse_held(bench(RUN_TREE, "lock"))
         good = resolve(args.good or last_qualified())
-        argv = ["bisect", "--row", args.row, "--good", good, "--bad", bad]
-        return hold(RUN_TREE, argv)
+        return bisect(args.row, good, bad)
 
 
 def main() -> int:
@@ -775,19 +1152,24 @@ def main() -> int:
     runner = commands.add_parser("run")
     runner.add_argument("rev", nargs="?", default=MAIN)
     runner.add_argument("--expect-fail", action="append", default=[])
-    runner.add_argument("--held-since", type=float, help=argparse.SUPPRESS)
     shown = commands.add_parser("status")
     shown.add_argument("--line", action="store_true")
     search = commands.add_parser("bisect")
     search.add_argument("--row", required=True)
     search.add_argument("--good")
     search.add_argument("--bad", default=MAIN)
-    search.add_argument("--held-since", type=float, help=argparse.SUPPRESS)
+    held = commands.add_parser(
+        DEPLOY, help="the deploy unit's hold; `run` starts it under lock.py"
+    )
+    held.add_argument("rev")
+    held.add_argument("--held-since", type=float, required=True)
     args = parser.parse_args()
     if args.command == "run":
         return run_command(args)
     if args.command == "bisect":
         return bisect_command(args)
+    if args.command == DEPLOY:
+        return deploy_hold(args.rev, args.held_since)
     git_net("fetch", "-q", "--tags", "origin")
     print(status(View.LINE if args.line else View.TABLE))
     return 0
