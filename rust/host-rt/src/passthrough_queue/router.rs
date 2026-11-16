@@ -36,6 +36,12 @@ pub enum RouterError {
         mcu: McuHandle,
         error: crate::clock_projection::ProjectionError,
     },
+    /// A published estimate whose rate is not a positive, finite tick rate:
+    /// every projection and span duration divides by it.
+    ClockRateNotPositive {
+        mcu: McuHandle,
+        freq: f64,
+    },
 }
 
 impl std::fmt::Display for RouterError {
@@ -56,6 +62,12 @@ impl std::fmt::Display for RouterError {
                 "mcu handle {} published a clock estimate stamped {skew_secs:.6}s \
                  ahead of the router's CLOCK_MONOTONIC_RAW read — host_now_raw is \
                  not a CLOCK_MONOTONIC_RAW instant",
+                mcu.raw()
+            ),
+            Self::ClockRateNotPositive { mcu, freq } => write!(
+                f,
+                "mcu handle {} published a clock estimate of {freq} Hz, which is not a \
+                 positive rate — the mcu's counter is not advancing between get_clock samples",
                 mcu.raw()
             ),
         }
