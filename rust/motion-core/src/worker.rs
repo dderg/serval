@@ -150,7 +150,7 @@ pub struct HomeDripParams {
     pub max_travel_mm: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct NudgeParams {
     pub mcu_id: u32,
     pub axis: u8,
@@ -576,23 +576,24 @@ impl StreamWorkerHandle {
         self.links.start_claims.take(id)
     }
 
-    pub fn dwell(&self, duration_s: f64) -> Result<(), StreamWorkerError> {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.sender
-            .send(StreamMsg::Dwell {
-                duration_s,
-                notify: tx,
-            })
-            .map_err(|_| StreamWorkerError::ChannelClosed)?;
-        rx.recv().map_err(|_| StreamWorkerError::ChannelClosed)
+    /// Non-blocking, like `flush_try_start`: the receiver resolves once the
+    /// pipeline has drained and the dwell is on the stream clock.
+    pub fn dwell_try_start(
+        &self,
+        duration_s: f64,
+    ) -> Result<crossbeam_channel::Receiver<()>, StreamWorkerError> {
+        let (notify, done) = bounded(1);
+        self.try_send_arming(StreamMsg::Dwell { duration_s, notify })?;
+        Ok(done)
     }
 
-    pub fn hold_start_until(&self, host_s: f64) -> Result<(), StreamWorkerError> {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.sender
-            .send(StreamMsg::HoldStartUntil { host_s, notify: tx })
-            .map_err(|_| StreamWorkerError::ChannelClosed)?;
-        rx.recv().map_err(|_| StreamWorkerError::ChannelClosed)
+    pub fn hold_start_until_try_start(
+        &self,
+        host_s: f64,
+    ) -> Result<crossbeam_channel::Receiver<()>, StreamWorkerError> {
+        let (notify, done) = bounded(1);
+        self.try_send_arming(StreamMsg::HoldStartUntil { host_s, notify })?;
+        Ok(done)
     }
 
     pub fn discard_pending(&self) {
@@ -606,28 +607,24 @@ impl StreamWorkerHandle {
     }
 
     pub fn update_axis_chains(&self, chains: AxisChainSet) -> Result<(), StreamWorkerError> {
-        self.sender
-            .send(StreamMsg::SetAxisChains(chains))
-            .map_err(|_| StreamWorkerError::ChannelClosed)
+        self.try_send_arming(StreamMsg::SetAxisChains(chains))
     }
 
-    /// Blocks until the pipeline has drained and adopted the new transform:
-    /// the caller's own mesh copy (used for bridge-level space crossings)
-    /// must never run ahead of the mesh the lowerer is actually warping with.
-    pub fn update_mesh(
+    /// The receiver resolves once the pipeline has drained and adopted the
+    /// new transform: the caller's own mesh copy (used for bridge-level space
+    /// crossings) must never run ahead of the mesh the lowerer warps with.
+    pub fn update_mesh_try_start(
         &self,
         mesh: Option<std::sync::Arc<geometry::SurfaceTransform>>,
         gcode_z_rebase: f64,
-    ) -> Result<(), StreamWorkerError> {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.sender
-            .send(StreamMsg::SetMesh {
-                mesh,
-                gcode_z_rebase,
-                notify: tx,
-            })
-            .map_err(|_| StreamWorkerError::ChannelClosed)?;
-        rx.recv().map_err(|_| StreamWorkerError::ChannelClosed)
+    ) -> Result<crossbeam_channel::Receiver<()>, StreamWorkerError> {
+        let (notify, done) = bounded(1);
+        self.try_send_arming(StreamMsg::SetMesh {
+            mesh,
+            gcode_z_rebase,
+            notify,
+        })?;
+        Ok(done)
     }
 
     pub fn home_drip(
@@ -646,9 +643,7 @@ impl StreamWorkerHandle {
         params: NudgeParams,
     ) -> Result<crossbeam_channel::Receiver<Result<(), String>>, StreamWorkerError> {
         let (notify, result) = crossbeam_channel::bounded(1);
-        self.sender
-            .send(StreamMsg::Nudge { params, notify })
-            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        self.try_send_arming(StreamMsg::Nudge { params, notify })?;
         Ok(result)
     }
 

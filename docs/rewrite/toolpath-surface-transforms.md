@@ -45,10 +45,13 @@ the two spaces convert.**
   exact inverse of the lowerer's chain rule. No code below the bridge
   converts. A path that feeds gcode-space Z where machine-space is expected
   (or vice versa) is a bug — assert and fail loudly, don't compensate.
-- A mesh swap (`swap_bed_mesh`) blocks until the pipeline has drained and
-  adopted the token, holding the bridge's mesh handle locked across the
-  wait — no crossing can ever invert through a mesh the lowerer is not yet
-  warping with.
+- A mesh swap (`set_bed_mesh_start` / `clear_bed_mesh_start`) is staged
+  and served behind a pipeline drain; the bridge adopts the new mesh only
+  when `pipeline_request_poll` sees the lowerer has adopted the token, so
+  no crossing ever inverts through a mesh the lowerer is not yet warping
+  with. klippy waits on that poll between reactor turns: the drain lasts
+  as long as the buffered motion, and a blocking wait starved heater PWM
+  refreshes (#362).
 - `set_position` renames the physical rest point in gcode space: the stream
   odometer takes the gcode value, while the step-counter seeds and the
   motion-history rebase take the forward-warped machine value. Skipping

@@ -571,7 +571,7 @@ fn a_start_hold_delays_the_next_move_to_the_held_instant() {
         timeline,
     );
     let held = host_now + 3.0;
-    h.hold_start_until(held).unwrap();
+    h.hold_start_until_try_start(held).unwrap().recv().unwrap();
     let id = h.claim_earliest_start().unwrap();
     let claimed = poll_claim(&h, id, Duration::from_secs(5)).expect("claim answers");
     assert!(claimed >= held, "claim {claimed} ignores the hold {held}");
@@ -1072,7 +1072,7 @@ fn dwell_inserts_a_time_gap_then_resumes() {
     let pre = cap.snapshot();
     let pre_end = pre.last().unwrap().1;
 
-    h.dwell(1.0).unwrap();
+    h.dwell_try_start(1.0).unwrap().recv().unwrap();
     h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
         .unwrap();
     h.flush().unwrap();
@@ -1102,7 +1102,7 @@ fn dwell_after_a_dispatched_segment_advances_last_move_time_and_dispatched_throu
     h.flush().unwrap();
     let t_end = cap.snapshot().last().unwrap().1;
 
-    h.dwell(2.5).unwrap();
+    h.dwell_try_start(2.5).unwrap().recv().unwrap();
     assert!(
         (h.last_move_time() - (t_end + 2.5)).abs() < 1e-9,
         "last_move_time must publish dispatched_through + dwell secs: \
@@ -1132,7 +1132,7 @@ fn dwell_with_no_prior_dispatch_leaves_last_move_time_and_dispatched_through_uns
         Arc::default(),
     );
 
-    h.dwell(1.0).unwrap();
+    h.dwell_try_start(1.0).unwrap().recv().unwrap();
     assert!(
         (h.last_move_time() - 0.0).abs() < 1e-9,
         "last_move_time must stay at 0.0 when a dwell never follows a dispatch, got {}",
@@ -1168,8 +1168,8 @@ fn two_consecutive_dwells_accumulate_into_last_move_time() {
     h.flush().unwrap();
     let t_end = cap.snapshot().last().unwrap().1;
 
-    h.dwell(1.0).unwrap();
-    h.dwell(2.0).unwrap();
+    h.dwell_try_start(1.0).unwrap().recv().unwrap();
+    h.dwell_try_start(2.0).unwrap().recv().unwrap();
 
     assert!(
         (h.last_move_time() - (t_end + 3.0)).abs() < 1e-9,
@@ -1366,6 +1366,36 @@ fn channel_depth_tracks_occupancy_and_refuses_overflow_at_capacity() {
     .expect_err("submit at capacity must refuse, not block or grow");
     assert!(matches!(err, StreamWorkerError::ChannelFull));
     assert_eq!(tx.len(), cap, "a refused submit must not grow the queue");
+}
+
+#[test]
+fn drain_requests_refuse_a_full_channel_instead_of_blocking() {
+    let (sender, _inbox) = bounded::<StreamMsg>(1);
+    let (execution_control, _pump_inbox) = crossbeam_channel::unbounded();
+    let h = StreamWorkerHandle {
+        sender,
+        join_handle: None,
+        links: Arc::default(),
+        execution_control,
+    };
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]))
+        .unwrap();
+    let nudge = NudgeParams {
+        mcu_id: 0,
+        axis: 0,
+        motor_mask: 0,
+        delta_mm: 1.0,
+        speed: 10.0,
+        accel: 100.0,
+    };
+
+    let full =
+        |sent: Result<(), StreamWorkerError>| matches!(sent, Err(StreamWorkerError::ChannelFull));
+    assert!(full(h.dwell_try_start(1.0).map(drop)));
+    assert!(full(h.hold_start_until_try_start(1.0).map(drop)));
+    assert!(full(h.update_mesh_try_start(None, 0.0).map(drop)));
+    assert!(full(h.submit_nudge(nudge).map(drop)));
+    assert!(full(h.update_axis_chains(AxisChainSet::default())));
 }
 
 /// The production feed parks on the wakeup fd and retries on `ChannelFull`;

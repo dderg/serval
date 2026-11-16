@@ -1,13 +1,11 @@
-use motion_core::lock_ext::LockExt;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use host_rt::mcu_serial_conn::McuSerialConn;
 use host_rt::transport::TransportError;
 
 use super::abort_after_tracing_appender_drains;
-use super::state::EthercatDrive;
+use super::state::{DeathReport, EndpointDeathLatch, EthercatDrive};
 
 /// How long the host waits for klippy to consume the latched endpoint-death
 /// cause (clean shutdown) before the watchdog forces a last-resort abort. Sized
@@ -22,44 +20,48 @@ const ENDPOINT_DEATH_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// so the operator sees the real cause and runs `FIRMWARE_RESTART` (no silent
 /// auto-restart). Returns `true` when this call latched the first cause, so the
 /// caller arms the safety watchdog exactly once.
-pub(crate) fn report_endpoint_death(
-    latch: &Arc<Mutex<HashMap<u32, String>>>,
-    mcu_id: u32,
-    reason: &str,
-) -> bool {
+pub(crate) fn report_endpoint_death(latch: &EndpointDeathLatch, mcu_id: u32, reason: &str) -> bool {
     let code = runtime_contract::error::FaultCode::EthercatEndpointDied.as_i32();
     let message = format!("motion endpoint died mid-session (fault {code}): {reason}");
-    let mut guard = latch.lock_ok();
-    // First cause wins for BOTH the latched (operator-surfaced) message and the
-    // log: a later writer (e.g. the supervisor after the pump already latched)
-    // must not overwrite the original cause.
-    if let std::collections::hash_map::Entry::Vacant(slot) = guard.entry(mcu_id) {
-        slot.insert(message);
-        tracing::error!(
-            subsystem = "motion",
-            event = "endpoint_death",
-            mcu_id,
-            fault_code = code,
-            reason,
-            "motion endpoint died mid-session — latched for klippy; clean shutdown, no abort"
-        );
-        true
-    } else {
-        false
+    match latch.report(mcu_id, message) {
+        DeathReport::Latched => {
+            tracing::error!(
+                subsystem = "motion",
+                event = "endpoint_death",
+                mcu_id,
+                fault_code = code,
+                reason,
+                "motion endpoint died mid-session — latched for klippy; clean shutdown, no abort"
+            );
+            true
+        }
+        DeathReport::AlreadyLatched => false,
+        DeathReport::EngineShutDown => {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "endpoint_death_after_shutdown",
+                mcu_id,
+                fault_code = code,
+                reason,
+                "motion endpoint died while the engine shut down — its motion is already stopped"
+            );
+            false
+        }
     }
 }
 
-/// Safety backstop for the clean-shutdown path: if klippy has not consumed the
-/// latched endpoint-death cause within the grace (i.e. the reactor never ran the
-/// shutdown — wedged/CPU-starved), force a last-resort abort so the machine still
-/// stops. The normal path consumes the latch within one poll period, so this only
-/// fires on a double failure (endpoint dead AND reactor stuck).
-pub(crate) fn arm_endpoint_death_watchdog(latch: Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32) {
+/// Safety backstop for the clean-shutdown path: if klippy has neither taken the
+/// latched endpoint-death cause nor shut the engine down within the grace (i.e.
+/// the reactor never ran the shutdown — wedged/CPU-starved), force a last-resort
+/// abort so the machine still stops. The normal path consumes the latch within one
+/// poll period, so this only fires on a double failure (endpoint dead AND reactor
+/// stuck).
+pub(crate) fn arm_endpoint_death_watchdog(latch: Arc<EndpointDeathLatch>, mcu_id: u32) {
     let _ = std::thread::Builder::new()
         .name(format!("ec-death-watchdog-{mcu_id}"))
         .spawn(move || {
             std::thread::sleep(ENDPOINT_DEATH_SHUTDOWN_GRACE);
-            let unhandled = latch.lock_ok().contains_key(&mcu_id);
+            let unhandled = latch.is_pending(mcu_id);
             if unhandled {
                 tracing::error!(
                     subsystem = "motion",

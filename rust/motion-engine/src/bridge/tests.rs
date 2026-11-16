@@ -415,7 +415,7 @@ fn post_processor_rejected_parameter_and_composition_preserve_configuration() {
     for value in [-1.0, 0.0] {
         assert!(
             engine
-                .update_post_processor("smooth", "smooth_time", value)
+                .try_update_post_processor("smooth", "smooth_time", value)
                 .is_err()
         );
         let cfg = engine.planner_config.lock_ok();
@@ -441,9 +441,9 @@ fn post_processor_bypass_retains_updates_and_rejects_invalid_restore() {
         .unwrap()
         .chains[0]
         .kernel_variance_s2();
-    engine.set_post_processor_bypass(true).unwrap();
+    assert!(engine.try_set_post_processor_bypass(true).unwrap());
     engine
-        .update_post_processor("smooth", "smooth_time", 0.02)
+        .try_update_post_processor("smooth", "smooth_time", 0.02)
         .unwrap();
     assert!(
         engine
@@ -454,7 +454,7 @@ fn post_processor_bypass_retains_updates_and_rejects_invalid_restore() {
             .chains[0]
             .is_empty()
     );
-    engine.set_post_processor_bypass(false).unwrap();
+    assert!(engine.try_set_post_processor_bypass(false).unwrap());
     let restored_variance = engine
         .planner_config
         .lock_ok()
@@ -471,11 +471,11 @@ fn post_processor_bypass_retains_updates_and_rejects_invalid_restore() {
             .param("smooth", "smooth_time"),
         Some(0.02)
     );
-    engine.set_post_processor_bypass(true).unwrap();
+    assert!(engine.try_set_post_processor_bypass(true).unwrap());
     engine
-        .update_post_processor("smooth", "smooth_time", 0.0)
+        .try_update_post_processor("smooth", "smooth_time", 0.0)
         .unwrap();
-    assert!(engine.set_post_processor_bypass(false).is_err());
+    assert!(engine.try_set_post_processor_bypass(false).is_err());
     let cfg = engine.planner_config.lock_ok();
     assert!(cfg.post_processor_bypass);
     assert_eq!(
@@ -499,10 +499,10 @@ fn post_processor_failed_submission_preserves_parameters_and_bypass() {
 
     assert!(
         engine
-            .update_post_processor("smooth", "smooth_time", 0.02)
+            .try_update_post_processor("smooth", "smooth_time", 0.02)
             .is_err()
     );
-    assert!(engine.set_post_processor_bypass(true).is_err());
+    assert!(engine.try_set_post_processor_bypass(true).is_err());
     let cfg = engine.planner_config.lock_ok();
     assert_eq!(
         cfg.post_processors.param("smooth", "smooth_time"),
@@ -774,8 +774,7 @@ fn partial_state_teardown_at_exit() {
 
 #[test]
 fn report_endpoint_death_latches_203_and_first_cause_wins() {
-    let latch: Arc<std::sync::Mutex<std::collections::HashMap<u32, String>>> =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let latch = super::EndpointDeathLatch::default();
     let first = super::report_endpoint_death(&latch, 5, "conn EOF");
     // A later writer (e.g. the supervisor after the pump already latched) must
     // not overwrite the first surfaced cause.
@@ -785,7 +784,7 @@ fn report_endpoint_death_latches_203_and_first_cause_wins() {
         "the first call latches the cause and arms the backstop"
     );
     assert!(!second, "a later writer does not re-latch (returns false)");
-    let msg = latch.lock_ok().remove(&5).expect("a cause must be latched");
+    let msg = latch.take(5).expect("a cause must be latched");
     assert!(
         msg.contains("(fault -203)"),
         "must carry the -203 code: {msg}"
@@ -795,4 +794,30 @@ fn report_endpoint_death_latches_203_and_first_cause_wins() {
         !msg.contains("later transport fatal"),
         "a later writer must not overwrite the first cause: {msg}"
     );
+}
+
+#[test]
+fn engine_shutdown_settles_a_latched_endpoint_death() {
+    let engine = PyMotionEngine::new();
+    assert!(super::report_endpoint_death(
+        &engine.latched.endpoint_death,
+        5,
+        "barrier deadline expired"
+    ));
+    engine.shutdown();
+    assert!(
+        !engine.latched.endpoint_death.is_pending(5),
+        "the session that would take the death is gone, so the watchdog would abort on it"
+    );
+}
+
+#[test]
+fn endpoint_death_after_engine_shutdown_is_not_latched() {
+    let engine = PyMotionEngine::new();
+    engine.shutdown();
+    assert!(!super::report_endpoint_death(
+        &engine.latched.endpoint_death,
+        5,
+        "conn EOF"
+    ));
 }
