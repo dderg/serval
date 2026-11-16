@@ -16,6 +16,7 @@ stalls, no MCU shuts down, and the printer takes commands afterwards. The
 emergency stop runs with the heaters off, so it lands on a live MCU.
 """
 
+import enum
 import pathlib
 
 import pytest
@@ -23,6 +24,12 @@ import pytest
 from tools.sim import configs
 
 pytestmark = pytest.mark.needs_elf
+
+
+class Extruder(enum.Enum):
+    SMOOTHED = "pa, st"
+    KERNEL_FREE = "pa"
+
 
 HEATED_TARGETS = (
     "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=150",
@@ -172,11 +179,10 @@ SAVED_MESH = """
 """
 
 
-def _heated_config(world, extra=""):
-    config = configs.with_extruder_smoothing(
-        configs.heaters_config(world.h7_pty, str(world.gcode_dir)),
-        EXTRUDER_SMOOTH_TIME,
-    )
+def _heated_config(world, extruder, extra=""):
+    config = configs.heaters_config(world.h7_pty, str(world.gcode_dir))
+    if extruder is Extruder.SMOOTHED:
+        config = configs.with_extruder_smoothing(config, EXTRUDER_SMOOTH_TIME)
     stock_limits, owner_limits = OWNER_LIKE_LIMITS
     assert stock_limits in config, stock_limits
     config = config.replace(stock_limits, owner_limits)
@@ -187,12 +193,14 @@ def _heated_config(world, extra=""):
     return config + INTERRUPTION_SECTIONS + extra + SAVED_MESH
 
 
-def _single_mcu(world):
-    return _heated_config(world)
+def _single_mcu(world, extruder):
+    return _heated_config(world, extruder)
 
 
-def _xy_on_aux_mcu(world):
-    config = _heated_config(world, f"\n[mcu aux]\nserial: {world.f4_pty}\n")
+def _xy_on_aux_mcu(world, extruder):
+    config = _heated_config(
+        world, extruder, f"\n[mcu aux]\nserial: {world.f4_pty}\n"
+    )
     for line in XY_PIN_LINES:
         config = config.replace(
             f"gpiochip0/gpio{line}\n", f"aux:gpiochip0/gpio{line}\n", 1
@@ -211,11 +219,12 @@ def _boot(
     topology,
     heater_targets=HEATED_TARGETS,
     cancel_order=REPORTER_CANCEL_ORDER,
+    extruder=Extruder.SMOOTHED,
 ):
     config_fn, dual_mcu = TOPOLOGIES[topology]
 
     def config(world):
-        text = config_fn(world)
+        text = config_fn(world, extruder)
         assert REPORTER_CANCEL_ORDER in text, REPORTER_CANCEL_ORDER
         return text.replace(REPORTER_CANCEL_ORDER, cancel_order)
 
@@ -387,7 +396,13 @@ def _dwell_waiting(world):
 
 @pytest.mark.parametrize("topology", sorted(TOPOLOGIES))
 def test_emergency_stop_while_dwell_drains(sim_world, topology):
-    world = _boot(sim_world, topology, heater_targets=())
+    """A smoothed extruder's G4 resolves within a second: behind the intake
+    gate the pump is never full. Kernel-free pressure advance lets the
+    turning guard hold the whole zigzag until the G4 drains it (#860), so
+    the dwell waits on the pump long enough for the e-stop to land in it."""
+    world = _boot(
+        sim_world, topology, heater_targets=(), extruder=Extruder.KERNEL_FREE
+    )
     _start_print(world, "estop.gcode", tail=["G4 P1"])
     world.wait_until(
         lambda: _dwell_waiting(world),
