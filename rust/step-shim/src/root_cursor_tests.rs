@@ -5,7 +5,7 @@ use trajectory::{
     ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
 };
 
-use super::{EVAL_COUNT, Lane, Slope, StepRootCursor};
+use super::{EVAL_COUNT, LINE_REACH_STEPS, Lane, Slope, StepRootCursor};
 use crate::ring::SpanQueue;
 use crate::{MotorConfig, ShimError, StepEncoder};
 
@@ -144,7 +144,8 @@ fn position_at(view: &ClockedMotorSpan, clock: u64) -> f64 {
         .expect("a clock inside the view")
 }
 
-fn least_clock_reaching(view: &ClockedMotorSpan, level: f64) -> u64 {
+fn least_clock_reaching(view: &ClockedMotorSpan, line: f64, microstep_mm: f64) -> u64 {
+    let level = line - LINE_REACH_STEPS * microstep_mm;
     let mut low = view.start_clock;
     let mut high = view.end_clock;
     assert!(
@@ -175,7 +176,7 @@ fn an_on_lattice_ramp_solves_each_root_within_a_constant_probe_budget() {
     assert_eq!(view.end_clock, steps * SPACING);
     let level = |step: u64| step as f64 * MICROSTEP_MM;
     let expected = (1..=steps)
-        .map(|step| least_clock_reaching(&view, level(step)))
+        .map(|step| least_clock_reaching(&view, level(step), MICROSTEP_MM))
         .collect::<Vec<u64>>();
     let landing_on_the_level = expected
         .iter()
@@ -338,7 +339,7 @@ fn a_spline_sweep_settles_its_roots_on_the_polynomial_alone() {
     let view = spline_sweep(TRAVEL_MM, 0.05);
     let steps = (TRAVEL_MM / MICROSTEP_MM) as u64;
     let expected = (1..steps)
-        .map(|step| least_clock_reaching(&view, step as f64 * MICROSTEP_MM))
+        .map(|step| least_clock_reaching(&view, step as f64 * MICROSTEP_MM, MICROSTEP_MM))
         .collect::<Vec<u64>>();
 
     let config = MotorConfig {
@@ -399,9 +400,10 @@ fn spatial_view(axis: ContinuousAxis, t_start: f64, t_end: f64, freq: f64) -> Cl
         .expect("a clocked motor span")
 }
 
-/// The bench: Z descended to 2.0 mm through a spline whose endpoint carries
-/// roundoff just above 2.0, so the last falling step stayed pending, then a
-/// hold parked the axis at exactly 2.0 - the pending step's own threshold.
+/// The bench: Z descended to 2.0 mm through a spline whose endpoint stopped
+/// just above 2.0 (by roundoff there, which the reach band absorbs; by twice
+/// the band here), so the last falling step stayed pending, then a hold
+/// parked the axis at exactly 2.0 - the pending step's own threshold.
 /// A hold certifies as rising, and the rising threshold is never reached,
 /// so the run must still notice the falling step that is due at its first
 /// clock instead of reporting the lattice adrift by one microstep.
@@ -410,7 +412,7 @@ fn a_hold_resting_on_the_falling_threshold_emits_the_pending_step() {
     const FREQ: f64 = 1_000_000.0;
     const MICROSTEP_MM: f64 = 0.001_25;
     let descent = 0.01;
-    let landing = 2.0 + 4.0 * f64::EPSILON;
+    let landing = 2.0 + 2.0 * LINE_REACH_STEPS * MICROSTEP_MM;
     let curve = ScalarNurbs::try_new(1, vec![0.0, 0.0, descent, descent], vec![2.5, landing])
         .expect("a linear descent");
     let fall = spatial_view(ContinuousAxis::Spline(Arc::new(curve)), 0.0, descent, FREQ);
@@ -496,4 +498,88 @@ fn a_signal_two_steps_off_the_lattice_is_drift_not_a_burst_of_steps() {
         drain(2.5 - 2.0 * MICROSTEP_MM),
         Err(ShimError::LatticeDrift { position, .. }) if position == 2.5 - 2.0 * MICROSTEP_MM
     ));
+}
+
+fn rest_stroke(from: f64, to: f64, t_start: f64) -> ClockedMotorSpan {
+    const STROKE_SECS: f64 = 0.2;
+    let t_end = t_start + STROKE_SECS;
+    let curve = ScalarNurbs::try_new(
+        2,
+        vec![t_start, t_start, t_start, t_end, t_end, t_end],
+        vec![from, to, to],
+    )
+    .expect("a quadratic decel to rest");
+    let view = spatial_view(
+        ContinuousAxis::Spline(Arc::new(curve)),
+        t_start,
+        t_end,
+        1_000_000.0,
+    );
+    assert!(view.ends_at_rest());
+    assert_eq!(
+        view.signal.position(view.stream_t_end).unwrap().to_bits(),
+        to.to_bits(),
+        "the stroke must rest bit-exactly where the test puts it"
+    );
+    view
+}
+
+fn drain_strokes(microstep_mm: f64, strokes: &[ClockedMotorSpan]) -> Vec<(Vec<i8>, i64)> {
+    let config = MotorConfig {
+        oid: 0,
+        microstep_distance: microstep_mm,
+        invert_dir: false,
+        cycles_per_second: 1_000_000.0,
+        encoder: StepEncoder::Classic { max_error_ticks: 0 },
+        min_rearm_cycles: 0,
+    };
+    let mut cursor = StepRootCursor::new(&config);
+    cursor.reset_to(0, 0);
+    strokes
+        .iter()
+        .map(|stroke| {
+            let mut queue = SpanQueue::new(1);
+            queue.push(0, stroke.clone()).expect("an admissible view");
+            let mut roots = Vec::new();
+            cursor
+                .advance(0, &config, &mut queue, u64::MAX, &mut roots, None)
+                .expect("a drainable stroke");
+            let advances = roots.iter().map(|root| root.advance).collect();
+            (advances, cursor.step_count())
+        })
+        .collect()
+}
+
+/// Sim #859: the shaped CoreXY B lane of `test_ident_weld` rests 4 ulps
+/// short of 60 mm after a forward stroke and starts the return 4 ulps past
+/// it. The motor must rest on step 4800 and return without a catch-up step.
+#[test]
+fn a_rest_ulps_short_of_its_line_takes_that_step() {
+    const MICROSTEP_MM: f64 = 0.0125;
+    let out = rest_stroke(0.0, 59.999_999_999_999_97, 0.0);
+    let back = rest_stroke(60.000_000_000_000_03, -1.421_085_471_520_200_4e-14, 1.0);
+
+    let strokes = drain_strokes(MICROSTEP_MM, &[out, back]);
+
+    assert_eq!(
+        strokes[0].1, 4800,
+        "the forward stroke rests on its 4800th step"
+    );
+    assert!(
+        strokes[1].0.iter().all(|&advance| advance == -1),
+        "the return steps backward only"
+    );
+    assert_eq!(strokes[1].1, 0);
+}
+
+/// 100.1 parses to an f64 just under 8008 * 0.0125, as do about a third of
+/// the k / 80 mm coordinates up to 375 mm.
+#[test]
+fn a_coordinate_parsed_under_its_line_rests_on_it() {
+    const MICROSTEP_MM: f64 = 0.0125;
+    assert!(100.1 < 8008.0 * MICROSTEP_MM);
+
+    let strokes = drain_strokes(MICROSTEP_MM, &[rest_stroke(0.0, 100.1, 0.0)]);
+
+    assert_eq!(strokes[0].1, 8008);
 }

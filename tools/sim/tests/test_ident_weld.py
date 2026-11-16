@@ -25,7 +25,6 @@ X_HOME = 100
 SPEED_MM_MIN = 30000  # 500 mm/s, the bench ident cruise
 DWELL_MS = 1200  # the ident macro's inter-stroke G4
 THINK_S = 1.0  # script processing pause; forces the pacer's idle path
-WELD_TOL_STEPS = 3  # 3 steps = 0.0375 mm; bench welds are 3-57 steps
 
 A_LINE = 18
 B_LINE = 7
@@ -90,7 +89,7 @@ def test_ident_stroke_dwell_boundaries_hold_position(sim_world):
                     f"weld executed after the brake"
                 )
             err = idle - ideal
-            if abs(err) > WELD_TOL_STEPS:
+            if err:
                 problems.append(
                     f"stroke {stroke} motor {name}: rest position off ideal "
                     f"by {err} steps ({err / STEPS_PER_MM:+.4f} mm)"
