@@ -1,0 +1,196 @@
+{
+ "run_dir": "/home/dderg/bench/suites/20261116-053529/pause_sparse/20261116-062538",
+ "head": "1ae0da436a88cc66d2c7f4a9efae9de0129a2f4c",
+ "scenario": "pause_sparse",
+ "window": [
+  1794806741.5834,
+  1794806855.5647
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794806742.9221375,
+   "returned": 1794806742.935335,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "pause",
+   "after": "previous",
+   "delay_s": 20.0,
+   "script": "",
+   "sent": 1794806763.1650205,
+   "returned": 1794806810.6822,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "resume",
+   "after": "previous",
+   "delay_s": 10.0,
+   "script": "",
+   "sent": 1794806773.5055223,
+   "returned": 1794806810.6822386,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794806742.9221,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "standby",
+   "print_message": ""
+  },
+  {
+   "t": 1794806743.1422,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794806850.307,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794806854.3131378,
+  "lines": [
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794806855.5646925,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": "",
+   "file_position": 3386
+  }
+ },
+ "spans": [
+  [
+   1794806752.4504,
+   1794806850.1159,
+   1554289
+  ],
+  [
+   1794806854.7355,
+   1794806855.403,
+   9546
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794806742.928,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806742",
+   "file": "bench_20261116-062538.gcode"
+  },
+  {
+   "t": 1794806751.931,
+   "event": "anchor_decision",
+   "condition": "first",
+   "held_start_host": null,
+   "host_now": 1438.946206118,
+   "last_t_end": 0.0,
+   "lead_secs": 0.29,
+   "level": "info",
+   "print_id": "print-1794806742",
+   "seg_t_end": 0.008414804699676771,
+   "seg_t_start": 0.0,
+   "source": "host-rust",
+   "t0": 1439.443852262
+  },
+  {
+   "t": 1794806787.428,
+   "event": "pipe_drain",
+   "cap_s": 2.29,
+   "cause": "BusyRunwayFalling",
+   "dispatch_wait_s": 35.009301575,
+   "drained_s": 59.93533460304076,
+   "level": "info",
+   "peak_ahead_s": 3.355653403661203,
+   "print_id": "print-1794806742",
+   "reserve_s": 0.29,
+   "runway_s": 0.143357098,
+   "source": "host-rust",
+   "t_us": 1241853982
+  },
+  {
+   "t": 1794806810.646,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806742"
+  },
+  {
+   "t": 1794806810.647,
+   "event": "print.resume",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806742",
+   "pause_duration_s": 0.0008262589981313795
+  },
+  {
+   "t": 1794806850.241,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806742",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 107.31377789899125,
+   "filament_mm": 36.000000000000014
+  },
+  {
+   "t": 1794806854.472,
+   "event": "anchor_decision",
+   "condition": "reanchor",
+   "held_start_host": null,
+   "host_now": 1541.487354475,
+   "last_t_end": 97.68473628349464,
+   "lead_secs": 0.25,
+   "level": "info",
+   "print_id": "",
+   "seg_t_end": 0.008414804699676771,
+   "seg_t_start": 0.0,
+   "source": "host-rust",
+   "t0": 1541.737354475
+  }
+ ],
+ "journal": []
+}

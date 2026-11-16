@@ -49,6 +49,12 @@ KNOWN_BAD = [
     ("main-estop_restart_abort", "post_check", r"Klippy Disconnected"),
     ("reactor_drain-estop_restart_abort", "journal", r"status=6/ABRT"),
     ("reactor_drain-estop_g4", "journal", r"status=6/ABRT"),
+    ("pacer_land-pause_sparse", "stop_after_pause", r"> 12 s \(#860\)"),
+    (
+        "pacer_land-pause_sparse",
+        "stop_account_after_pause",
+        r"no closing pacer brake",
+    ),
 ]
 
 KNOWN_GOOD = [
@@ -72,6 +78,11 @@ KNOWN_GOOD = [
     ("reactor_drain-estop_g4", "stop_after_emergency_stop"),
     ("main-estop", "stop_after_emergency_stop"),
     ("main-estop", "shutdown"),
+    ("pacer_land-estop", "shutdown"),
+    ("pacer_land-estop_g4", "shutdown"),
+    ("pacer_land-cancel_plain", "stop_after_cancel"),
+    ("pacer_land-cancel_plain", "stop_account_after_cancel"),
+    ("pacer_land-cancel_then_print", "second_print"),
 ]
 
 PASSING_SESSIONS = [
@@ -83,6 +94,10 @@ PASSING_SESSIONS = [
     "reactor_drain-cancel_macro_mesh",
     "reactor_drain-firmware_restart",
     "reactor_drain-estop",
+    "pacer_land-estop",
+    "pacer_land-estop_g4",
+    "pacer_land-cancel_plain",
+    "pacer_land-cancel_then_print",
 ]
 
 
@@ -216,3 +231,20 @@ def test_a_stop_with_no_closing_brake_logged_fails():
     verdict = _verdicts(evidence)["stop_account_after_pause"]
     assert not verdict.ok
     assert "no closing pacer brake" in verdict.detail
+
+
+def test_a_tail_running_into_the_next_action_without_a_fresh_stream_fails():
+    evidence = _evidence("pacer_land-cancel_plain")
+    evidence["events"] = [
+        e for e in evidence["events"] if e["event"] != "anchor_decision"
+    ]
+    verdict = _verdicts(evidence)["stop_after_cancel"]
+    assert not verdict.ok
+    assert "motion did not stop before +25.6 s" in verdict.detail
+
+
+def test_a_cancelled_tail_is_timed_to_the_rest_before_the_fresh_stream():
+    verdict = _verdicts(_evidence("pacer_land-cancel_plain"))[
+        "stop_after_cancel"
+    ]
+    assert "stopped after 6.393 s <= 12 s (#860)" in verdict.detail

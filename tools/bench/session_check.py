@@ -36,6 +36,8 @@ from session_scenarios import (
 EVIDENCE_FILE = "session_evidence.json"
 CHECKS_FILE = "session_checks.json"
 STOPPED_QUIET_S = 1.0
+PI_CLOCK_SKEW_S = 0.05
+FRESH_STREAM = "anchor_decision"
 IN_FLIGHT_SLACK_S = session_evidence.SPAN_JOIN_S
 TERMINATING = frozenset(act.value for act in TERMINATING_ACTS)
 PAUSE_ENDS = frozenset({Act.RESUME.value, Act.CANCEL.value})
@@ -130,7 +132,19 @@ class Evidence:
         return intervals
 
     def spans_within(self, lo: float, hi: float) -> list[list]:
-        return [s for s in self.spans if s[0] < hi and s[1] > lo]
+        return [s for s in self.spans if lo <= s[0] < hi]
+
+    def anchored_between(self, lo: float, hi: float) -> bool:
+        return any(
+            lo - PI_CLOCK_SKEW_S <= anchor["t"] <= hi + PI_CLOCK_SKEW_S
+            for anchor in self.named(FRESH_STREAM)
+        )
+
+    def next_action_moved(self, ended: float, boundary: float) -> bool:
+        following = [s for s in self.spans if s[0] > ended]
+        if not following or following[0][0] < boundary:
+            return False
+        return self.anchored_between(max(ended, boundary), following[0][0])
 
     def ready_before_post_check(self) -> str | None:
         before = [s for s in self.states if s["t"] <= self.settled_at()]
@@ -177,7 +191,7 @@ def shutdown_check(evidence: Evidence) -> Verdict:
         if e["event"] in SHUTDOWN_EVENTS
         and not (
             e["reason"] in ESTOP_SHUTDOWN_REASONS
-            and any(stop <= e["t"] for stop in stops)
+            and any(stop <= e["t"] + PI_CLOCK_SKEW_S for stop in stops)
         )
     ]
     if unexpected:
@@ -253,9 +267,12 @@ def stop_latency(evidence: Evidence, mark: float) -> tuple[float | None, str]:
     if not flying:
         return None, "no motion in flight when it was sent"
     for index in range(flying[0], len(spans)):
+        ended = spans[index][1]
         resumed = spans[index + 1][0] if index + 1 < len(spans) else boundary
-        if resumed - spans[index][1] >= STOPPED_QUIET_S:
-            return max(spans[index][1] - mark, 0.0), ""
+        if resumed - ended >= STOPPED_QUIET_S or evidence.next_action_moved(
+            ended, boundary
+        ):
+            return max(ended - mark, 0.0), ""
     return None, f"motion did not stop before {evidence.at(boundary)}"
 
 

@@ -1,0 +1,304 @@
+{
+ "run_dir": "/home/dderg/bench/suites/20261116-053529/cancel_then_print/20261116-061343",
+ "head": "1ae0da436a88cc66d2c7f4a9efae9de0129a2f4c",
+ "scenario": "cancel_then_print",
+ "window": [
+  1794806026.3462,
+  1794806237.9971
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794806027.5560672,
+   "returned": 1794806027.5688474,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "start_print",
+   "after": "print_end",
+   "delay_s": 5.0,
+   "script": "",
+   "sent": 1794806124.0523317,
+   "returned": 1794806124.069168,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "cancel",
+   "after": "previous",
+   "delay_s": 20.0,
+   "script": "",
+   "sent": 1794806144.2954583,
+   "returned": 1794806147.3980978,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "start_print",
+   "after": "print_end",
+   "delay_s": 5.0,
+   "script": "",
+   "sent": 1794806152.6582084,
+   "returned": 1794806152.6757576,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794806027.5561,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "standby",
+   "print_message": ""
+  },
+  {
+   "t": 1794806027.9169,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794806118.9973,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  },
+  {
+   "t": 1794806124.2777,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794806147.5971,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": ""
+  },
+  {
+   "t": 1794806152.8621,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794806232.7411,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794806236.745714,
+  "lines": [
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794806237.997124,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": "",
+   "file_position": 40872
+  }
+ },
+ "spans": [
+  [
+   1794806040.0916,
+   1794806118.4676,
+   829213
+  ],
+  [
+   1794806124.6328,
+   1794806153.1504,
+   238937
+  ],
+  [
+   1794806153.8336,
+   1794806232.2115,
+   829213
+  ],
+  [
+   1794806237.0599,
+   1794806237.7273,
+   9546
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794806027.563,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806027",
+   "file": "bench_20261116-061343.gcode"
+  },
+  {
+   "t": 1794806039.559,
+   "event": "anchor_decision",
+   "condition": "first",
+   "held_start_host": null,
+   "host_now": 726.574100017,
+   "last_t_end": 0.0,
+   "lead_secs": 0.29,
+   "level": "info",
+   "print_id": "print-1794806027",
+   "seg_t_end": 0.008414804699676771,
+   "seg_t_start": 0.0,
+   "source": "host-rust",
+   "t0": 727.092213831
+  },
+  {
+   "t": 1794806118.604,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806027",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 91.04232055699686,
+   "filament_mm": 186.93646999999967
+  },
+  {
+   "t": 1794806124.063,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806124",
+   "file": "bench_20261116-061343.gcode"
+  },
+  {
+   "t": 1794806124.097,
+   "event": "anchor_decision",
+   "condition": "reanchor",
+   "held_start_host": null,
+   "host_now": 811.112513998,
+   "last_t_end": 78.38909030006143,
+   "lead_secs": 0.29,
+   "level": "info",
+   "print_id": "print-1794806124",
+   "seg_t_end": 0.008414804699676771,
+   "seg_t_start": 0.0,
+   "source": "host-rust",
+   "t0": 811.631233492
+  },
+  {
+   "t": 1794806147.386,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806124"
+  },
+  {
+   "t": 1794806147.386,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806124",
+   "outcome": "cancelled",
+   "reason": "",
+   "duration_s": 23.323535838004318,
+   "filament_mm": 55.075669999999405
+  },
+  {
+   "t": 1794806149.384,
+   "event": "pipe_drain",
+   "cap_s": 2.29,
+   "cause": "RunwayExhausted",
+   "dispatch_wait_s": 0.098189044,
+   "drained_s": 3.225097167414649,
+   "level": "info",
+   "peak_ahead_s": 9.515673105454145,
+   "print_id": "",
+   "reserve_s": 0.29,
+   "runway_s": 0.289933757,
+   "source": "host-rust",
+   "t_us": 603810025
+  },
+  {
+   "t": 1794806152.669,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806152",
+   "file": "bench_20261116-061343.gcode"
+  },
+  {
+   "t": 1794806153.29,
+   "event": "anchor_decision",
+   "condition": "reanchor",
+   "held_start_host": null,
+   "host_now": 840.304775677,
+   "last_t_end": 28.528938536148942,
+   "lead_secs": 0.29,
+   "level": "info",
+   "print_id": "print-1794806152",
+   "seg_t_end": 0.008414804699676771,
+   "seg_t_start": 0.0,
+   "source": "host-rust",
+   "t0": 840.831327154
+  },
+  {
+   "t": 1794806232.342,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794806152",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 79.67424334200041,
+   "filament_mm": 186.93646999999936
+  },
+  {
+   "t": 1794806236.796,
+   "event": "anchor_decision",
+   "condition": "reanchor",
+   "held_start_host": null,
+   "host_now": 923.810630658,
+   "last_t_end": 78.3890903000614,
+   "lead_secs": 0.25,
+   "level": "info",
+   "print_id": "",
+   "seg_t_end": 0.008414804699676771,
+   "seg_t_start": 0.0,
+   "source": "host-rust",
+   "t0": 924.060630658
+  }
+ ],
+ "journal": []
+}

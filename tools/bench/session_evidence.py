@@ -28,6 +28,7 @@ EVENT_NAMES = (
     "pipe_drain",
     "pacer_reserve_capped",
     "anchor_idle_resume",
+    "anchor_decision",
     "anchor_underrun",
     "stream_worker_fatal",
     "endpoint_death",
