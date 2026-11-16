@@ -80,6 +80,7 @@ def run_print(args) -> int:
             verbose=args.verbose,
             vtime_speed=args.vtime_speed,
         )
+        vtime_speed = world.vtime_speed
         try:
             world.boot(
                 configs.neptune_print_config(
@@ -106,6 +107,7 @@ def run_print(args) -> int:
 
     wall = time.monotonic() - wall_start
     print("PASS")
+    print(f"  vtime speed: {vtime_speed:g}x")
     print(f"  print time: {print_time:.1f}s")
     print(f"  wall time:  {wall:.1f}s")
     if print_time and wall:

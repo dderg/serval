@@ -213,7 +213,7 @@ case "$MODE" in
         ;;
     test)
         # Each SimWorld has its own virtual-clock shm segment, so worlds
-        # parallelize cleanly; local runs default to 4 pytest-xdist
+        # parallelize cleanly; local runs default to 8 pytest-xdist
         # workers. SIM_TEST_JOBS=N overrides, SIM_TEST_JOBS=0 forces
         # sequential. SIM_TEST_TARGETS narrows the run to specific test
         # files (used by the CI shards).
@@ -224,8 +224,8 @@ case "$MODE" in
             # CI shards stay sequential unless the workflow opts in: their
             # 2-core runners stutter klippy's real-time budgets into flakes.
             [[ -n "${SIM_TEST_JOBS:-}" ]] && XDIST_ARGS=(-n "$SIM_TEST_JOBS")
-        elif [[ "${SIM_TEST_JOBS:-4}" != 0 ]]; then
-            XDIST_ARGS=(-n "${SIM_TEST_JOBS:-4}")
+        elif [[ "${SIM_TEST_JOBS:-8}" != 0 ]]; then
+            XDIST_ARGS=(-n "${SIM_TEST_JOBS:-8}")
         fi
         # One test per dispatch keeps conftest's longest-first order: a
         # chunk would queue a second long test behind the first.

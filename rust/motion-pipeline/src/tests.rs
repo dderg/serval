@@ -1384,6 +1384,48 @@ fn small_mesh_variations_stay_continuous_across_move_boundaries() {
     assert_position_contiguous(&segs);
 }
 
+#[test]
+fn an_advance_rides_unshaped_leaders_across_a_mesh() {
+    let mut mesh = geometry::MeshGrid::new(
+        MeshGridSpec {
+            x_min: 20.0,
+            y_min: 20.0,
+            dx: 80.0,
+            dy: 80.0,
+            nx: 3,
+            ny: 3,
+            tension: 0.2,
+        },
+        vec![0.02, 0.0, -0.02, 0.01, 0.0, -0.01, -0.02, 0.0, 0.02],
+    )
+    .unwrap();
+    mesh.zero_at(100.0, 100.0);
+    let transform = Arc::new(geometry::SurfaceTransform::new(
+        mesh,
+        geometry::Fade::disabled(),
+    ));
+    let mut inputs = vec![StreamInput::Control(Control::SetMesh {
+        mesh: Some(transform),
+        gcode_z_rebase: 0.3,
+    })];
+    let mut start = [60.0, 60.0, 0.3];
+    for line_no in 1..=6 {
+        let x = if line_no % 2 == 1 { 140.0 } else { 60.0 };
+        let end = [x, 60.0 + 0.4 * f64::from(line_no / 2), 0.3];
+        inputs.push(StreamInput::Move(
+            line_move(start, end, 0.3, ctx(line_no, 100.0)).unwrap(),
+        ));
+        start = end;
+    }
+    inputs.push(StreamInput::Drain);
+    let mut chains = follower_chains_without_kernels();
+    chains.chains[3] = e_chain(Some(0.05), 0.0);
+
+    let segs = replay_inputs(cfg(), chains, &[60.0, 60.0, 0.3, 0.0], inputs);
+
+    assert_position_contiguous(&segs);
+}
+
 fn xy_shaper_follower_chains(smooth_time: f64) -> AxisChainSet {
     let bell = |name: &str| {
         trajectory::CompiledChain::compile(&[PostProcessorInstance::new(

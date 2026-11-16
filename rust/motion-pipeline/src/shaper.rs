@@ -931,6 +931,15 @@ fn materialize_source_axis(
             })?);
         }
     }
+    let convolved = chains
+        .chains
+        .get(axis)
+        .is_some_and(|chain| chain.kernel().is_some());
+    let seam_continuity = if convolved {
+        SeamContinuity::Position
+    } else {
+        crate::follower_projection::leader_seam_continuity(chains, axis)
+    };
     let mut curve = fit_axis_from_signal(
         AxisFit {
             axis,
@@ -939,7 +948,7 @@ fn materialize_source_axis(
             seed_breakpoints: &breakpoints,
             fit_tol,
             fit_context: "materialize_source",
-            seam_continuity: SeamContinuity::Position,
+            seam_continuity,
         },
         &CapContactSource {
             source,

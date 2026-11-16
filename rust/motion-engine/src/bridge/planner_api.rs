@@ -546,8 +546,8 @@ impl PyMotionEngine {
             z_velocity_limit,
             z_accel_limit,
         } = request;
-        let mut mesh = geometry::MeshGrid::new(
-            geometry::MeshGridSpec {
+        let transform = geometry::SurfaceTransform::activate(geometry::ProbedMesh {
+            grid: geometry::MeshGridSpec {
                 x_min,
                 y_min,
                 dx,
@@ -557,35 +557,11 @@ impl PyMotionEngine {
                 tension,
             },
             points,
-        )
+            fade,
+            zero_reference: (zero_ref_x, zero_ref_y),
+        })
         .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?;
-        if !mesh.contains(zero_ref_x, zero_ref_y) {
-            return Err(PyValueError::new_err(format!(
-                "set_bed_mesh: zero reference ({zero_ref_x}, {zero_ref_y}) is outside the \
-                 mesh area {:?} x {:?} — a mesh nonzero at the Z datum would shift it",
-                mesh.x_range(),
-                mesh.y_range()
-            )));
-        }
-        mesh.zero_at(zero_ref_x, zero_ref_y);
-        let fade = match fade {
-            Some((start, end, target)) => geometry::Fade::new(start, end, target)
-                .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?,
-            None => geometry::Fade::disabled(),
-        };
-        let transform = geometry::SurfaceTransform::new(mesh, fade);
         let bounds = transform.bounds();
-        if !fade.is_disabled() {
-            let (start, end) = fade.band();
-            let mesh_span = bounds.z_max.abs().max(bounds.z_min.abs());
-            if end - start <= mesh_span {
-                return Err(PyValueError::new_err(format!(
-                    "set_bed_mesh: fade band {:.3}mm is not wider than the mesh deviation \
-                     {mesh_span:.3}mm — the transform would not be invertible",
-                    end - start
-                )));
-            }
-        }
         let (limits, z_velocity_budget, z_accel_budget) = {
             let cfg = self.planner_config.lock_ok();
             (
