@@ -338,7 +338,7 @@ def report(
     mco_map = mco_clock_map(aux, x[eligible], y[eligible])
     evaluate = fitted if mco_map is None else mco_map
     lateness_ns = (y - evaluate(x)) * NS
-    floor = np.percentile(lateness_ns[eligible], LATENESS_FLOOR_PERCENTILE)
+    floor = np.percentile(lateness_ns[inliers], LATENESS_FLOOR_PERCENTILE)
     relative_ns = lateness_ns - floor
     motors_report = {}
     offset = 0
