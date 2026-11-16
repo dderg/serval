@@ -11,8 +11,8 @@ Full-stack simulator: the real MACH_LINUX firmware ELFs (H7 + F4) and real klipp
 
 ```bash
 tools/sim/run.sh                    # build image (incremental) + self-test print
-tools/sim/run.sh --gcode f.gcode    # print a G-code file, report speedup
-tools/sim/run.sh test               # full e2e pytest suite (homing, probe, beacon, phase stepping, motor adjust)
+tools/sim/run.sh --gcode f.gcode    # print a slicer file on neptune_print_config (extruder, starts at X0 Y0 Z0), free-running; fails on shutdown/print error
+tools/sim/run.sh test               # full e2e pytest suite on 8 workers, 73-84 s (homing, probe, beacon, phase stepping, motor adjust)
 tools/sim/run.sh test -k probe      # subset by pytest -k expression
 tools/sim/run.sh test --keep-logs   # leave every world's logs in .sim-logs/
 tools/sim/run.sh test --verbose     # stream the image build (hidden by default)
@@ -24,6 +24,8 @@ SIM_JITTER=3 tools/sim/run.sh test # pin the container + 3 bursty burners to one
 ```
 
 Every build is tagged `kalico-sim-<branch>` (the worktree's branch, or `--branch`'s argument), so agents/sessions on different worktrees build and test in parallel without clobbering each other's images.
+
+Planner-only check of a print without Docker: `uv run python scripts/preflight.py PRINT.gcode --config printer.cfg` (`docs/rewrite/preflight.md`); it does not cover what the sim does (MCU, homing, heaters, host runtime).
 
 ## Getting at a run's logs
 
@@ -97,11 +99,20 @@ Run one test: `tools/sim/run.sh test -k my_scenario`.
 - `CONFIG_MCU_SIM=y` firmware: motion tick registers as a vtime pacer (virtual time never skips a sample period), step queues notify the shim. Timer-too-close and timer-in-past checks stay live; only the tick-gap fault is compiled out (rust/runtime tick.rs), since the sim's tick is a paced thread, not an interrupt.
 - Auto-endstops: step-queue lines X=18/Y=7/Z=15 count toward a 50-step wall → endstop lines gpio200/201/202/203. Direct injection via each MCU's `sim_control` unix socket (`set_gpio_input`, `set_adc`, `get_gpio_output`, `get_steps`).
 - Beacon: `emulators/beacon_mcu.py` speaks full msgproto (identify, streaming, trsync, contact, NVM, accel) and tracks Z via the shim's step counter. The klippy-side plugin is the `dderg/beacon_klipper` fork branch `motion-stack-rename`, pinned in `fetch_plugins.sh` — NOT upstream beacon3d (incompatible with the motion rewrite).
-- Each SimWorld has its own virtual clock (`/dev/shm/vtime-<pid>-<n>`, handed to the shims via `VTIME_SHM_NAME`). Local `run.sh test` runs 4 pytest-xdist workers by default, CI shards run sequentially; `SIM_TEST_JOBS=N` overrides (0 = sequential), `SIM_TEST_TARGETS` picks test files. Separate `docker run`s remain fully isolated for concurrent agents.
+- Each SimWorld has its own virtual clock (`/dev/shm/vtime-<pid>-<n>`, handed to the shims via `VTIME_SHM_NAME`). Local `run.sh test` runs 8 pytest-xdist workers by default (the full suite takes 73-84 s on a 16-thread box, the floor being the longest test; it was 118-137 s on 4), CI shards run sequentially; `SIM_TEST_JOBS=N` overrides (0 = sequential), `SIM_TEST_TARGETS` picks test files. Separate `docker run`s remain fully isolated for concurrent agents. A test that runs longer than ~10 s carries `@pytest.mark.expected_seconds(s)`: conftest starts those first (xdist sends one test at a time), so the suite ends near its longest test instead of with a long test started late. Never assert a wall-clock ratio (speedup) in a test: it is load-dependent, and `SIM_JITTER` runs fail it by construction.
 
 ## Build caching
 
-No incremental compile caches: cargo target/ and firmware OUT dirs are rebuilt from scratch whenever their stage's sources change (mtime-based incrementalism served stale artifacts in practice — including a firmware ELF speaking an older wire protocol than the host beside it). Skipping unchanged work is Docker's content-addressed layer cache's job. Rebuild costs: nothing changed ~3s (all layers cached), python-only edit ~seconds (firmware stage not invalidated — tools/sim python is deliberately NOT copied into the firmware stage), any C or Rust edit ~1min (full clean recompile of the affected stage). run.sh also touches all source mtimes pre-build to defeat a macOS BuildKit context-scan staleness that served stale file content; this does not defeat layer caching (content-keyed).
+No incremental compile caches: cargo target/ and firmware OUT dirs are rebuilt from scratch whenever their stage's inputs change (mtime-based incrementalism served stale artifacts in practice — including a firmware ELF speaking an older wire protocol than the host beside it). Skipping unchanged work is Docker's content-addressed layer cache's job, so every stage gets only the files it builds from:
+
+- `toolchain` installs `rust-toolchain.toml`'s channel for the host target once per toml change and sets `RUSTUP_AUTO_INSTALL=0`. Before, each Rust stage auto-installed the toolchain with all its cross targets inside its build step: 133.6 s of the 153.6 s host build and ~60 s of the 69.4 s H7 build.
+- `rust-src` runs `tools/sim/prune_rust.py`: `rust-build` gets the closure of motion-engine/config-py/shaper-ident, `firmware` the closure of c-api (c-api, runtime, runtime-contract); every other member is its manifest over empty target files, and tests/benches/examples are dropped. A host-crate edit leaves the firmware stage cached and vice versa; runtime-contract is in both.
+- `cargo-registry` is `cargo fetch` of the all-stub skeleton (changes only with manifests or Cargo.lock), a layer both build stages start from, offline. It replaced a shared `/root/.cargo/registry` cache mount that the two concurrent stages unpacked into past cargo's lock (which lives in CARGO_HOME): `failed to unpack ... .cargo-ok File exists`.
+- preload shims, chelper and the plugin clone are separate stages; the firmware stage copies only the three `scripts/` files and `klippy/msgproto.py` its Makefile uses.
+
+Measured edit-then-run of one test (load 10-18, one session; old Dockerfile in brackets): no-op ~5 s, tools/sim python edit 9.0 s, motion-engine edit 50.5 s [113.0 s], runtime-crate edit 22.2 s [222.5 s], src/*.c edit 23.0 s [48.5 s]. The built `_motion_engine.so`, `_config_doc.so` and `_shaper_ident.so` are bit-identical to the old Dockerfile's.
+
+`./scripts/ci.sh sim-fresh` (`tools/sim/check_fresh.py`) proves no stage serves a stale artifact: it builds from a tar of the tree with a fresh token compiled into a host crate and a firmware crate, then a second token, then untouched, and byte-greps `_motion_engine.so` and the H7/F4 ELFs for exactly the expected tokens. Run it after changing any stage's inputs. It is local-only (376 s, three image builds): CI's `sim-image` job builds on a runner with no layer cache, so a CI image cannot be stale; staleness is a property of the persistent local BuildKit cache. run.sh also touches content-changed source mtimes pre-build to defeat a macOS BuildKit context-scan staleness that served stale file content; this does not defeat layer caching (content-keyed).
 
 If sim behavior ever contradicts the source anyway, byte-grep the built artifacts for a known-new string (`docker run --rm --entrypoint bash <tag> -c "grep -c STRING /kalico/klippy/_motion_engine.so"`) and `docker builder prune -af` if it's wrong.
 

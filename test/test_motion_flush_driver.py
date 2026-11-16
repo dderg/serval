@@ -54,6 +54,14 @@ class SyncReactor:
             self._timers[handle] = when
 
 
+class EventRecordingPrinter:
+    def __init__(self):
+        self.events = []
+
+    def send_event(self, name, *params):
+        self.events.append((name, params))
+
+
 class FakeEngine:
     """Engine stub with the fence protocol: fence_start reports a full pipe
     (None) `full_starts` times, then each fence resolves with the absolute
@@ -118,6 +126,8 @@ def _make_motion(
         motion._lookahead_fence_handler
     )
     motion._engine_wakeup = None
+    motion.printer = EventRecordingPrinter()
+    motion._planner_ready = False
     return motion
 
 
@@ -306,3 +316,16 @@ def test_blocking_fence_wait_retries_start_and_yields():
     est = mcu.estimated_print_time(reactor.monotonic())
     assert motion.get_last_move_time() == pytest.approx(est + 3.0)
     assert len(pauses) >= 3, "full channel must yield to the reactor, not spin"
+
+
+def test_lookahead_callback_announces_toolhead_activity_to_idle_timeout():
+    reactor = SyncReactor()
+    mcu = RecordingMcu()
+    motion = _make_motion([mcu], reactor)
+
+    motion.register_lookahead_callback(lambda print_time: None)
+
+    est = mcu.estimated_print_time(reactor.monotonic())
+    assert motion.printer.events == [
+        ("toolhead:sync_print_time", (reactor.monotonic(), est, 0.0))
+    ]

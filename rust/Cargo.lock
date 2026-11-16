@@ -687,6 +687,8 @@ dependencies = [
  "planner-config",
  "proptest",
  "runtime-contract",
+ "serde",
+ "serde_json",
  "source-tree",
  "step-shim",
  "thiserror",

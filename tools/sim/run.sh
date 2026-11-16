@@ -162,10 +162,10 @@ run_quiet() {
 }
 
 build_image() {
-    # One retry absorbs transient registry/network failures (e.g. a cargo
-    # crate download aborting mid-unpack on a CI runner). Deterministic
-    # build errors replay from the layer cache and fail fast the second
-    # time, so real breakage stays loud.
+    # One retry absorbs transient network failures (apt, rustup, cargo
+    # fetch, plugin clones on a CI runner). Deterministic build errors
+    # replay from the layer cache and fail fast the second time, so real
+    # breakage stays loud.
     local ctx="$1" dockerfile="$2"
     if ! run_quiet docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
             -t "$IMAGE_TAG" -f "$dockerfile" "$ctx"; then
@@ -213,7 +213,7 @@ case "$MODE" in
         ;;
     test)
         # Each SimWorld has its own virtual-clock shm segment, so worlds
-        # parallelize cleanly; local runs default to 4 pytest-xdist
+        # parallelize cleanly; local runs default to 8 pytest-xdist
         # workers. SIM_TEST_JOBS=N overrides, SIM_TEST_JOBS=0 forces
         # sequential. SIM_TEST_TARGETS narrows the run to specific test
         # files (used by the CI shards).
@@ -224,9 +224,12 @@ case "$MODE" in
             # CI shards stay sequential unless the workflow opts in: their
             # 2-core runners stutter klippy's real-time budgets into flakes.
             [[ -n "${SIM_TEST_JOBS:-}" ]] && XDIST_ARGS=(-n "$SIM_TEST_JOBS")
-        elif [[ "${SIM_TEST_JOBS:-4}" != 0 ]]; then
-            XDIST_ARGS=(-n "${SIM_TEST_JOBS:-4}")
+        elif [[ "${SIM_TEST_JOBS:-8}" != 0 ]]; then
+            XDIST_ARGS=(-n "${SIM_TEST_JOBS:-8}")
         fi
+        # One test per dispatch keeps conftest's longest-first order: a
+        # chunk would queue a second long test behind the first.
+        [[ ${#XDIST_ARGS[@]} -gt 0 ]] && XDIST_ARGS+=(--maxschedchunk=1)
         # Every SimWorld lives in a pytest tmp dir that dies with the
         # container, taking klippy.log, the MCU logs and the structured
         # events/*.jsonl store with it. --keep-logs puts pytest's basetemp on

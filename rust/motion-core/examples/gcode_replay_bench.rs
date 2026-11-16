@@ -7,7 +7,8 @@
 //
 //   cargo run --release -p motion-core --example gcode_replay_bench -- \
 //       <file.gcode> --config <printer.cfg> [t_lo t_hi] \
-//       [--min-worst-x <x>] [--max-held-moves <n>] [--digest] [--synchronous]
+//       [--min-worst-x <x>] [--max-held-moves <n>] [--digest] [--synchronous] \
+//       [--mesh <bed_mesh.json>] [--check]
 //
 // With t_lo/t_hi only moves whose stream window overlaps [t_lo, t_hi] stream
 // seconds are interesting; the whole file still replays (stream time only
@@ -19,17 +20,138 @@
 // instruction count deterministic (scripts/throughput_gate.py). The planner
 // commits only show up as shaped output there, so --max-held-moves needs the
 // staged pipeline.
+//
+// Stops at rest (G4, M400, M84, ...) reach the pipeline as the live engine
+// sends them. --mesh activates a bed mesh before the first move, as klippy's
+// `BED_MESH_PROFILE LOAD` does with the toolhead at the origin: the JSON is
+// the request `bed_mesh` hands `set_bed_mesh`, and the G-code starts from
+// the Z the activation renamed. --check fails on any emitted segment that
+// does not evaluate to finite positions. Any failure prints one
+// `REPLAY_FAILURE {json}` line for scripts/preflight.py.
 
 use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::panic;
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Instant;
 
-use motion_core::seam_test_harness::LiveReplay;
+use geometry::{GcodePos, MachinePos, MeshGridSpec, ProbedMesh, SurfaceTransform};
+use motion_core::seam_test_harness::{LiveScript, LiveScriptError};
 use motion_pipeline::timing::stage_totals;
-use motion_pipeline::{Pipeline, StreamInput, TrajectoryItem};
+use motion_pipeline::{Control, Pipeline, StreamInput, TrajectoryItem};
+use pipeline_snapshot::{PlanStep, SnapshotError};
 use trajectory::ContinuousSegment;
+
+const EXIT_FAILURE: i32 = 1;
+
+#[derive(Clone, Copy)]
+enum FailureKind {
+    Config,
+    Mesh,
+    GcodeStopsPrint,
+    GcodeUnplannable,
+    MoveRefused,
+    NothingToPlan,
+    Panic,
+    NonFinite,
+    PipelineClosed,
+}
+
+impl FailureKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Mesh => "mesh",
+            Self::GcodeStopsPrint => "gcode_stops_print",
+            Self::GcodeUnplannable => "gcode_unplannable",
+            Self::MoveRefused => "move_refused",
+            Self::NothingToPlan => "nothing_to_plan",
+            Self::Panic => "panic",
+            Self::NonFinite => "non_finite",
+            Self::PipelineClosed => "pipeline_closed",
+        }
+    }
+
+    fn of(error: &LiveScriptError) -> Self {
+        match error {
+            LiveScriptError::Config(_) => Self::Config,
+            LiveScriptError::Gcode(e) if e.stops_the_live_print() => Self::GcodeStopsPrint,
+            LiveScriptError::Gcode(_) => Self::GcodeUnplannable,
+            LiveScriptError::Plan(SnapshotError::InvalidMove { .. }) => Self::MoveRefused,
+            LiveScriptError::Plan(_) => Self::NothingToPlan,
+        }
+    }
+}
+
+/// Where the replay stands: the sequence numbers of the last move fed and
+/// of the last segment emitted, and that segment's end.
+#[derive(Clone, Copy)]
+struct Progress {
+    fed_seq: Option<u32>,
+    emitted_seq: Option<u32>,
+    stream_t: Option<f64>,
+}
+
+static PROGRESS: Mutex<Progress> = Mutex::new(Progress {
+    fed_seq: None,
+    emitted_seq: None,
+    stream_t: None,
+});
+static MOVE_LINES: OnceLock<Vec<u32>> = OnceLock::new();
+static FAILED: AtomicBool = AtomicBool::new(false);
+
+fn progress() -> MutexGuard<'static, Progress> {
+    PROGRESS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn source_line(seq: Option<u32>) -> Option<u32> {
+    MOVE_LINES.get()?.get(seq? as usize).copied()
+}
+
+/// The first failure's record; later ones are its consequences.
+fn record_failure(kind: FailureKind, message: &str, location: Option<&str>) {
+    if FAILED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let at = *progress();
+    let record = serde_json::json!({
+        "kind": kind.name(),
+        "message": message,
+        "location": location,
+        "fed_line": source_line(at.fed_seq),
+        "emitted_line": source_line(at.emitted_seq),
+        "stream_t": at.stream_t,
+    });
+    println!("REPLAY_FAILURE {record}");
+    let _ = std::io::stdout().flush();
+}
+
+/// Release builds abort on panic, so a panic on any thread records its
+/// failure from the hook.
+fn record_panics() {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        let location = info.location().map(ToString::to_string);
+        record_failure(FailureKind::Panic, &message, location.as_deref());
+        default_hook(info);
+    }));
+}
+
+fn fail(kind: FailureKind, message: &str) -> ! {
+    record_failure(kind, message, None);
+    eprintln!("FAIL {}: {message}", kind.name());
+    process::exit(EXIT_FAILURE);
+}
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
     let i = args.iter().position(|a| a == flag)?;
@@ -45,19 +167,27 @@ fn take_switch(args: &mut Vec<String>, switch: &str) -> bool {
     true
 }
 
+fn note_fed(input: &StreamInput) {
+    if let StreamInput::Move(m) = input {
+        progress().fed_seq = Some(m.source.start_line);
+    }
+}
+
+/// The deepest run of inputs absorbed without the planner committing, or
+/// `None` when the pipeline closed.
 fn replay_staged(
     pipeline: Pipeline,
-    moves: impl IntoIterator<Item = impl Into<StreamInput>>,
+    inputs: Vec<StreamInput>,
     sink: impl FnMut(TrajectoryItem) -> bool + Send + 'static,
-) -> u64 {
+) -> Option<u64> {
     let mut pipeline = pipeline.into_staged(sink);
     let mut held = 0u64;
     let mut deepest_held = 0u64;
-    for (submitted, m) in moves.into_iter().enumerate() {
+    for input in inputs {
+        note_fed(&input);
         let planned_before = pipeline.segments_planned();
-        if !pipeline.feed(m.into()) {
-            eprintln!("pipeline input closed at move {submitted}");
-            process::exit(1);
+        if !pipeline.feed(input) {
+            return None;
         }
         held = if pipeline.segments_planned() > planned_before {
             0
@@ -66,36 +196,112 @@ fn replay_staged(
         };
         deepest_held = deepest_held.max(held);
     }
-    assert!(pipeline.finish());
-    deepest_held
+    pipeline.finish().then_some(deepest_held)
 }
 
 fn replay_synchronous(
     mut pipeline: Pipeline,
-    moves: impl IntoIterator<Item = impl Into<StreamInput>>,
+    inputs: Vec<StreamInput>,
     mut sink: impl FnMut(TrajectoryItem) -> bool,
-) {
-    for (submitted, m) in moves.into_iter().enumerate() {
-        if !pipeline.feed(m.into(), &mut sink) {
-            eprintln!("pipeline input closed at move {submitted}");
-            process::exit(1);
+) -> bool {
+    for input in inputs {
+        note_fed(&input);
+        if !pipeline.feed(input, &mut sink) {
+            return false;
         }
     }
-    assert!(pipeline.finish(&mut sink));
+    pipeline.finish(&mut sink)
 }
 
 fn planner_config(path: &str) -> planner_config::PlannerConfig {
-    let text = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("cannot read {path}: {e}");
-        process::exit(1);
-    });
-    planner_config::from_doc::planner_config_from_text(&text).unwrap_or_else(|e| {
-        eprintln!("{path}: {e}");
-        process::exit(1);
+    let text = fs::read_to_string(path)
+        .unwrap_or_else(|e| fail(FailureKind::Config, &format!("cannot read {path}: {e}")));
+    planner_config::from_doc::planner_config_from_text(&text)
+        .unwrap_or_else(|e| fail(FailureKind::Config, &format!("{path}: {e}")))
+}
+
+/// The request klippy's `bed_mesh` hands `set_bed_mesh`.
+#[derive(serde::Deserialize)]
+struct BedMeshRequest {
+    points: Vec<f64>,
+    x_min: f64,
+    y_min: f64,
+    dx: f64,
+    dy: f64,
+    nx: usize,
+    ny: usize,
+    tension: f64,
+    fade: Option<(f64, f64, f64)>,
+    zero_ref_x: f64,
+    zero_ref_y: f64,
+}
+
+fn load_mesh(path: &str) -> Result<SurfaceTransform, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let request: BedMeshRequest =
+        serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+    SurfaceTransform::activate(ProbedMesh {
+        grid: MeshGridSpec {
+            x_min: request.x_min,
+            y_min: request.y_min,
+            dx: request.dx,
+            dy: request.dy,
+            nx: request.nx,
+            ny: request.ny,
+            tension: request.tension,
+        },
+        points: request.points,
+        fade: request.fade,
+        zero_reference: (request.zero_ref_x, request.zero_ref_y),
     })
+    .map_err(|e| format!("set_bed_mesh: {e}"))
+}
+
+fn stream_inputs(
+    steps: Vec<PlanStep>,
+    mesh: Option<Arc<SurfaceTransform>>,
+    gcode_z_rebase: f64,
+) -> Vec<StreamInput> {
+    let mut inputs = Vec::with_capacity(steps.len() + 1);
+    if let Some(mesh) = mesh {
+        inputs.push(StreamInput::Control(Control::SetMesh {
+            mesh: Some(mesh),
+            gcode_z_rebase,
+        }));
+    }
+    for step in steps {
+        step.feed(|input| {
+            inputs.push(input);
+            true
+        });
+    }
+    inputs
+}
+
+fn non_finite(seg: &ContinuousSegment) -> Option<String> {
+    if !(seg.t_start.is_finite() && seg.t_end.is_finite()) {
+        return Some(format!(
+            "segment span [{}, {}] is not finite",
+            seg.t_start, seg.t_end
+        ));
+    }
+    for axis in 0..seg.axes.len() {
+        for t in [seg.t_start, seg.t_end] {
+            match seg.eval_axis(axis, t) {
+                Ok(pva)
+                    if pva.position.is_finite()
+                        && pva.velocity.is_finite()
+                        && pva.acceleration.is_finite() => {}
+                Ok(pva) => return Some(format!("axis {axis} at t={t}: {pva:?} is not finite")),
+                Err(e) => return Some(format!("axis {axis} at t={t} does not evaluate: {e}")),
+            }
+        }
+    }
+    None
 }
 
 fn main() {
+    record_panics();
     let mut args: Vec<String> = env::args().collect();
     let min_worst_x = take_flag(&mut args, "--min-worst-x")
         .map(|v| v.parse::<f64>().expect("--min-worst-x takes a number"));
@@ -103,10 +309,13 @@ fn main() {
         .map(|v| v.parse::<u64>().expect("--max-held-moves takes a count"));
     let digest = take_switch(&mut args, "--digest");
     let synchronous = take_switch(&mut args, "--synchronous");
+    let check = take_switch(&mut args, "--check");
+    let mesh_path = take_flag(&mut args, "--mesh");
     let Some(config_path) = take_flag(&mut args, "--config") else {
         eprintln!(
             "usage: gcode_replay_bench <in.gcode> --config <printer.cfg> [t_lo t_hi] \
-             [--min-worst-x <x>] [--max-held-moves <n>] [--digest] [--synchronous]"
+             [--min-worst-x <x>] [--max-held-moves <n>] [--digest] [--synchronous] \
+             [--mesh <bed_mesh.json>] [--check]"
         );
         process::exit(1);
     };
@@ -130,10 +339,22 @@ fn main() {
     });
 
     let planner = planner_config(&config_path);
-    let replay = LiveReplay::new(&source, &planner, None).unwrap_or_else(|e| {
-        eprintln!("{config_path}: {e}");
-        process::exit(1);
-    });
+    let mesh = mesh_path
+        .map(|path| Arc::new(load_mesh(&path).unwrap_or_else(|e| fail(FailureKind::Mesh, &e))));
+    let gcode_z_rebase = mesh
+        .as_deref()
+        .map_or(0.0, |mesh| MachinePos([0.0; 3]).to_gcode(Some(mesh)).z());
+    let mut script = LiveScript::new(
+        &source,
+        &planner,
+        None,
+        GcodePos([0.0, 0.0, gcode_z_rebase]),
+    )
+    .unwrap_or_else(|e| fail(FailureKind::of(&e), &e.to_string()));
+    MOVE_LINES
+        .set(std::mem::take(&mut script.move_lines))
+        .expect("the move lines are set once");
+    let inputs = stream_inputs(std::mem::take(&mut script.steps), mesh, gcode_z_rebase);
 
     let wall = Instant::now();
     let (arrival_tx, arrival_rx) = crossbeam_channel::unbounded::<(f64, f64)>();
@@ -143,6 +364,15 @@ fn main() {
             arrival_tx
                 .send((wall.elapsed().as_secs_f64(), seg.t_end))
                 .expect("bench collects every arrival");
+            {
+                let mut at = progress();
+                at.emitted_seq = Some(seg.source_line);
+                at.stream_t = Some(seg.t_end);
+            }
+            if let Some(problem) = check.then(|| non_finite(&seg)).flatten() {
+                record_failure(FailureKind::NonFinite, &problem, None);
+                return false;
+            }
             if digest {
                 digest_tx.send(seg).expect("bench digests every segment");
             }
@@ -150,16 +380,26 @@ fn main() {
         true
     };
 
-    let submitted = replay.moves.len() as u64;
-    let pipeline = replay.pipeline();
-    let deepest_held = if synchronous {
-        replay_synchronous(pipeline, replay.moves, sink);
-        None
+    let submitted = inputs.len() as u64;
+    let pipeline = Pipeline::new(
+        script.config.clone(),
+        script.chains.clone(),
+        script.home.clone(),
+        0.0,
+    );
+    let outcome = if synchronous {
+        replay_synchronous(pipeline, inputs, sink).then_some(None)
     } else {
-        Some(replay_staged(pipeline, replay.moves, sink))
+        replay_staged(pipeline, inputs, sink).map(Some)
     };
     let wall_s = wall.elapsed().as_secs_f64();
     let arrivals: Vec<(f64, f64)> = arrival_rx.try_iter().collect();
+    let Some(deepest_held) = outcome else {
+        if FAILED.load(Ordering::SeqCst) {
+            process::exit(EXIT_FAILURE);
+        }
+        fail(FailureKind::PipelineClosed, "the pipeline closed its input");
+    };
     let stream_s = arrivals.last().map_or(0.0, |&(_, t)| t);
     let held_field =
         deepest_held.map_or(String::new(), |held| format!(" deepest_held_moves={held}"));
@@ -174,6 +414,9 @@ fn main() {
             format!("{seg:?}").hash(&mut hasher);
         }
         println!("trajectory_digest={:016x}", hasher.finish());
+    }
+    if check {
+        println!("check ok: {} segments evaluate finite", arrivals.len());
     }
     println!("stage breakdown (wall share, calls, per move):");
     for total in stage_totals() {

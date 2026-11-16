@@ -82,6 +82,63 @@ impl std::fmt::Display for SurfaceError {
 
 impl std::error::Error for SurfaceError {}
 
+/// A saved bed-mesh profile as klippy's `bed_mesh` hands it to the engine:
+/// the probed samples, the fade band `(start, end, target)` when enabled,
+/// and the `zero_reference_position` the surface is pinned to zero at.
+#[derive(Debug, Clone)]
+pub struct ProbedMesh {
+    pub grid: MeshGridSpec,
+    pub points: Vec<f64>,
+    pub fade: Option<(f64, f64, f64)>,
+    pub zero_reference: (f64, f64),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MeshActivationError {
+    Surface(SurfaceError),
+    ZeroReferenceOutside {
+        x: f64,
+        y: f64,
+        x_range: (f64, f64),
+        y_range: (f64, f64),
+    },
+    FadeBandTooNarrow {
+        band: f64,
+        mesh_span: f64,
+    },
+}
+
+impl std::fmt::Display for MeshActivationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Surface(error) => write!(f, "{error}"),
+            Self::ZeroReferenceOutside {
+                x,
+                y,
+                x_range,
+                y_range,
+            } => write!(
+                f,
+                "zero reference ({x}, {y}) is outside the mesh area {x_range:?} x {y_range:?} \
+                 — a mesh nonzero at the Z datum would shift it"
+            ),
+            Self::FadeBandTooNarrow { band, mesh_span } => write!(
+                f,
+                "fade band {band:.3}mm is not wider than the mesh deviation {mesh_span:.3}mm \
+                 — the transform would not be invertible"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MeshActivationError {}
+
+impl From<SurfaceError> for MeshActivationError {
+    fn from(error: SurfaceError) -> Self {
+        Self::Surface(error)
+    }
+}
+
 /// Surface height and its derivatives at one (x, y).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceSample {
@@ -602,6 +659,46 @@ impl SurfaceTransform {
     pub fn new(mesh: MeshGrid, fade: Fade) -> Self {
         let bounds = mesh.bounds();
         Self { mesh, fade, bounds }
+    }
+
+    /// The transform a profile activates: zeroed at its reference point,
+    /// refused when that point lies off the grid or the fade band is too
+    /// narrow to keep the warp invertible.
+    pub fn activate(probed: ProbedMesh) -> Result<Self, MeshActivationError> {
+        let ProbedMesh {
+            grid,
+            points,
+            fade,
+            zero_reference: (x, y),
+        } = probed;
+        let mut mesh = MeshGrid::new(grid, points)?;
+        if !mesh.contains(x, y) {
+            return Err(MeshActivationError::ZeroReferenceOutside {
+                x,
+                y,
+                x_range: mesh.x_range(),
+                y_range: mesh.y_range(),
+            });
+        }
+        mesh.zero_at(x, y);
+        let fade = match fade {
+            Some((start, end, target)) => Fade::new(start, end, target)?,
+            None => Fade::disabled(),
+        };
+        let transform = Self::new(mesh, fade);
+        if fade.is_disabled() {
+            return Ok(transform);
+        }
+        let (start, end) = fade.band();
+        let bounds = transform.bounds();
+        let mesh_span = bounds.z_max.abs().max(bounds.z_min.abs());
+        if end - start <= mesh_span {
+            return Err(MeshActivationError::FadeBandTooNarrow {
+                band: end - start,
+                mesh_span,
+            });
+        }
+        Ok(transform)
     }
 
     pub fn mesh(&self) -> &MeshGrid {

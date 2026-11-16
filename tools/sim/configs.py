@@ -412,6 +412,178 @@ enable_force_move: True
 """
 
 
+def bench_mesh_print_config(h7_pty: str, gcode_dir: str) -> str:
+    """The Pi bench's printer.cfg (tools/bench/printer.cfg) on sim pins with
+    its interrupt-sweep additions: the 3x3 "wavy" bed mesh profile and
+    PAUSE/RESUME macros that retract and park."""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 1000
+max_accel: 10000
+max_jerk: 0
+corner_deviation: 0.21
+max_z_velocity: 25
+max_z_accel: 100
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: shaper_x
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: shaper_y
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 20000
+
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.03
+
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 50
+
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 44
+
+[motor a]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor b]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio6
+dir_pin: gpiochip0/gpio7
+enable_pin: !gpiochip0/gpio8
+microsteps: 16
+rotation_distance: 8
+
+[motor extruder]
+drive: stepper
+step_pin: gpiochip0/gpio20
+dir_pin: gpiochip0/gpio21
+enable_pin: !gpiochip0/gpio22
+microsteps: 16
+rotation_distance: 7.73
+
+[extruder]
+axis: e
+nozzle_diameter: 0.400
+filament_diameter: 1.750
+heater_pin: gpiochip0/gpio30
+sensor_type: EPCOS 100K B57560G104F
+sensor_pin: analog0
+min_temp: 0
+max_temp: 250
+min_extrude_temp: 0
+control: pid
+pid_kp: 30.356
+pid_ki: 1.857
+pid_kd: 124.081
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[pause_resume]
+
+[force_move]
+enable_force_move: True
+
+[bed_mesh]
+mesh_min: 80, 80
+mesh_max: 140, 140
+probe_count: 3, 3
+zero_reference_position: 110, 110
+fade_start: 1
+fade_end: 10
+fade_target: 0
+
+[gcode_macro PAUSE]
+rename_existing: BASE_PAUSE
+gcode:
+  BASE_PAUSE
+  G91
+  G1 E-1 F2400
+  G1 Z2 F600
+  G90
+  G1 X20 Y20 F12000
+
+[gcode_macro RESUME]
+rename_existing: BASE_RESUME
+gcode:
+  G91
+  G1 E1 F2400
+  G90
+  BASE_RESUME
+
+#*# <---------------------- SAVE_CONFIG ---------------------->
+#*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
+#*#
+#*# [bed_mesh wavy]
+#*# version = 1
+#*# points =
+#*#   0.10, 0.00, -0.10
+#*#   0.05, 0.00, -0.05
+#*#   -0.10, 0.00, 0.10
+#*# min_x = 80.0
+#*# max_x = 140.0
+#*# min_y = 80.0
+#*# max_y = 140.0
+#*# x_count = 3
+#*# y_count = 3
+#*# mesh_x_pps = 2
+#*# mesh_y_pps = 2
+#*# algo = lagrange
+#*# tension = 0.2
+"""
+
+
 AWD_TMC_RUN_CURRENT = 0.8
 AWD_TMC_SENSE_RESISTOR = 0.075
 AWD_TMC_HOME_CURRENTS = {"a": 0.45, "a1": 0.50, "b": 0.55, "b1": 0.60}

@@ -26,7 +26,11 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from tools.sim import configs  # noqa: E402
-from tools.sim.world import SimError, SimWorld  # noqa: E402
+from tools.sim.world import (  # noqa: E402
+    UNBOUNDED_VTIME_SPEED,
+    SimError,
+    SimWorld,
+)
 
 SERVE_EXTRAS = """
 [pause_resume]
@@ -72,19 +76,28 @@ def run_print(args) -> int:
     with tempfile.TemporaryDirectory(prefix="sim_") as tmpdir:
         world = SimWorld(
             pathlib.Path(tmpdir),
+            dual_mcu=False,
             verbose=args.verbose,
             vtime_speed=args.vtime_speed,
         )
+        vtime_speed = world.vtime_speed
         try:
             world.boot(
-                configs.minimal_config(world.h7_pty, str(world.gcode_dir)),
+                configs.neptune_print_config(
+                    world.h7_pty, str(world.gcode_dir)
+                ),
             )
+            world.gcode_ok("SET_KINEMATIC_POSITION X=0 Y=0 Z=0")
             if args.gcode:
                 gcode_path = pathlib.Path(args.gcode)
             else:
                 gcode_path = world.gcode_dir / "self_test.gcode"
                 gcode_path.write_text(configs.SELF_TEST_GCODE)
             print_time = world.print_file(gcode_path, timeout=args.timeout)
+            world.gcode_ok("M400", timeout=args.timeout)
+            shutdown = world.shutdown_line()
+            if shutdown:
+                raise SimError(f"printer shutdown: {shutdown}")
         except SimError as e:
             print(f"FAIL: {e}")
             world.dump_diagnostics()
@@ -94,6 +107,7 @@ def run_print(args) -> int:
 
     wall = time.monotonic() - wall_start
     print("PASS")
+    print(f"  vtime speed: {vtime_speed:g}x")
     print(f"  print time: {print_time:.1f}s")
     print(f"  wall time:  {wall:.1f}s")
     if print_time and wall:
@@ -145,9 +159,9 @@ def main() -> int:
     parser.add_argument(
         "--vtime-speed",
         type=float,
-        default=1.0,
-        help="Virtual clock speed vs real time (default 1.0; below 1.0 "
-        "inflates host-side latency budgets for timing determinism)",
+        default=UNBOUNDED_VTIME_SPEED,
+        help="Upper bound on virtual seconds per real second (default: "
+        "free-running like the e2e suite; 1.0 paces a run a human watches)",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
