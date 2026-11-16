@@ -52,6 +52,7 @@ def test_the_settle_script_never_kills_its_own_shell():
     jobs = {
         "-f 'build-nativ[e].sh'": "./scripts/build-native.sh",
         "-f 'examples/gcode_replay_benc[h]'": "examples/gcode_replay_bench x",
+        "-f '^bin[s]/[^ ]+ trees/'": "bins/calibration trees/calibration/a",
     }
     assert set(jobs) <= set(throttle.ORPHANED_JOBS)
     for job, command_line in jobs.items():

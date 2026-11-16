@@ -19,6 +19,7 @@ ORPHANED_JOBS = (
     "-x rustc",
     "-f 'build-nativ[e].sh'",
     "-f 'examples/gcode_replay_benc[h]'",
+    "-f '^bin[s]/[^ ]+ trees/'",
 )
 SETTLE_HOST = "\n".join(
     [
