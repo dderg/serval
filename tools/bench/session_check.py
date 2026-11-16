@@ -471,7 +471,6 @@ def brakes_check(evidence: Evidence, check: NoStrayBrakes) -> Verdict:
     return Verdict("pacer_brakes", True, detail)
 
 
-
 def stats_gaps(evidence: Evidence) -> list[tuple[float, float]]:
     """(gap, start) between Stats lines inside each print, outside its
     commanded pauses: klippy logs Stats only while it is active."""
