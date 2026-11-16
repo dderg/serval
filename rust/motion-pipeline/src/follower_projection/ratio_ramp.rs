@@ -2186,7 +2186,8 @@ impl RatioSmoothing {
     /// an after side past the leaders probed, waits for the next leg; an
     /// infinite `table_end`, where the leaders come to rest past the table,
     /// lays it with what is laid. A crawl behind one still waiting waits
-    /// too: valleys are laid in path order.
+    /// too: valleys are laid in path order. Leaders that do not crawl need
+    /// no valley at any ratio, so they wait for none.
     fn lay_crawl_valley(
         &mut self,
         tables: (&[RatioSpan], &[RatioSpan]),
@@ -2194,6 +2195,9 @@ impl RatioSmoothing {
         (turn, crossing): (f64, Crossing),
         table_end: f64,
     ) {
+        if !crossing.crawls() {
+            return;
+        }
         if !self.waiting_crawls.is_empty() {
             self.waiting_crawls.push((turn, crossing));
             return;

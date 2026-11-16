@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 pub use geometry::Move;
-use geometry::{CornerFitConfig, VelocityLimits};
+use geometry::{CornerFitConfig, GcodePos, VelocityLimits};
+use pipeline_snapshot::waypoints::WaypointError;
+use pipeline_snapshot::{PlanStep, SnapshotError};
 use trajectory::{AxisChainSet, ClockedMotorSpan, ContinuousSegment};
 
 use crate::enqueue::enqueue_segment;
@@ -126,17 +128,78 @@ fn moves_under(source: &str, base: motion_pipeline::live_config::GcodeMoveBase) 
         .unwrap_or_else(|e| panic!("seam harness: {e}"));
     let steps = pipeline_snapshot::plan_steps(&waypoints, base)
         .unwrap_or_else(|e| panic!("seam harness: {e}"));
+    only_moves(steps)
+}
+
+fn only_moves(steps: Vec<PlanStep>) -> Vec<Move> {
     let mut moves = Vec::with_capacity(steps.len());
     for step in steps {
         match step {
-            pipeline_snapshot::PlanStep::Move(m) => moves.push(m),
-            pipeline_snapshot::PlanStep::Rest { dwell_s } => panic!(
+            PlanStep::Move(m) => moves.push(m),
+            PlanStep::Rest { dwell_s } => panic!(
                 "seam harness: the G-code stops at rest (dwell {dwell_s} s) after move {}; a move list cannot carry it",
                 moves.len()
             ),
         }
     }
     moves
+}
+
+#[derive(Debug)]
+pub enum LiveScriptError {
+    Config(String),
+    Gcode(WaypointError),
+    Plan(SnapshotError),
+}
+
+impl std::fmt::Display for LiveScriptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Config(message) => write!(f, "{message}"),
+            Self::Gcode(error) => write!(f, "{error}"),
+            Self::Plan(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+/// What the live host feeds the pipeline for `source` from a toolhead
+/// standing at `start`: every move and every stop at rest, and in
+/// `move_lines[n]` the source line of the move with sequence number `n`.
+pub struct LiveScript {
+    pub config: StreamConfig,
+    pub chains: AxisChainSet,
+    pub home: Vec<f64>,
+    pub steps: Vec<PlanStep>,
+    pub move_lines: Vec<u32>,
+}
+
+impl LiveScript {
+    pub fn new(
+        source: &str,
+        planner: &planner_config::PlannerConfig,
+        step_benchmarks: Option<&motion_pipeline::live_config::step_capacity::StepCapacityInput>,
+        start: GcodePos,
+    ) -> Result<Self, LiveScriptError> {
+        let config = motion_pipeline::live_config::stream_config(planner, step_benchmarks)
+            .map_err(LiveScriptError::Config)?;
+        let chains = planner
+            .compile_active_chains()
+            .map_err(|e| LiveScriptError::Config(e.to_string()))?;
+        let base = motion_pipeline::live_config::extruder_caps(planner)
+            .and_then(|caps| motion_pipeline::live_config::GcodeMoveBase::of(planner, &caps))
+            .map_err(LiveScriptError::Config)?;
+        let trace = pipeline_snapshot::waypoints::trace_gcode(source, &base.config_limits(), start)
+            .map_err(LiveScriptError::Gcode)?;
+        let steps =
+            pipeline_snapshot::plan_steps(&trace.waypoints, base).map_err(LiveScriptError::Plan)?;
+        Ok(Self {
+            config,
+            chains,
+            home: pipeline_snapshot::rest_position_before(pipeline_snapshot::plan_moves(&steps)),
+            steps,
+            move_lines: trace.lines.into_iter().skip(1).collect(),
+        })
+    }
 }
 
 pub struct LiveReplay {
@@ -152,20 +215,13 @@ impl LiveReplay {
         planner: &planner_config::PlannerConfig,
         step_benchmarks: Option<&motion_pipeline::live_config::step_capacity::StepCapacityInput>,
     ) -> Result<Self, String> {
-        let config = motion_pipeline::live_config::stream_config(planner, step_benchmarks)?;
-        let chains = planner.compile_active_chains().map_err(|e| e.to_string())?;
-        let moves = moves_under(
-            source,
-            motion_pipeline::live_config::GcodeMoveBase::of(
-                planner,
-                &motion_pipeline::live_config::extruder_caps(planner)?,
-            )?,
-        );
+        let script = LiveScript::new(source, planner, step_benchmarks, GcodePos([0.0; 3]))
+            .map_err(|e| e.to_string())?;
         Ok(Self {
-            config,
-            chains,
-            home: pipeline_snapshot::rest_position_before(&moves),
-            moves,
+            config: script.config,
+            chains: script.chains,
+            home: script.home,
+            moves: only_moves(script.steps),
         })
     }
 

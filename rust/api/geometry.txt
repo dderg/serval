@@ -624,6 +624,21 @@ pub geometry::step_capacity::StepCapacityOverload::demand_over_capacity: f64
 pub geometry::step_capacity::StepCapacityOverload::mcu_index: usize
 pub const geometry::step_capacity::SPATIAL_LANES: usize
 pub mod geometry::surface
+pub enum geometry::surface::MeshActivationError
+pub geometry::surface::MeshActivationError::FadeBandTooNarrow
+pub geometry::surface::MeshActivationError::FadeBandTooNarrow::band: f64
+pub geometry::surface::MeshActivationError::FadeBandTooNarrow::mesh_span: f64
+pub geometry::surface::MeshActivationError::Surface(geometry::surface::SurfaceError)
+pub geometry::surface::MeshActivationError::ZeroReferenceOutside
+pub geometry::surface::MeshActivationError::ZeroReferenceOutside::x: f64
+pub geometry::surface::MeshActivationError::ZeroReferenceOutside::x_range: (f64, f64)
+pub geometry::surface::MeshActivationError::ZeroReferenceOutside::y: f64
+pub geometry::surface::MeshActivationError::ZeroReferenceOutside::y_range: (f64, f64)
+impl core::convert::From<geometry::surface::SurfaceError> for geometry::surface::MeshActivationError
+pub fn geometry::surface::MeshActivationError::from(geometry::surface::SurfaceError) -> Self
+impl core::error::Error for geometry::surface::MeshActivationError
+impl core::fmt::Display for geometry::surface::MeshActivationError
+pub fn geometry::surface::MeshActivationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum geometry::surface::PatchAxis
 pub geometry::surface::PatchAxis::Held(f64)
 pub geometry::surface::PatchAxis::Inside
@@ -648,6 +663,8 @@ pub geometry::surface::SurfaceError::NonPositiveSpacing::dy: f64
 pub geometry::surface::SurfaceError::PointCountMismatch
 pub geometry::surface::SurfaceError::PointCountMismatch::expected: usize
 pub geometry::surface::SurfaceError::PointCountMismatch::got: usize
+impl core::convert::From<geometry::surface::SurfaceError> for geometry::surface::MeshActivationError
+pub fn geometry::surface::MeshActivationError::from(geometry::surface::SurfaceError) -> Self
 impl core::error::Error for geometry::surface::SurfaceError
 impl core::fmt::Display for geometry::surface::SurfaceError
 pub fn geometry::surface::SurfaceError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -692,6 +709,11 @@ pub geometry::surface::MeshPatch::points: [[f64; 4]; 4]
 pub geometry::surface::MeshPatch::tension: f64
 pub geometry::surface::MeshPatch::x: geometry::surface::PatchAxis
 pub geometry::surface::MeshPatch::y: geometry::surface::PatchAxis
+pub struct geometry::surface::ProbedMesh
+pub geometry::surface::ProbedMesh::fade: core::option::Option<(f64, f64, f64)>
+pub geometry::surface::ProbedMesh::grid: geometry::surface::MeshGridSpec
+pub geometry::surface::ProbedMesh::points: alloc::vec::Vec<f64>
+pub geometry::surface::ProbedMesh::zero_reference: (f64, f64)
 pub struct geometry::surface::SurfaceBounds
 pub geometry::surface::SurfaceBounds::max_curvature: f64
 pub geometry::surface::SurfaceBounds::max_gradient: f64
@@ -706,6 +728,7 @@ pub geometry::surface::SurfaceSample::zy: f64
 pub geometry::surface::SurfaceSample::zyy: f64
 pub struct geometry::surface::SurfaceTransform
 impl geometry::surface::SurfaceTransform
+pub fn geometry::surface::SurfaceTransform::activate(geometry::surface::ProbedMesh) -> core::result::Result<Self, geometry::surface::MeshActivationError>
 pub fn geometry::surface::SurfaceTransform::bounds(&self) -> geometry::surface::SurfaceBounds
 pub fn geometry::surface::SurfaceTransform::correction_at(&self, f64, f64, f64) -> f64
 pub fn geometry::surface::SurfaceTransform::correction_spread_over(&self, f64, f64, f64, f64, f64, f64) -> f64
@@ -1018,6 +1041,21 @@ pub geometry::GeometryError::NonPlanarBasis::reason: &'static str
 pub geometry::GeometryError::NotSinglePieceCubic
 pub geometry::GeometryError::NotSinglePieceCubic::reason: &'static str
 pub geometry::GeometryError::ZeroMotion
+pub enum geometry::MeshActivationError
+pub geometry::MeshActivationError::FadeBandTooNarrow
+pub geometry::MeshActivationError::FadeBandTooNarrow::band: f64
+pub geometry::MeshActivationError::FadeBandTooNarrow::mesh_span: f64
+pub geometry::MeshActivationError::Surface(geometry::surface::SurfaceError)
+pub geometry::MeshActivationError::ZeroReferenceOutside
+pub geometry::MeshActivationError::ZeroReferenceOutside::x: f64
+pub geometry::MeshActivationError::ZeroReferenceOutside::x_range: (f64, f64)
+pub geometry::MeshActivationError::ZeroReferenceOutside::y: f64
+pub geometry::MeshActivationError::ZeroReferenceOutside::y_range: (f64, f64)
+impl core::convert::From<geometry::surface::SurfaceError> for geometry::surface::MeshActivationError
+pub fn geometry::surface::MeshActivationError::from(geometry::surface::SurfaceError) -> Self
+impl core::error::Error for geometry::surface::MeshActivationError
+impl core::fmt::Display for geometry::surface::MeshActivationError
+pub fn geometry::surface::MeshActivationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum geometry::PatchAxis
 pub geometry::PatchAxis::Held(f64)
 pub geometry::PatchAxis::Inside
@@ -1063,6 +1101,8 @@ pub geometry::SurfaceError::NonPositiveSpacing::dy: f64
 pub geometry::SurfaceError::PointCountMismatch
 pub geometry::SurfaceError::PointCountMismatch::expected: usize
 pub geometry::SurfaceError::PointCountMismatch::got: usize
+impl core::convert::From<geometry::surface::SurfaceError> for geometry::surface::MeshActivationError
+pub fn geometry::surface::MeshActivationError::from(geometry::surface::SurfaceError) -> Self
 impl core::error::Error for geometry::surface::SurfaceError
 impl core::fmt::Display for geometry::surface::SurfaceError
 pub fn geometry::surface::SurfaceError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1331,6 +1371,11 @@ pub geometry::MoveVelocity::source: geometry::segment::SourceRange
 pub geometry::MoveVelocity::step_capacity_overload: core::option::Option<geometry::step_capacity::StepCapacityOverload>
 impl geometry::velocity::MoveVelocity
 pub fn geometry::velocity::MoveVelocity::corner_held(&self, geometry::frontend::Move) -> geometry::frontend::Move
+pub struct geometry::ProbedMesh
+pub geometry::ProbedMesh::fade: core::option::Option<(f64, f64, f64)>
+pub geometry::ProbedMesh::grid: geometry::surface::MeshGridSpec
+pub geometry::ProbedMesh::points: alloc::vec::Vec<f64>
+pub geometry::ProbedMesh::zero_reference: (f64, f64)
 pub struct geometry::RailPair
 pub geometry::RailPair::s_hi: f64
 pub geometry::RailPair::s_lo: f64
@@ -1452,6 +1497,7 @@ pub geometry::SurfaceSample::zy: f64
 pub geometry::SurfaceSample::zyy: f64
 pub struct geometry::SurfaceTransform
 impl geometry::surface::SurfaceTransform
+pub fn geometry::surface::SurfaceTransform::activate(geometry::surface::ProbedMesh) -> core::result::Result<Self, geometry::surface::MeshActivationError>
 pub fn geometry::surface::SurfaceTransform::bounds(&self) -> geometry::surface::SurfaceBounds
 pub fn geometry::surface::SurfaceTransform::correction_at(&self, f64, f64, f64) -> f64
 pub fn geometry::surface::SurfaceTransform::correction_spread_over(&self, f64, f64, f64, f64, f64, f64) -> f64

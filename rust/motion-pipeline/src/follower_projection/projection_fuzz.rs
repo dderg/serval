@@ -1293,3 +1293,33 @@ fn a_ratio_step_on_a_motion_too_short_for_its_targets_projects_an_advance() {
     let plain = project_all_at_once(&track, &chains(follower_chain(None, Some(smooth_time))));
     assert_advance_vanishes_at_rests(&track, (&advanced, &plain), (hi, -lo)).unwrap();
 }
+
+/// #847, found by `an_advanced_follower_streams_like_it_projects_all_at_once`:
+/// a seam crossed at 112 mm/s, a stop 0.38 mm on, then 1.3 s of crawl. The
+/// seam waited for the ratio over its 1.7 mm reach, which lays no valley
+/// where the leaders do not crawl, and the stop's valley waited behind it
+/// while the projection took the path that valley reaches back into.
+#[test]
+fn a_stop_behind_a_fast_seam_lays_its_valley_before_its_path_is_taken() {
+    let stroke = |length, pace, end_speed, shaped_speed_scale| Step::Stroke {
+        reverse: false,
+        length,
+        pace,
+        end_speed,
+        shaped_speed_scale,
+        ratio: 0.0,
+    };
+    let steps = [
+        stroke(
+            6.925642483570496,
+            79.64520951608365,
+            96.05196367574588,
+            1.4670723033079172,
+        ),
+        stroke(0.37513915324996644, 110.00239583045764, 0.0, 0.5),
+        stroke(1.2755339106970265, 1.0, 0.0, 0.5),
+        stroke(0.05, 1.0, 0.0, 0.5),
+    ];
+    let track = build_profiled_track(0.0, &steps, Profile::Quintic);
+    project_all_at_once(&track, &chains(follower_chain(Some(0.005), None)));
+}

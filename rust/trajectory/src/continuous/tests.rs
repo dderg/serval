@@ -545,6 +545,64 @@ fn variable_surface_is_rejected_before_motor_dispatch() {
 }
 
 #[test]
+fn a_variable_surface_dispatches_the_motors_it_does_not_warp() {
+    let span = analytic_span(
+        Segment::Line(Line::try_new([0.5, 0.5, 0.0], [2.5, 1.5, 1.0]).unwrap()),
+        vec![],
+        1.0,
+        SurfaceMode::Variable(variable_surface()),
+    );
+    let term = |source_axis, scale| MotorTerm {
+        source_axis,
+        axis: ContinuousAxis::Analytic {
+            span: Arc::clone(&span),
+            axis: source_axis,
+        },
+        scale,
+    };
+    let corexy = Arc::from([MotorGroup::Analytic {
+        span: Arc::clone(&span),
+        terms: Arc::from([term(0, 1.0), term(1, -1.0)]),
+    }]);
+    let lone_x = Arc::from([MotorGroup::Independent(term(0, 1.0))]);
+    let lone_z = Arc::from([MotorGroup::Independent(term(2, 1.0))]);
+
+    assert!(MotorSpan::try_new(corexy, 10.0, 11.0, 1, 41, false).is_ok());
+    assert!(MotorSpan::try_new(lone_x, 10.0, 11.0, 1, 41, false).is_ok());
+    assert_eq!(
+        MotorSpan::try_new(lone_z, 10.0, 11.0, 1, 41, false),
+        Err(ContinuousError::VariableSurfaceBeforeDispatch)
+    );
+}
+
+#[test]
+fn a_variable_surface_bounds_only_the_axis_it_warps() {
+    let segment = || Segment::Line(Line::try_new([0.5, 0.5, 0.0], [2.5, 1.5, 1.0]).unwrap());
+    let flat = analytic_span(segment(), vec![], 1.0, SurfaceMode::None);
+    let warped = analytic_span(
+        segment(),
+        vec![],
+        1.0,
+        SurfaceMode::Variable(variable_surface()),
+    );
+    let bounds = |span: &Arc<AnalyticMoveSpan>, axis| {
+        ContinuousAxis::Analytic {
+            span: Arc::clone(span),
+            axis,
+        }
+        .pva_bounds(10.2, 10.7)
+    };
+
+    for axis in [0, 1, 3] {
+        assert_eq!(bounds(&warped, axis), bounds(&flat, axis), "axis {axis}");
+    }
+    assert_eq!(
+        bounds(&warped, 2),
+        Err(ContinuousError::VariableSurfaceBeforeDispatch)
+    );
+}
+
+#[test]
 fn correlated_corexy_cancellation_has_zero_value_and_bounds() {
     let span = analytic_span(
         Segment::Line(Line::try_new([0.0, 0.0, 0.0], [4.0, 4.0, 0.0]).unwrap()),
