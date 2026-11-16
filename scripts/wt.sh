@@ -101,11 +101,17 @@ new_topic() {
     echo "$path"
 }
 
+lease_summary() {
+    local file
+    file="$(lease_file "$1")"
+    if [ -f "$file" ]; then tr '\n' ' ' < "$file"; else echo none; fi
+}
+
 list_pool() {
     local path
     while read -r path; do
         [ -n "$path" ] || continue
-        if is_idle "$path"; then echo "idle  $path"; else echo "busy  $path ($(git -C "$path" rev-parse --abbrev-ref HEAD), lease: $(tr '\n' ' ' < "$(lease_file "$path")" 2>/dev/null || echo none), users: $("$(dirname "$0")/worktree_users.sh" "$path" | wc -l))"; fi
+        if is_idle "$path"; then echo "idle  $path"; else echo "busy  $path ($(git -C "$path" rev-parse --abbrev-ref HEAD), lease: $(lease_summary "$path"), users: $("$(dirname "$0")/worktree_users.sh" "$path" | wc -l))"; fi
     done < <(pool_paths)
 }
 
