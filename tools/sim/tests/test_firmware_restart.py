@@ -1,6 +1,7 @@
 """FIRMWARE_RESTART resets every simulated MCU family: from a ready
-printer, and from MCUs latched in shutdown across a host restart. The
-MACH_LINUX firmware resets with config_reset, which re-executes itself."""
+printer, from an e-stop mid-move, and from MCUs latched in shutdown across a
+host restart. The MACH_LINUX firmware resets with config_reset, which
+re-executes itself."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ ENDPOINT_DEATH = '"event":"endpoint_death"'
 ENDPOINT_DEATH_WATCHDOG_ABORT = '"event":"endpoint_death_watchdog_abort"'
 ENDPOINT_DEATH_GRACE_S = 5.0
 SIM_BARRIER_ACK_DEADLINE_S = 60.0
+MOVE_UNDERWAY_S = 1.0
 X_STEP_LINE = 18
 
 
@@ -66,22 +68,51 @@ def test_firmware_restart_recovers_mcus_latched_across_a_host_restart(
     _moves_after_restart(world)
 
 
-def test_firmware_restart_right_after_estop_latched_endpoint_death(sim_world):
+@pytest.mark.parametrize("boot", [_kalico_native, _classic_stepcompress])
+def test_estop_mid_move_latches_no_endpoint_death(sim_world, boot):
+    world = boot(sim_world)
+    world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
+    world.gcode_ok("G1 X200 F600")
+    underway_ns = world.vclock.now_ns() + int(MOVE_UNDERWAY_S * 1e9)
+    world.wait_until(
+        lambda: world.vclock.now_ns() > underway_ns,
+        timeout=2 * MOVE_UNDERWAY_S,
+        what="the move to get underway",
+    )
+    world.emergency_stop()
+    deadline_ns = world.vclock.now_ns() + int(
+        (SIM_BARRIER_ACK_DEADLINE_S + ENDPOINT_DEATH_GRACE_S) * 1e9
+    )
+    world.wait_until(
+        lambda: world.vclock.now_ns() > deadline_ns,
+        timeout=2 * (SIM_BARRIER_ACK_DEADLINE_S + ENDPOINT_DEATH_GRACE_S),
+        what="the barrier-ack deadline to pass",
+    )
+    assert ENDPOINT_DEATH not in _host_rust_events(world)
+    world.firmware_restart()
+    _moves_after_restart(world)
+
+
+def test_firmware_restart_right_after_a_latched_endpoint_death(sim_world):
     world = _classic_stepcompress(sim_world)
     control = world.sim_control("f4")
     world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
+    world.inject(
+        "f4",
+        late_command="stepcompress_barrier",
+        by_s=SIM_BARRIER_ACK_DEADLINE_S + ENDPOINT_DEATH_GRACE_S,
+    )
     before = control.step_position(X_STEP_LINE)["steps"]
-    world.gcode_ok("G1 X200 F600")
+    world.gcode_ok("G1 X135 F3000")
     world.wait_until(
         lambda: control.step_position(X_STEP_LINE)["steps"] != before,
         timeout=10.0,
         what="the move reaching the MCU",
     )
-    world.emergency_stop()
     world.wait_until(
         lambda: ENDPOINT_DEATH in _host_rust_events(world),
         timeout=SIM_BARRIER_ACK_DEADLINE_S + ENDPOINT_DEATH_GRACE_S,
-        what="the endpoint death the shut-down MCU's silence latches",
+        what="the endpoint death the late barrier latches",
         poll=0.01,
     )
     grace_end_ns = world.vclock.now_ns() + int(ENDPOINT_DEATH_GRACE_S * 1e9)
