@@ -94,16 +94,18 @@ fn runtime_caps_refuse_non_positive_or_non_finite_values_and_keep_the_old_cap() 
     }
     assert_eq!(runtime.accel, Some(500.0));
     runtime.set_corner_deviation(Some(0.03)).unwrap();
-    assert!(matches!(
-        runtime.set_corner_deviation(Some(-0.1)),
-        Err(RuntimeLimitError::InvalidCornerBudget(_))
-    ));
+    for bad in [0.0, -0.1] {
+        assert!(matches!(
+            runtime.set_corner_deviation(Some(bad)),
+            Err(RuntimeLimitError::InvalidCornerBudget(_))
+        ));
+    }
     assert!(matches!(
         runtime.set_square_corner_velocity(Some(f64::NAN)),
         Err(RuntimeLimitError::InvalidCornerBudget(_))
     ));
     assert_eq!(runtime.corner, Some(CornerBudget::Shaped(0.03)));
-    runtime.set_corner_deviation(Some(0.0)).unwrap();
+    runtime.set_square_corner_velocity(Some(0.0)).unwrap();
 }
 
 #[test]
@@ -127,6 +129,7 @@ fn corner_budget_from_parts_refuses_unknown_kinds_and_bad_values() {
             .contains("unknown corner budget kind")
     );
     assert!(corner_budget_from_parts("corner_deviation", -0.1).is_err());
+    assert!(corner_budget_from_parts("corner_deviation", 0.0).is_err());
     assert!(corner_budget_from_parts("square_corner_velocity", f64::NAN).is_err());
 }
 
