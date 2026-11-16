@@ -11,7 +11,7 @@ Full-stack simulator: the real MACH_LINUX firmware ELFs (H7 + F4) and real klipp
 
 ```bash
 tools/sim/run.sh                    # build image (incremental) + self-test print
-tools/sim/run.sh --gcode f.gcode    # print a G-code file, report speedup
+tools/sim/run.sh --gcode f.gcode    # print a slicer file on neptune_print_config (extruder, starts at X0 Y0 Z0), free-running; fails on shutdown/print error
 tools/sim/run.sh test               # full e2e pytest suite (homing, probe, beacon, phase stepping, motor adjust)
 tools/sim/run.sh test -k probe      # subset by pytest -k expression
 tools/sim/run.sh test --keep-logs   # leave every world's logs in .sim-logs/
