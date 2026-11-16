@@ -1998,7 +1998,9 @@ rules here exist because we shipped a season of timing bugs by breaking them.</p
   toolhead to rest.</li>
 <li><code>engine.dwell_until(print_time, mcu_handle)</code> — hold the next segment until
   an absolute print_time. A parked stream re-anchors forward to it with no
-  drain; a stream in motion is drained first. Anything scheduled at a
+  drain; a stream in motion is drained first. The wrapper stages it with
+  <code>dwell_until_start</code> and waits on <code>pipeline_request_poll</code> between reactor
+  turns, as <code>submit_dwell</code> and the mesh swaps do. Anything scheduled at a
   floored <code>get_last_move_time()</code> that later motion must not precede (enable
   switches and their settle) holds the stream with
   <code>toolhead.dwell_until(print_time)</code>.</li>
