@@ -1932,8 +1932,12 @@ replay checks every segment, a second, pinned to two cores, is timed.</p>
 <td>dropped (a macro's own moves are planned)</td>
 </tr>
 <tr>
-<td>arcs and firmware retraction: <code>G2 G3 G5 G10 G11</code></td>
-<td><code>FAIL</code>: the live host drops them as unknown commands</td>
+<td>arcs and firmware retraction: <code>G2 G3 G10 G11</code></td>
+<td><code>FAIL</code>: the live host stops the print on them</td>
+</tr>
+<tr>
+<td>curves: <code>G5</code></td>
+<td><code>FAIL</code>: the live host runs it, preflight cannot plan it</td>
 </tr>
 <tr>
 <td>anything else (<code>M104 M106 M73 ...</code>)</td>

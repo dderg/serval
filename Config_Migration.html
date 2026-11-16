@@ -2427,6 +2427,10 @@ naming the axis they belong to.</p>
 <td><strong>Rejected.</strong> The motion engine has no native G2/G3 ingestion yet; slice with arcs disabled so the slicer emits G1 segments.</td>
 </tr>
 <tr>
+<td><code>G2</code>, <code>G3</code>, <code>G10</code>, <code>G11</code> in a print file</td>
+<td><strong>Stops the print</strong> with an error naming the line (they used to be skipped as unknown commands). Disable arc fitting and firmware retraction in the slicer.</td>
+</tr>
+<tr>
 <td><code>[resonance_tester] sweeping_period</code>, <code>sweeping_accel</code></td>
 <td><strong>No equivalent.</strong> Kalico's sweeping vibration test is not here; the rest of the section (<code>accel_per_hz</code>, <code>hz_per_sec</code>, <code>min_freq</code>, <code>max_freq</code>, <code>max_smoothing</code>, <code>probe_points</code>, <code>accel_chip*</code>) is unchanged.</td>
 </tr>
