@@ -40,7 +40,7 @@ from tools.sim.fuzzing.printer import (
     Motor,
 )
 from tools.sim.fuzzing.scenario import START_POSITION, Scenario
-from tools.sim.fuzzing.timeline import CHANGES_STATE, Act, Action
+from tools.sim.fuzzing.timeline import CHANGES_STATE, ENDS_PRINT, Act, Action
 from tools.sim.world import SimError
 
 NS_PER_S = 1_000_000_000
@@ -132,6 +132,7 @@ class Session:
         self.next_probe = 0
         self.mark_level = 0
         self.recheck: Optional[_Recheck] = None
+        self.watching = False
 
     # ------------------------------------------------------------ clock
 
@@ -227,6 +228,10 @@ class Session:
     # ----------------------------------------------------------- probes
 
     def _service_probes(self) -> None:
+        """Reads the mark pin while a print body runs; a cancel, a restart
+        or an e-stop drops the pin to its shutdown value, no probe."""
+        if not self.watching:
+            return
         if self.recheck and self._now_ns() >= self.recheck.at_ns:
             self._finish_recheck()
         level = self.marks.gpio_output(MARK_CHIP, MARK_PIN_LINE)
@@ -366,6 +371,7 @@ class Session:
         self.next_probe = 0
         self.mark_level = 0
         self.recheck = None
+        self.watching = True
 
     def _print(self, index: int, name: str) -> None:
         lines = program.render(self.scenario.program(name))
@@ -385,13 +391,11 @@ class Session:
                 )
                 continue
             self._settle_recheck()
+            ends_print = action.act in ENDS_PRINT
+            if ends_print:
+                self.watching = False
             self._execute(action)
-            if action.act in (
-                Act.CANCEL,
-                Act.FIRMWARE_RESTART,
-                Act.HOST_RESTART,
-                Act.ESTOP_RESTART,
-            ):
+            if ends_print:
                 return
         self._advance(start_ns, None)
         self._finish_print(index, start_ns)
@@ -433,6 +437,7 @@ class Session:
 
     def _finish_print(self, index: int, start_ns: int) -> None:
         self._settle_recheck()
+        self.watching = False
         if self.next_probe != len(self.probes):
             raise Violation(
                 Check.HARNESS,

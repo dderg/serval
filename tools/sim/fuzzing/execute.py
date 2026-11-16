@@ -17,6 +17,9 @@ from tools.sim.fuzzing.scenario import Scenario
 PASS, FAIL = "PASS", "FAIL"
 WORLD_DIR = "world"
 EVIDENCE_TAIL = 3000
+STEP_TAP_SWITCH = "SIM_FUZZ_STEP_TAP"
+STEP_TAP_DIR_ENV = "SERVAL_STEP_TAP_DIR"
+STEP_TAP_SUBDIR = "step_tap"
 
 
 def _boot(spec, world) -> str:
@@ -74,6 +77,10 @@ def run_scenario(
     from tools.sim.world import SimWorld
 
     os.environ["RUST_LOG"] = checks.PACER_LOG
+    if os.environ.get(STEP_TAP_SWITCH):
+        tap_dir = scratch / "logs" / STEP_TAP_SUBDIR
+        tap_dir.mkdir(parents=True, exist_ok=True)
+        os.environ[STEP_TAP_DIR_ENV] = str(tap_dir)
     started = time.monotonic()
     notes: list[str] = []
     world = SimWorld(scratch, dual_mcu=chosen.printer.dual_mcu)

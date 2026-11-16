@@ -97,6 +97,20 @@ def test_rendered_probes_alternate_the_mark_pin():
             assert values == [1 - i % 2 for i in range(len(values))]
 
 
+def test_the_done_pin_flips_before_end_print_starts():
+    done = f"SET_PIN PIN={printer.DONE_PIN} VALUE=1"
+    for seed in SEEDS:
+        for prog in scenario.generate(seed).programs:
+            lines = program.render(prog)
+            body_end = lines.index(done)
+            assert lines[body_end + 1].startswith("G4 P")
+            hold_ms = float(lines[body_end + 1][4:])
+            assert hold_ms >= program.PROBE_HOLD_MS
+            assert lines[body_end + 2] == "M400"
+            assert ("END_PRINT" in lines) == prog.end_print
+            assert "END_PRINT" not in lines[:body_end]
+
+
 def test_lattice_counts_are_exact_on_a_line_and_bracket_off_it():
     assert checks.lattice_counts(100.1, 80.0) == {8008}
     assert checks.lattice_counts(59.99999999999997, 80.0) == {4800}

@@ -512,12 +512,20 @@ def probe_lines(value: int) -> list[str]:
     ]
 
 
-DONE_LINES = ("M400", f"SET_PIN PIN={DONE_PIN} VALUE=1")
+DONE_LINES = (
+    "M400",
+    f"SET_PIN PIN={DONE_PIN} VALUE=1",
+    f"G4 P{PROBE_HOLD_MS}",
+    "M400",
+)
 
 
 def render(program: Program) -> list[str]:
     """The print file: probe placeholders become an M400, a mark pin
-    toggle and a dwell the harness reads the step counters in."""
+    toggle and a dwell the harness reads the step counters in. The done
+    pin closes the body and flips (its schedule lead is shorter than the
+    dwell) before END_PRINT starts, so no timeline action lands in the
+    end macro (a PAUSE after its M84 cannot park)."""
     lines = list(PRELUDE)
     mark = 0
     for segment in program.segments:
@@ -529,9 +537,10 @@ def render(program: Program) -> list[str]:
             lines += probe_lines(mark)
     if Kind.LIMITS in program.kinds():
         lines.append(LIMIT_RESET)
+    lines += DONE_LINES
     if program.end_print:
         lines.append("END_PRINT")
-    return lines + list(DONE_LINES)
+    return lines
 
 
 @dataclasses.dataclass(frozen=True)

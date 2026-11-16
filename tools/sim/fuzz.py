@@ -66,6 +66,11 @@ def _parse(argv) -> argparse.Namespace:
     parser.add_argument("--minimize", action="store_true")
     parser.add_argument("--keep-passing", action="store_true")
     parser.add_argument(
+        "--step-tap",
+        action="store_true",
+        help="record every step frame klippy sends (SERVAL_STEP_TAP_DIR)",
+    )
+    parser.add_argument(
         "--out-root", type=pathlib.Path, default=REPO_ROOT / ".sim-fuzz"
     )
     return parser.parse_args(argv)
@@ -252,6 +257,8 @@ def main(argv=None) -> int:
             json.dumps(result, indent=1) + "\n"
         )
         return 0
+    if args.step_tap:
+        os.environ[execute.STEP_TAP_SWITCH] = "1"
     runner = Runner(args)
     started = time.monotonic()
     if args.replay:
