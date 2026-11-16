@@ -772,7 +772,7 @@ class Motion:
         v = gcmd.get_float("VELOCITY", None, above=0.0)
         a = gcmd.get_float("ACCEL", None, above=0.0)
         scv = gcmd.get_float("SQUARE_CORNER_VELOCITY", None, minval=0.0)
-        corner_deviation = gcmd.get_float("CORNER_DEVIATION", None, minval=0.0)
+        corner_deviation = gcmd.get_float("CORNER_DEVIATION", None, above=0.0)
         if scv is not None and corner_deviation is not None:
             raise gcmd.error(
                 "SET_VELOCITY_LIMIT: SQUARE_CORNER_VELOCITY and "

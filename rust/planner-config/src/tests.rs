@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn cartesian_validate_accepts_zero_and_positive_corner_budgets() {
+fn cartesian_validate_accepts_positive_corner_budgets_and_zero_but_a_deviation() {
     let mut c = CartesianLimits::default();
     for make in [
         CornerBudget::Shaped,
@@ -9,7 +9,7 @@ fn cartesian_validate_accepts_zero_and_positive_corner_budgets() {
         CornerBudget::ScvEquivalent,
     ] {
         c.corner = make(0.0);
-        assert!(c.validate().is_ok());
+        assert_eq!(c.validate().is_ok(), c.corner != CornerBudget::Shaped(0.0));
         c.corner = make(8.0);
         assert!(c.validate().is_ok());
     }
