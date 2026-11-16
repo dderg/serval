@@ -278,8 +278,8 @@ impl Ingress {
         self.note_planned(planned_from_s, handoff);
     }
 
-    /// Planning ran from `planned_from_s`: the intake counts what it handed
-    /// on, and a throttled producer waits out its share of it.
+    /// Planning ran from `planned_from_s`: the intake's peak counts what it
+    /// handed on, and a throttled producer waits out its share of it.
     fn note_planned(&mut self, planned_from_s: f64, handoff: Handoff) {
         let planned_to_s = self.pipeline.planned_through_s();
         self.intake.set_planned_through(planned_to_s);

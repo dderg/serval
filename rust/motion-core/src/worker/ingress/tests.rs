@@ -60,34 +60,6 @@ fn a_submitter_the_intake_refused_is_woken_once_the_playhead_makes_room() {
     );
 }
 
-/// The pump takes trajectory only while its span backlog has room, and
-/// planning goes on into the stage inboxes meanwhile. In the simulator the
-/// planning side outran the pump at print start: 16 s of long moves waited
-/// there, uncounted, and PAUSE took 17 s to stop the axes.
-#[test]
-fn motion_planned_ahead_of_the_pump_counts_against_the_cap() {
-    const STROKE_MM: f64 = 40.0;
-    const MAX_STROKES: u32 = 64;
-    let (output_tx, _output) = crossbeam_channel::unbounded();
-    let mut ingress = ingress(output_tx);
-    let mut at = [0.0; 3];
-    for line_no in 1..=MAX_STROKES {
-        if ingress.pipeline.planned_through_s() >= ingress.intake.cap_secs() {
-            break;
-        }
-        let end = [if at[0] > 0.0 { 0.0 } else { STROKE_MM }, 0.0, 0.0];
-        ingress.handle_move(crate::worker::tests::line(line_no, at, end));
-        at = end;
-    }
-
-    let planned_s = ingress.pipeline.planned_through_s();
-    assert!(planned_s >= ingress.intake.cap_secs());
-    assert!(
-        !ingress.intake.admits(),
-        "the intake admits with {planned_s:.2}s planned ahead of a pump that took none of it"
-    );
-}
-
 fn answer_barrier(
     output: &crossbeam_channel::Receiver<motion_pipeline::TrajectoryItem>,
     before_answer: impl FnOnce(),

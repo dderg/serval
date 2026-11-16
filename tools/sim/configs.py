@@ -2422,3 +2422,176 @@ enable_force_move: True
 #*# model_mode = {mode}
 #*# model_fw_version = v0.0.0-sim
 """
+
+
+def _bench_corexy_config(
+    h7_pty: str,
+    gcode_dir: str,
+    printer: str,
+    e_chain: str,
+    post_processors: str,
+) -> str:
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+{printer}
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: shaper_x
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: shaper_y
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: {e_chain}
+max_accel: 20000
+
+{post_processors}
+
+[motor a]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor b]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio6
+dir_pin: gpiochip0/gpio7
+enable_pin: !gpiochip0/gpio8
+microsteps: 16
+rotation_distance: 8
+
+[motor extruder]
+drive: stepper
+step_pin: gpiochip0/gpio20
+dir_pin: gpiochip0/gpio21
+enable_pin: !gpiochip0/gpio22
+microsteps: 16
+rotation_distance: 7.73
+
+[extruder]
+axis: e
+nozzle_diameter: 0.400
+filament_diameter: 1.750
+heater_pin: gpiochip0/gpio30
+sensor_type: EPCOS 100K B57560G104F
+sensor_pin: analog0
+min_temp: 0
+max_temp: 250
+min_extrude_temp: 0
+control: pid
+pid_kp: 30.356
+pid_ki: 1.857
+pid_kd: 124.081
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[pause_resume]
+
+[force_move]
+enable_force_move: True
+"""
+
+
+def bench_print_config(h7_pty: str, gcode_dir: str) -> str:
+    """The Pi bench's tools/bench/printer.cfg on sim pins."""
+    return _bench_corexy_config(
+        h7_pty,
+        gcode_dir,
+        printer="""\
+max_velocity: 1000
+max_accel: 10000
+max_jerk: 0
+corner_deviation: 0.21
+max_z_velocity: 25
+max_z_accel: 100""",
+        e_chain="pa",
+        post_processors="""\
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.03
+
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 50
+
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 44""",
+    )
+
+
+def bench_trident_kernel_config(h7_pty: str, gcode_dir: str) -> str:
+    """The Pi bench's tools/bench/configs/trident_kernel.cfg on sim pins."""
+    return _bench_corexy_config(
+        h7_pty,
+        gcode_dir,
+        printer="""\
+max_velocity: 1000
+max_accel: 70000
+max_jerk: 0
+square_corner_velocity: 5
+max_z_velocity: 25
+max_z_accel: 100""",
+        e_chain="pa, st",
+        post_processors="""\
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.02
+
+[post_processor st]
+type: smooth_triangle
+smooth_time: 0.013
+
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 191
+
+[post_processor shaper_y]
+type: smooth_mzv
+frequency_hz: 129.4""",
+    )

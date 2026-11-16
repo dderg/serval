@@ -30,10 +30,18 @@ FIRST_LAYERS = (
     / "gcode"
     / "voron_first_layers.gcode"
 )
+DENSE_TOP = FIRST_LAYERS.with_name("voron_dense_top_layers.gcode")
+SPEED_LADDER = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "bench"
+    / "gcode"
+    / "speed_ladder.gcode"
+)
 FIRST_LAYERS_LINES = 1500
 LONG_MOVE_COUNT = 60
 LONG_MOVE_MM = 80.0
 LONG_MOVE_FEED = 6000
+DWELL_ZIGZAG_MOVES = 120
 
 ACTION_AT_S = 20.0
 MOTION_STILL_S = 2.0
@@ -46,6 +54,12 @@ MAX_RESERVE_S = 1.0
 
 PACER_LOG = "info,motion_core::worker::ingress=debug"
 STOP_BRAKE_CAUSE = "RunwayExhausted"
+PIPE_SPACE = "motion pipe space"
+
+TRIDENT_2_CPU_REALTIME_FACTOR = 1.85
+DENSE_TOP_FIRST_TRAVEL_END_S = 1.9
+FRONT_RELEASE_AT_START_S = 11.0
+MAX_PIPE_SPACE_WAIT_S = FRONT_RELEASE_AT_START_S + 1.0
 
 PAUSE_RESUME = "\n[pause_resume]\n"
 
@@ -92,14 +106,18 @@ def _first_layers(world) -> pathlib.Path:
     return path
 
 
-def _long_moves(world) -> pathlib.Path:
-    path = world.gcode_dir / "long_moves.gcode"
+def _zigzag_lines(moves: int) -> list[str]:
     lines = ["G90", "M83", "G1 Z0.3 F600", "G1 X60 Y20 F12000"]
-    for index in range(LONG_MOVE_COUNT):
+    for index in range(moves):
         x = 60.0 + LONG_MOVE_MM if index % 2 == 0 else 60.0
         y = 20.0 + (index // 2) * 0.4
         lines.append(f"G1 X{x:.1f} Y{y:.2f} E0.3 F{LONG_MOVE_FEED}")
-    path.write_text("\n".join(lines) + "\n")
+    return lines
+
+
+def _long_moves(world) -> pathlib.Path:
+    path = world.gcode_dir / "long_moves.gcode"
+    path.write_text("\n".join(_zigzag_lines(LONG_MOVE_COUNT)) + "\n")
     return path
 
 
@@ -338,3 +356,85 @@ def test_print_stats_completes_with_the_motion(sim_world, monkeypatch):
     _assert_stopped_within_bound(
         world, "print_stats complete", stop, completing.new()
     )
+
+
+def _boot_bench(sim_world, monkeypatch, config):
+    monkeypatch.setenv("RUST_LOG", PACER_LOG)
+    world = sim_world(
+        lambda w: config(w.h7_pty, str(w.gcode_dir)), dual_mcu=False
+    )
+    world.gcode_ok("SET_KINEMATIC_POSITION X=0 Y=0 Z=0", timeout=10)
+    return world
+
+
+def _assert_no_pacer_brake(world, events: list[dict]) -> None:
+    """A print that ends in M400 is never braked by the pacer: the flush
+    drains it, so every `pipe_drain` here stopped the machine mid-print."""
+    brakes = [event for event in events if event.get("event") == "pipe_drain"]
+    assert not brakes, (
+        f"the pacer braked the print to rest {len(brakes)} times: {brakes}"
+    )
+    _assert_clean(world)
+
+
+def test_long_strokes_print_without_a_pacer_brake(sim_world, monkeypatch):
+    """Pi bench 2026-11-16, speed_ladder on printer.cfg: three pacer brakes
+    mid-print, each inside an 18-20 s klippy wait on the intake, with the
+    committed runway at the reserve while the motion counted ahead held the
+    intake shut. Main printed it without a brake."""
+    world = _boot_bench(sim_world, monkeypatch, configs.bench_print_config)
+    printing = _EventCursor(world)
+
+    world.print_file(SPEED_LADDER, timeout=PRINT_TIMEOUT_S)
+
+    events = printing.new()
+    _assert_no_pacer_brake(world, events)
+    waits = [
+        event["waited_s"]
+        for event in events
+        if event.get("event") == "engine_wait_done"
+        and event.get("what") == PIPE_SPACE
+    ]
+    assert max(waits, default=0.0) <= MAX_PIPE_SPACE_WAIT_S, (
+        f"klippy sat parked on {PIPE_SPACE!r} for up to {max(waits):.2f}s, "
+        f"past the {FRONT_RELEASE_AT_START_S}s of strokes the planning front "
+        f"hands on at once at the print start (#860): {waits}"
+    )
+
+
+def test_a_host_faster_than_playback_never_brakes(sim_world, monkeypatch):
+    """Pi bench 2026-11-16, trident_kernel on two cores at 1500 MHz: a
+    pacer brake 0.3 s into the print, at the runway one unmeasured brake
+    takes. The host plans faster than the print plays. The throttle charges
+    by stream time, so it starts after the first travel: a Pi plans that
+    1.9 s move like any other, the throttle would charge it 1 s."""
+    monkeypatch.setenv(
+        "SERVAL_PRODUCER_THROTTLE",
+        f"{TRIDENT_2_CPU_REALTIME_FACTOR}@{DENSE_TOP_FIRST_TRAVEL_END_S}",
+    )
+    world = _boot_bench(
+        sim_world, monkeypatch, configs.bench_trident_kernel_config
+    )
+    printing = _EventCursor(world)
+
+    world.print_file(DENSE_TOP, timeout=PRINT_TIMEOUT_S)
+    world.gcode_ok("M400", timeout=PRINT_TIMEOUT_S)
+
+    _assert_no_pacer_brake(world, printing.new())
+
+
+def test_a_dwell_behind_long_moves_starts_without_a_brake(
+    sim_world, monkeypatch
+):
+    """#856, Pi bench 2026-11-15: a Z move, a travel, a zigzag of 80 mm
+    moves and `G4 P1` aborted klippy 0.5 s after the first anchor on main
+    with `anchor_underrun`: the playhead overran the committed end."""
+    world = _boot_bench(sim_world, monkeypatch, configs.bench_print_config)
+    path = world.gcode_dir / "zigzag_dwell.gcode"
+    lines = _zigzag_lines(DWELL_ZIGZAG_MOVES) + ["G4 P1", "M400"]
+    path.write_text("\n".join(lines) + "\n")
+    printing = _EventCursor(world)
+
+    world.print_file(path, timeout=PRINT_TIMEOUT_S)
+
+    _assert_no_pacer_brake(world, printing.new())

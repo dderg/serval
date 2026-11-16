@@ -4,20 +4,20 @@
 //! Message counts bound nothing in time: on the Pi bench the pump's span
 //! backlog alone held 14-28 s of motion.
 //!
-//! The intake admits a move while the committed runway, the motion planned
-//! past it that the pump has not taken yet, and the moves still in the
-//! inbox fall short of the pacer's reserve plus [`STALL_HEADROOM_S`]. The
-//! pump takes trajectory only while its span backlog has room, so planned
-//! motion can wait in the stage inboxes for as long as it plays: in the
-//! simulator 16 s of long moves did, ahead of the committed runway. Moves
-//! the planning front still holds are not counted: it needs them to commit
-//! anything, and it holds them by count, not by time (on 0.8 s moves it
-//! held twelve).
+//! The intake admits a move while the committed runway and the moves still
+//! in the inbox fall short of the pacer's reserve plus
+//! [`STALL_HEADROOM_S`]. Motion the pipeline holds is not counted, planned
+//! or not: its stages hold it until later moves arrive (the shaper holds
+//! its last segment until the next one covers its support, the planning
+//! front holds moves by count), so refusing those moves while counting it
+//! starves them. On the bench speed ladder the shaper held 3.3 s of planned
+//! strokes for the next move, more than the headroom, and the runway ran
+//! down to the reserve behind a shut intake: three pacer brakes mid-print.
 //!
 //! So once klippy stops feeding (PAUSE, CANCEL_PRINT, the end of a file),
-//! motion ends within the most that stood ahead outside the front, which
-//! is the cap plus the admitted move and what planning steps hand on past
-//! it, plus what the front still holds, which the pacer's closing brake
+//! motion ends within the most that stood ahead, which is the committed
+//! runway, the planned motion the pump has not taken and the inbox, plus
+//! what the planning front still holds, which the pacer's closing brake
 //! plans to rest. That brake logs both (`pipe_drain`: `peak_ahead_s`,
 //! `drained_s`).
 
@@ -108,7 +108,7 @@ impl IntakeGate {
         if self.frontier.unexecuted {
             return None;
         }
-        let excess_s = self.ahead_secs() - self.cap_secs();
+        let excess_s = self.queued_secs() - self.cap_secs();
         let reopens_in = Duration::from_secs_f64(excess_s.max(0.0));
         (!reopens_in.is_zero()).then_some(reopens_in)
     }
@@ -138,13 +138,18 @@ impl IntakeGate {
         )
     }
 
-    /// Motion handed over that the planning front does not hold: the
-    /// committed runway, planned motion the pump has not taken yet, and the
-    /// moves still in the inbox.
+    /// Motion handed over that the planning front does not hold: what the
+    /// intake counts and the planned motion the pump has not taken yet.
     fn ahead_secs(&self) -> f64 {
         let planned_ahead_s = self.planned_ahead_secs();
+        self.queued_secs() + planned_ahead_s
+    }
+
+    /// The committed runway and the moves still in the inbox: motion that
+    /// plays out or reaches the pipeline without waiting on later moves.
+    fn queued_secs(&self) -> f64 {
         let inbox_s = self.inbox_ns.load(Ordering::Acquire) as f64 / NS_PER_S;
-        self.frontier.runway_secs() + planned_ahead_s + inbox_s
+        self.frontier.runway_secs() + inbox_s
     }
 
     /// Planned motion the pump has not taken yet: it plays once the

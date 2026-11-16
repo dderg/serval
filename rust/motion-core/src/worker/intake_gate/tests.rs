@@ -53,37 +53,47 @@ fn moves_waiting_in_the_inbox_count_against_the_cap() {
     assert!(gate.admits());
 }
 
-#[test]
-fn motion_planned_past_the_dispatched_end_counts_against_the_cap() {
+fn gate_with_planned_ahead(runway_s: f64, planned_ahead_s: f64) -> IntakeGate {
     let frontier: Arc<CommittedFrontier> = Arc::default();
-    frontier.advance_to(Instant::now() + Duration::from_secs_f64(RESERVE_S));
+    frontier.advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
     let links: Arc<WorkerLinks> = Arc::default();
     let dispatched_s = 10.0_f64;
     links
         .last_move_time_bits
         .store(dispatched_s.to_bits(), Ordering::Release);
     let gate = IntakeGate::new(frontier, links, RESERVE_S);
+    gate.set_planned_through(dispatched_s + planned_ahead_s);
+    gate
+}
 
-    gate.set_planned_through(dispatched_s + STALL_HEADROOM_S - 0.5);
-    assert!(gate.admits());
-    gate.set_planned_through(dispatched_s + STALL_HEADROOM_S + 1.0);
-    let reopens_s = gate.reopens_in().expect("closed").as_secs_f64();
+#[test]
+fn motion_a_stage_holds_for_lookahead_never_shuts_the_intake() {
+    const HELD_STROKE_S: f64 = 2.21;
+    let gate = gate_with_planned_ahead(RESERVE_S, HELD_STROKE_S);
     assert!(
-        (reopens_s - 1.0).abs() < TOLERANCE_S,
-        "reopens in {reopens_s}s, expected 1s"
+        gate.admits(),
+        "the shaper holds a {HELD_STROKE_S}s stroke until the next move arrives; \
+         refusing that move starves it with the runway at the reserve"
+    );
+}
+
+#[test]
+fn the_peak_ahead_counts_planned_motion_the_pump_has_not_taken() {
+    let gate = gate_with_planned_ahead(1.0, 3.0);
+    gate.note_ahead();
+    let peak_s = gate.take_peak_ahead();
+    assert!(
+        (peak_s - 4.0).abs() < TOLERANCE_S,
+        "peak {peak_s}s, expected 4s"
     );
 }
 
 #[test]
 fn planned_motion_the_dispatcher_passed_counts_nothing() {
-    let links: Arc<WorkerLinks> = Arc::default();
-    links
-        .last_move_time_bits
-        .store(10.0_f64.to_bits(), Ordering::Release);
-    let gate = IntakeGate::new(Arc::default(), links, RESERVE_S);
-    gate.set_planned_through(4.0);
+    let gate = gate_with_planned_ahead(0.0, -6.0);
+    gate.note_ahead();
     assert!(
-        gate.admits(),
+        gate.take_peak_ahead() < TOLERANCE_S,
         "a dwell put the dispatched end past the plan"
     );
 }
