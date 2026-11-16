@@ -11,7 +11,7 @@ Full-stack simulator: the real MACH_LINUX firmware ELFs (H7 + F4) and real klipp
 
 ```bash
 tools/sim/run.sh                    # build image (incremental) + self-test print
-tools/sim/run.sh --gcode f.gcode    # print a G-code file, report speedup
+tools/sim/run.sh --gcode f.gcode    # print a slicer file on neptune_print_config (extruder, starts at X0 Y0 Z0), free-running; fails on shutdown/print error
 tools/sim/run.sh test               # full e2e pytest suite (homing, probe, beacon, phase stepping, motor adjust)
 tools/sim/run.sh test -k probe      # subset by pytest -k expression
 tools/sim/run.sh test --keep-logs   # leave every world's logs in .sim-logs/
@@ -101,7 +101,16 @@ Run one test: `tools/sim/run.sh test -k my_scenario`.
 
 ## Build caching
 
-No incremental compile caches: cargo target/ and firmware OUT dirs are rebuilt from scratch whenever their stage's sources change (mtime-based incrementalism served stale artifacts in practice — including a firmware ELF speaking an older wire protocol than the host beside it). Skipping unchanged work is Docker's content-addressed layer cache's job. Rebuild costs: nothing changed ~3s (all layers cached), python-only edit ~seconds (firmware stage not invalidated — tools/sim python is deliberately NOT copied into the firmware stage), any C or Rust edit ~1min (full clean recompile of the affected stage). run.sh also touches all source mtimes pre-build to defeat a macOS BuildKit context-scan staleness that served stale file content; this does not defeat layer caching (content-keyed).
+No incremental compile caches: cargo target/ and firmware OUT dirs are rebuilt from scratch whenever their stage's inputs change (mtime-based incrementalism served stale artifacts in practice — including a firmware ELF speaking an older wire protocol than the host beside it). Skipping unchanged work is Docker's content-addressed layer cache's job, so every stage gets only the files it builds from:
+
+- `toolchain` installs `rust-toolchain.toml`'s channel for the host target once per toml change and sets `RUSTUP_AUTO_INSTALL=0`. Before, each Rust stage auto-installed the toolchain with all its cross targets inside its build step: 133.6 s of the 153.6 s host build and ~60 s of the 69.4 s H7 build.
+- `rust-src` runs `tools/sim/prune_rust.py`: `rust-build` gets the closure of motion-engine/config-py/shaper-ident, `firmware` the closure of c-api (c-api, runtime, runtime-contract); every other member is its manifest over empty target files, and tests/benches/examples are dropped. A host-crate edit leaves the firmware stage cached and vice versa; runtime-contract is in both.
+- `cargo-registry` is `cargo fetch` of the all-stub skeleton (changes only with manifests or Cargo.lock), a layer both build stages start from, offline. It replaced a shared `/root/.cargo/registry` cache mount that the two concurrent stages unpacked into past cargo's lock (which lives in CARGO_HOME): `failed to unpack ... .cargo-ok File exists`.
+- preload shims, chelper and the plugin clone are separate stages; the firmware stage copies only the three `scripts/` files and `klippy/msgproto.py` its Makefile uses.
+
+Measured edit-then-run of one test (load 10-18, one session; old Dockerfile in brackets): no-op ~5 s, tools/sim python edit 9.0 s, motion-engine edit 50.5 s [113.0 s], runtime-crate edit 22.2 s [222.5 s], src/*.c edit 23.0 s [48.5 s]. The built `_motion_engine.so`, `_config_doc.so` and `_shaper_ident.so` are bit-identical to the old Dockerfile's.
+
+`./scripts/ci.sh sim-fresh` (`tools/sim/check_fresh.py`) proves no stage serves a stale artifact: it builds from a tar of the tree with a fresh token compiled into a host crate and a firmware crate, then a second token, then untouched, and byte-greps `_motion_engine.so` and the H7/F4 ELFs for exactly the expected tokens. Run it after changing any stage's inputs. It is local-only (376 s, three image builds): CI's `sim-image` job builds on a runner with no layer cache, so a CI image cannot be stale; staleness is a property of the persistent local BuildKit cache. run.sh also touches content-changed source mtimes pre-build to defeat a macOS BuildKit context-scan staleness that served stale file content; this does not defeat layer caching (content-keyed).
 
 If sim behavior ever contradicts the source anyway, byte-grep the built artifacts for a known-new string (`docker run --rm --entrypoint bash <tag> -c "grep -c STRING /kalico/klippy/_motion_engine.so"`) and `docker builder prune -af` if it's wrong.
 

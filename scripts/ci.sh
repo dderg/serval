@@ -416,6 +416,7 @@ job_sim() {
 
 job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
 job_sim_image() { "$ROOT/tools/sim/run.sh" save-image; }
+job_sim_fresh() { python3 "$ROOT/tools/sim/check_fresh.py"; }
 
 # The producer must outrun the printer everywhere; the committed asset is the
 # dense top-layer region that exhausted the bench's 0.25 s anchor lead,
@@ -654,6 +655,7 @@ case "$name" in
     sim)              job=(job_sim) ;;
     sim-e2e)          job=(job_sim_e2e ${@+"$@"}) ;;
     sim-image)        job=(job_sim_image) ;;
+    sim-fresh)        job=(job_sim_fresh) ;;
     replay-budget)    job=(job_replay_budget) ;;
     throughput-gate)  job=(job_throughput_gate ${@+"$@"}) ;;
     snapshot)         job=(job_snapshot) ;;
