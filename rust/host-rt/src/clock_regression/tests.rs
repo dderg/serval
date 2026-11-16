@@ -165,12 +165,16 @@ fn a_clock_that_does_not_advance_never_synchronizes() {
     let mut t = t0;
     for _ in 0..16 {
         t += 0.05;
-        if let Some(e) = est.handle_clock(raw_low(frozen as f64), t, t + 0.0002, MCU_FREQ, prev_freq)
+        if let Some(e) =
+            est.handle_clock(raw_low(frozen as f64), t, t + 0.0002, MCU_FREQ, prev_freq)
         {
             prev_freq = e.freq;
         }
     }
-    assert_eq!(prev_freq, 0.0, "the regression publishes the frozen clock's rate");
+    assert_eq!(
+        prev_freq, 0.0,
+        "the regression publishes the frozen clock's rate"
+    );
     assert!(
         !est.synced(),
         "a 0 Hz rate latched synced after {} stable samples",
