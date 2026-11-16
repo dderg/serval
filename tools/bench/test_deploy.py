@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shlex
+import subprocess
+
 import deploy
 import pytest
 
@@ -141,3 +144,20 @@ def test_a_target_reset_whose_mco_attach_fails_fails_loudly(monkeypatch):
     monkeypatch.setattr(deploy.pi, "enable_mco", enable_mco)
     with pytest.raises(deploy.pi.BenchError, match="DBGMCU_CR"):
         deploy.cmd_reset_target()
+
+
+def test_rsync_reaches_the_pi_at_its_address_through_the_alias(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(deploy.subprocess, "run", run)
+    deploy.rsync_changes(tmp_path, ["a.py"])
+    shell = calls[0][calls[0].index("-e") + 1]
+    assert shell == shlex.join(["ssh", *deploy.pi.PI_ADDRESS])
+    assert f"HostName={deploy.pi.PI_HOST}" in shell
+    assert calls[0][-1] == f"{deploy.pi.PI_SSH}:klipper/"

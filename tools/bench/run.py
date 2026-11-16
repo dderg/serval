@@ -35,6 +35,7 @@ from pi import (
     printer_state,
     read_deployed,
     restart_klipper,
+    run_main,
     scp_from_pi,
     ssh,
     upload,
@@ -397,4 +398,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

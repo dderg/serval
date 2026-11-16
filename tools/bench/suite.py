@@ -241,6 +241,7 @@ def run_row(
         result["run_dir"] = str(run_dirs[-1])
     if run.returncode != 0:
         result["error"] = f"{runner[0]}: {last_lines(run.stderr)}"
+    if run.returncode not in (0, pi.DRIVER_SIDE_EXIT):
         result["recovered_with_reset_target"] = True
         recovery = python("deploy.py", "reset-target", timeout_s=600)
         if recovery.returncode != 0:
