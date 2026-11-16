@@ -5,6 +5,15 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 
+ARC_FITTING = "arc fitting"
+FIRMWARE_RETRACTION = "firmware retraction"
+UNSUPPORTED_MOTION = {
+    "G2": ARC_FITTING,
+    "G3": ARC_FITTING,
+    "G10": FIRMWARE_RETRACTION,
+    "G11": FIRMWARE_RETRACTION,
+}
+
 
 class GCodeMove:
     def __init__(self, config):
@@ -49,6 +58,8 @@ class GCodeMove:
             desc = getattr(self, "cmd_" + cmd + "_help", None)
             gcode.register_command(cmd, func, False, desc)
         gcode.register_command("G0", self.cmd_G1)
+        for cmd in UNSUPPORTED_MOTION:
+            gcode.register_command(cmd, self.cmd_unsupported_motion)
         gcode.register_command("G5", self.cmd_G5)
         gcode.register_command("G5.1", self.cmd_G5_1)
         gcode.register_command("M114", self.cmd_M114, True)
@@ -224,6 +235,16 @@ class GCodeMove:
             raise gcmd.error(
                 "Unable to parse curve '%s'" % (gcmd.get_commandline(),)
             )
+
+    def cmd_unsupported_motion(self, gcmd):
+        raise gcmd.error(
+            "%s is not supported: '%s'. Disable %s in the slicer."
+            % (
+                gcmd.get_command(),
+                gcmd.get_commandline(),
+                UNSUPPORTED_MOTION[gcmd.get_command()],
+            )
+        )
 
     def cmd_G5(self, gcmd):
         self._resync_toolhead_before_move()

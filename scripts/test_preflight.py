@@ -8,6 +8,8 @@ import preflight
 import pytest
 from preflight_gcode import FrontEnd, Origin, Replay, Treatment, treatment
 
+from klippy.extras.gcode_move import UNSUPPORTED_MOTION
+
 ROOT = Path(__file__).resolve().parent.parent
 BENCH_CONFIG = ROOT / "tools" / "bench" / "printer.cfg"
 REFUSED = (
@@ -162,9 +164,7 @@ def test_the_replay_plans_motion_and_reports_what_it_drops(tmp_path):
     ]
     assert set(replay.by_treatment(Treatment.HOMING)) == {"G28"}
     assert set(replay.by_treatment(Treatment.PRINT_FLOW)) == {"PAUSE"}
-    assert replay.by_treatment(Treatment.LOST_ON_PRINTER)["G2"].first == Origin(
-        5
-    )
+    assert replay.by_treatment(Treatment.STOPS_PRINT)["G2"].first == Origin(5)
 
 
 class FailingBench(preflight.Bench):
@@ -247,3 +247,14 @@ def test_every_extended_command_the_planner_mirrors_is_planned():
     assert {treatment(name) for name in mirrored_extended()} == {
         Treatment.PLANNED
     }
+
+
+def test_every_command_the_live_host_refuses_is_refused_by_the_planner():
+    assert set(UNSUPPORTED_MOTION) <= refused_commands()
+    assert {treatment(name) for name in UNSUPPORTED_MOTION} == {
+        Treatment.STOPS_PRINT
+    }
+
+
+def test_a_curve_the_live_host_runs_is_not_reported_as_dropped():
+    assert treatment("G5") == Treatment.CURVE
