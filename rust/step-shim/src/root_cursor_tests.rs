@@ -497,3 +497,84 @@ fn a_signal_two_steps_off_the_lattice_is_drift_not_a_burst_of_steps() {
         Err(ShimError::LatticeDrift { position, .. }) if position == 2.5 - 2.0 * MICROSTEP_MM
     ));
 }
+
+fn rest_stroke(from: f64, to: f64, t_start: f64) -> ClockedMotorSpan {
+    const STROKE_SECS: f64 = 0.2;
+    let t_end = t_start + STROKE_SECS;
+    let curve = ScalarNurbs::try_new(
+        2,
+        vec![t_start, t_start, t_start, t_end, t_end, t_end],
+        vec![from, to, to],
+    )
+    .expect("a quadratic decel to rest");
+    let view = spatial_view(
+        ContinuousAxis::Spline(Arc::new(curve)),
+        t_start,
+        t_end,
+        1_000_000.0,
+    );
+    assert!(view.ends_at_rest());
+    assert_eq!(
+        view.signal.position(view.stream_t_end).unwrap().to_bits(),
+        to.to_bits(),
+        "the stroke must rest bit-exactly where the test puts it"
+    );
+    view
+}
+
+fn drain_strokes(microstep_mm: f64, strokes: &[ClockedMotorSpan]) -> Vec<(Vec<i8>, i64)> {
+    let config = MotorConfig {
+        oid: 0,
+        microstep_distance: microstep_mm,
+        invert_dir: false,
+        cycles_per_second: 1_000_000.0,
+        encoder: StepEncoder::Classic { max_error_ticks: 0 },
+        min_rearm_cycles: 0,
+    };
+    let mut cursor = StepRootCursor::new(&config);
+    cursor.reset_to(0, 0);
+    strokes
+        .iter()
+        .map(|stroke| {
+            let mut queue = SpanQueue::new(1);
+            queue.push(0, stroke.clone()).expect("an admissible view");
+            let mut roots = Vec::new();
+            cursor
+                .advance(0, &config, &mut queue, u64::MAX, &mut roots, None)
+                .expect("a drainable stroke");
+            let advances = roots.iter().map(|root| root.advance).collect();
+            (advances, cursor.step_count())
+        })
+        .collect()
+}
+
+/// Sim #859: the shaped CoreXY B lane of `test_ident_weld` rests 4 ulps
+/// short of 60 mm after a forward stroke and starts the return 4 ulps past
+/// it. The motor must rest on step 4800 and return without a catch-up step.
+#[test]
+fn a_rest_ulps_short_of_its_line_takes_that_step() {
+    const MICROSTEP_MM: f64 = 0.0125;
+    let out = rest_stroke(0.0, 59.999_999_999_999_97, 0.0);
+    let back = rest_stroke(60.000_000_000_000_03, -1.421_085_471_520_200_4e-14, 1.0);
+
+    let strokes = drain_strokes(MICROSTEP_MM, &[out, back]);
+
+    assert_eq!(strokes[0].1, 4800, "the forward stroke rests on its 4800th step");
+    assert!(
+        strokes[1].0.iter().all(|&advance| advance == -1),
+        "the return steps backward only"
+    );
+    assert_eq!(strokes[1].1, 0);
+}
+
+/// 100.1 parses to an f64 just under 8008 * 0.0125, as do about a third of
+/// the k / 80 mm coordinates up to 375 mm.
+#[test]
+fn a_coordinate_parsed_under_its_line_rests_on_it() {
+    const MICROSTEP_MM: f64 = 0.0125;
+    assert!(100.1 < 8008.0 * MICROSTEP_MM);
+
+    let strokes = drain_strokes(MICROSTEP_MM, &[rest_stroke(0.0, 100.1, 0.0)]);
+
+    assert_eq!(strokes[0].1, 8008);
+}
