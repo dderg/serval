@@ -57,6 +57,7 @@ def _mean_step_time(control, line):
     return times["sum_ns"] / times["count"] / 1e9
 
 
+@pytest.mark.expected_seconds(25)
 def test_secondary_mcu_steps_stay_in_time_across_a_long_session(sim_world):
     world = sim_world(_dual_mcu_cartesian, crystal_ppm=CRYSTAL_PPM)
     main = world.sim_control("h7")

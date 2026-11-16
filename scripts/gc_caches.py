@@ -9,7 +9,9 @@ abandoned /tmp/bench-ab-* worktree directories. Anything not touched for
 --days days is stale, unless a git worktree of any repo lives in it or under
 it, or a running process has its cwd or an open file there. The reused caches
 ~/.cache/pending-baselines/{samples,audit} are always kept; the per-worktree
-cargo target dirs in pending-baselines/targets age out like the rest.
+cargo target dirs in pending-baselines/targets age out like the rest, and so
+does ~/.cache/serval-ci-uv (ci.sh's uv wheels and interpreters, touched on
+every use), which also goes once it outgrows MAX_CI_UV_CACHE_GIB.
 Also:
 - docker images tagged klipper-build-* or kalico-sim-* (3.6 GB / 0.65 GB per
   worktree slot) older than --image-hours (default 12) that no container uses
@@ -40,6 +42,8 @@ PENDING = CACHE / "pending-baselines"
 KEPT = (PENDING / "samples", PENDING / "audit")
 SECONDS_PER_DAY = 86400.0
 MAX_SCRATCH_TARGETS = 24
+CI_UV_CACHE = CACHE / "serval-ci-uv"
+MAX_CI_UV_CACHE_GIB = 4.0
 DOCKER_IMAGE_PREFIXES = ("klipper-build-", "kalico-sim-")
 DOCKER_BUILD_CACHE_HOURS = 168
 SECONDS_PER_HOUR = 3600.0
@@ -75,6 +79,8 @@ def candidates() -> list[Path]:
         if directory.is_dir():
             found.extend(sorted(directory.iterdir()))
     found.extend(sorted(Path("/tmp").glob("bench-ab-*")))
+    if CI_UV_CACHE.is_dir():
+        found.append(CI_UV_CACHE)
     return [p for p in found if p not in KEPT]
 
 
@@ -126,6 +132,12 @@ def free_gib(path: Path = CACHE) -> float:
 def over_scratch_cap(targets: list[Path]) -> list[Path]:
     ordered = sorted(targets, key=newest_mtime, reverse=True)
     return ordered[MAX_SCRATCH_TARGETS:]
+
+
+def over_size_cap(path: Path, max_gib: float) -> list[Path]:
+    if not path.is_dir() or size_bytes(path) <= max_gib * GIB:
+        return []
+    return [path]
 
 
 def docker_lines(*args: str) -> list[str]:
@@ -248,9 +260,12 @@ def main() -> None:
         if (PENDING / "targets").is_dir()
         else []
     )
+    found = candidates()
     capped = set(over_scratch_cap(scratch))
+    if CI_UV_CACHE in found:
+        capped.update(over_size_cap(CI_UV_CACHE, MAX_CI_UV_CACHE_GIB))
     victims = []
-    for path in candidates():
+    for path in found:
         if path in kept:
             print(f"   kept  {path}  (--keep)")
         elif newest_mtime(path) >= cutoff and path not in capped:
