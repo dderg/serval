@@ -1,0 +1,148 @@
+{
+ "run_dir": "/home/dderg/bench/runs/sweep-interrupt/20261115-205612-cancel_macro_mesh",
+ "head": "0b90eeaf39191ef3a83d4c2f78ddb53883d6e2ae",
+ "scenario": "cancel_macro_mesh",
+ "window": [
+  1794772578.3184,
+  1794772634.8301
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794772579.3203685,
+   "returned": 1794772579.3203685,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "cancel",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794772602.1108675,
+   "returned": 1794772612.1879377,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794772579.4011,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794772612.1879,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794772631.7504985,
+  "lines": [
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794772633.9379065,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794772591.441,
+   1794772631.1174,
+   353779
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794772579.402,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794772579",
+   "file": "bench_20261115-205612-cancel_macro_mesh.gcode"
+  },
+  {
+   "t": 1794772579.402,
+   "event": "pacer_reserve_raised",
+   "latency_s": 5.2407e-05,
+   "level": "info",
+   "print_id": "print-1794772579",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794772612.081,
+   "event": "pacer_reserve_raised",
+   "latency_s": 6.8947577110000005,
+   "level": "info",
+   "print_id": "print-1794772579",
+   "reserve_s": 17.200058884,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794772612.082,
+   "event": "reactor_poller_late",
+   "level": "warn",
+   "source": "host-py",
+   "print_id": "print-1794772579",
+   "late_s": 6.896
+  },
+  {
+   "t": 1794772612.185,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794772579"
+  },
+  {
+   "t": 1794772612.185,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794772579",
+   "outcome": "cancelled",
+   "reason": "",
+   "duration_s": 32.783591184001125,
+   "filament_mm": 73.83592000000003
+  }
+ ],
+ "journal": [],
+ "fixture_note": "the source run fetched no journal; its journal list is empty, not clean"
+}

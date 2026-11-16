@@ -1,0 +1,144 @@
+{
+ "run_dir": "/home/dderg/bench/runs/followup-interrupt/20261115-213531-mesh_full_print",
+ "head": "0b90eeaf39191ef3a83d4c2f78ddb53883d6e2ae",
+ "scenario": "mesh_full_print",
+ "window": [
+  1794774934.9195,
+  1794775086.7555
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794774935.9198961,
+   "returned": 1794774935.9198961,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794774935.9338,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794775055.8634,
+   "klippy": "unreachable HTTPError",
+   "klippy_message": "",
+   "print": null,
+   "print_message": null
+  },
+  {
+   "t": 1794775064.9588,
+   "klippy": "startup",
+   "klippy_message": "",
+   "print": "standby",
+   "print_message": ""
+  },
+  {
+   "t": 1794775067.45,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "standby",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794775072.9720693,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794775086.5357246,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "standby",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794774956.4133,
+   1794775056.1907,
+   1136949
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794774935.936,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794774935",
+   "file": "bench_20261115-213531-mesh_full_print.gcode"
+  },
+  {
+   "t": 1794774935.937,
+   "event": "pacer_reserve_raised",
+   "latency_s": 5.663e-05,
+   "level": "info",
+   "print_id": "print-1794774935",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775073.355,
+   "event": "pacer_reserve_raised",
+   "latency_s": 6.7944e-05,
+   "level": "info",
+   "print_id": "",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775085.173,
+   "event": "pacer_reserve_raised",
+   "latency_s": 0.00889682,
+   "level": "info",
+   "print_id": "",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  }
+ ],
+ "journal": [
+  "Nov 15 21:37:35 bench-pi python[853791]: thread 'kalico-shaper' panicked at /home/pi/klipper/rust/motion-pipeline/src/shaper.rs:853:29:",
+  "Nov 15 21:37:35 bench-pi python[853791]: shaper: axis 3: follower seam weld over [117.63061448952132, 117.63062897222153] would move the emitted track by up to 0.000000003543618800606102 mm (budget 0.00016837156401645992) and its acceleration by up to 101.40022719872113 mm/s^2 (budget 50): the emitted state (p, v) = (286.3611956509606, 4.879355144002912) does not continue the fitted start (p, v) = (286.361195647417, 4.879341298073752)",
+  "Nov 15 21:37:35 bench-pi systemd[1]: klipper.service: Main process exited, code=killed, status=6/ABRT",
+  "Nov 15 21:37:35 bench-pi systemd[1]: klipper.service: Failed with result 'signal'."
+ ]
+}

@@ -1,0 +1,259 @@
+{
+ "run_dir": "/home/dderg/bench/runs/followup-interrupt/20261115-214806-print_twice",
+ "head": "0b90eeaf39191ef3a83d4c2f78ddb53883d6e2ae",
+ "scenario": "print_twice",
+ "window": [
+  1794775689.5529,
+  1794775971.9316
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794775690.557364,
+   "returned": 1794775690.557364,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794775782.2605643,
+   "returned": 1794775782.276283,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794775690.6814,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794775781.7584,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  },
+  {
+   "t": 1794775782.2763,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794775964.9219,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794775970.517864,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794775971.8706334,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794775703.0349,
+   1794775781.4112,
+   829213
+  ],
+  [
+   1794775782.5745,
+   1794775790.7665,
+   80242
+  ],
+  [
+   1794775800.4743,
+   1794775828.6874,
+   227679
+  ],
+  [
+   1794775844.8749,
+   1794775858.5721,
+   162370
+  ],
+  [
+   1794775860.7274,
+   1794775869.6091,
+   113997
+  ],
+  [
+   1794775894.2063,
+   1794775913.4161,
+   241410
+  ],
+  [
+   1794775964.4023,
+   1794775964.6584,
+   3628
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794775690.68,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794775690",
+   "file": "bench_20261115-214806-print_twice.gcode"
+  },
+  {
+   "t": 1794775690.68,
+   "event": "pacer_reserve_raised",
+   "latency_s": 9.9166e-05,
+   "level": "info",
+   "print_id": "print-1794775690",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775767.177,
+   "event": "pacer_reserve_raised",
+   "latency_s": 6.342535626,
+   "level": "info",
+   "print_id": "print-1794775690",
+   "reserve_s": 18.049006117999998,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775781.544,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794775690",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 90.86456027900567,
+   "filament_mm": 186.93646999999967
+  },
+  {
+   "t": 1794775782.275,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794775782",
+   "file": "bench_20261115-214806-print_twice.gcode"
+  },
+  {
+   "t": 1794775782.42,
+   "event": "anchor_idle_resume",
+   "lead_secs": 18.049006117999998,
+   "level": "info",
+   "margin_s": 8.348724286945213,
+   "print_id": "print-1794775782",
+   "seg_t_start": 8.20562278794519,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775810.582,
+   "event": "anchor_idle_resume",
+   "lead_secs": 34.287176095999996,
+   "level": "info",
+   "margin_s": 18.10503842359347,
+   "print_id": "print-1794775782",
+   "seg_t_start": 36.42399063353868,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775826.433,
+   "event": "anchor_idle_resume",
+   "lead_secs": 34.287176095999996,
+   "level": "info",
+   "margin_s": 32.14053801278217,
+   "print_id": "print-1794775782",
+   "seg_t_start": 50.127644940320785,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775853.508,
+   "event": "anchor_idle_resume",
+   "lead_secs": 40.69031071199999,
+   "level": "info",
+   "margin_s": 16.109058858216883,
+   "print_id": "print-1794775782",
+   "seg_t_start": 59.02429741753765,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775899.338,
+   "event": "pacer_reserve_raised",
+   "latency_s": 6.869099194,
+   "level": "info",
+   "print_id": "print-1794775782",
+   "reserve_s": 65.04235990400001,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775899.351,
+   "event": "anchor_idle_resume",
+   "lead_secs": 65.04235990400001,
+   "level": "info",
+   "margin_s": 14.062740255222195,
+   "print_id": "print-1794775782",
+   "seg_t_start": 78.24031421475985,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775964.771,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794775782",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 182.49652372499986,
+   "filament_mm": 186.9364699999995
+  }
+ ],
+ "journal": []
+}

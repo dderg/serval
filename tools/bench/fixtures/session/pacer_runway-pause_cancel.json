@@ -1,0 +1,143 @@
+{
+ "run_dir": "/home/dderg/bench/runs/sweep-pacer-runway-2/20261116-005958-pause_cancel",
+ "head": "0bae8f1a04e774fb37e5c71009c2f8b153445501",
+ "scenario": "pause_cancel",
+ "window": [
+  1794787201.1817,
+  1794787237.5387
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794787202.1819968,
+   "returned": 1794787202.1819968,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "pause",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794787222.5724213,
+   "returned": 1794787223.3864303,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "cancel",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794787230.2741632,
+   "returned": 1794787230.289133,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794787202.3136,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794787223.3864,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "paused",
+   "print_message": ""
+  },
+  {
+   "t": 1794787230.2891,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794787235.7544985,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794787237.156008,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794787217.6689,
+   1794787227.9733,
+   98878
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794787202.314,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794787202",
+   "file": "bench_20261116-005958-pause_cancel.gcode"
+  },
+  {
+   "t": 1794787223.384,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794787202"
+  },
+  {
+   "t": 1794787230.29,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794787202",
+   "outcome": "cancelled",
+   "reason": "",
+   "duration_s": 27.975377558002947,
+   "filament_mm": 16.555270000000004
+  }
+ ],
+ "journal": []
+}
