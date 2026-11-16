@@ -98,7 +98,9 @@ impl PendingRequest {
                 Resolution::Unit(planner.update_mesh_try_start(swap.mesh.clone(), swap.gcode_z)?)
             }
             PipelineRequest::Nudge(params) => Resolution::Checked(planner.submit_nudge(*params)?),
-            PipelineRequest::Buzz(params) => Resolution::Arming(planner.submit_buzz(params.clone())?),
+            PipelineRequest::Buzz(params) => {
+                Resolution::Arming(planner.submit_buzz(params.clone())?)
+            }
         })
     }
 }
