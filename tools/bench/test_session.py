@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import json
 import urllib.error
+from types import SimpleNamespace
 
 import pytest
 import run
@@ -42,10 +44,13 @@ class InlineRequests:
 
 
 class Printer:
-    def __init__(self, clock: Clock, file_size: int, print_s: float):
+    def __init__(
+        self, clock: Clock, file_size: int, print_s: float, read_ahead: float
+    ):
         self.clock = clock
         self.file_size = file_size
         self.print_s = print_s
+        self.read_ahead = read_ahead
         self.klippy = "ready"
         self.state = "standby"
         self.started = 0.0
@@ -70,7 +75,8 @@ class Printer:
         if self.state == "printing" and elapsed >= self.print_s:
             self.state = "complete"
         printing = self.state == "printing"
-        read = min(1.0, READ_AHEAD * elapsed / self.print_s) if printing else 0
+        read = min(1.0, self.read_ahead * elapsed / self.print_s)
+        read = read if printing else 0
         return {
             "t": self.clock.now,
             "klippy": self.klippy,
@@ -99,11 +105,16 @@ def bench(monkeypatch):
         session.pi, "gcode_script", lambda line, _t: scripts.append(line)
     )
 
-    def drive(name: str, print_s: float = PRINT_S, perform=None):
+    def drive(
+        name: str,
+        print_s: float = PRINT_S,
+        perform=None,
+        read_ahead: float = READ_AHEAD,
+    ):
         scenario = SCENARIO_BY_NAME[name]
         lines = scenario.gcode.lines()
         size = len(("\n".join(lines) + "\n").encode())
-        printer = Printer(clock, size, print_s)
+        printer = Printer(clock, size, print_s, read_ahead)
         monkeypatch.setattr(session, "perform", perform or printer.perform)
         monkeypatch.setattr(session, "sample", printer.sample)
         markers = session.marker_offsets(scenario, lines)
@@ -112,8 +123,53 @@ def bench(monkeypatch):
         final = runner.drive(Capture())
         return runner.record, printer, final
 
+    drive.clock = clock
     drive.scripts = scripts
     return drive
+
+
+class RecordingCapture:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def start(self) -> None:
+        pass
+
+    def check(self) -> None:
+        pass
+
+    def stop(self):
+        return SimpleNamespace(unit="ticks", units=0)
+
+
+def test_a_scenario_run_keeps_its_session_in_run_json(
+    bench, monkeypatch, tmp_path
+):
+    scenario = SCENARIO_BY_NAME["cancel_plain"]
+    size = len(("\n".join(scenario.gcode.lines()) + "\n").encode())
+    printer = Printer(bench.clock, size, PRINT_S, READ_AHEAD)
+    monkeypatch.setattr(session, "perform", printer.perform)
+    monkeypatch.setattr(session, "sample", printer.sample)
+    run_dir = tmp_path / "run"
+
+    def start_run(lines, runs_dir, config_text, source):
+        run_dir.mkdir()
+        assert "[bed_mesh]" not in config_text
+        return run_dir, "bench.gcode", dict(source)
+
+    monkeypatch.setattr(run, "start_run", start_run)
+    monkeypatch.setattr(run, "Capture", RecordingCapture)
+    monkeypatch.setattr(run.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(run, "scp_from_pi", lambda *_a, **_k: None)
+    monkeypatch.setattr(run, "klipper_journal", lambda _since: "")
+    assert session.run_scenario(scenario, tmp_path) == run_dir
+    info = json.loads((run_dir / "run.json").read_text())
+    assert info["scenario"] == "cancel_plain"
+    assert info["print_state"] == "cancelled"
+    recorded = info["session"]
+    assert [a["act"] for a in recorded["actions"]] == ["start_print", "cancel"]
+    assert recorded["post_check"]["after"]["klippy"] == "ready"
+    assert recorded["ended"] >= recorded["post_check"]["started"]
 
 
 def test_the_next_print_starts_after_the_first_ends(bench):
@@ -161,6 +217,14 @@ def test_the_estop_waits_until_the_dwell_line_is_read(bench):
     waited = record["actions"][-1]
     assert waited["act"] == "wait" and waited["ok"]
     assert record["post_check"]["started"] >= waited["sent"]
+
+
+def test_a_marker_never_seen_read_fires_once_the_print_ended(bench):
+    record, printer, _ = bench("estop_g4", read_ahead=0.0)
+    ended = next(s["t"] for s in record["samples"] if s["print"] == "complete")
+    (stopped,) = printer.times(Act.EMERGENCY_STOP)
+    delay = SCENARIO_BY_NAME["estop_g4"].timeline[1].delay_s
+    assert stopped == ended + delay
 
 
 def test_the_session_settles_before_the_post_check(bench):

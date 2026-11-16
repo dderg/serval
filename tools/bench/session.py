@@ -255,7 +255,8 @@ class Session:
 
     def _line_read_at(self, offset: int) -> float | None:
         for state in self._since_last_start():
-            if (
+            ended = state["print"] in ENDED_PRINT
+            if ended or (
                 state["print"] in ACTIVE_PRINT
                 and state["file_position"] >= offset
             ):
