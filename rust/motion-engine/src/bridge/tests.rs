@@ -774,8 +774,7 @@ fn partial_state_teardown_at_exit() {
 
 #[test]
 fn report_endpoint_death_latches_203_and_first_cause_wins() {
-    let latch: Arc<std::sync::Mutex<std::collections::HashMap<u32, String>>> =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let latch = super::EndpointDeathLatch::default();
     let first = super::report_endpoint_death(&latch, 5, "conn EOF");
     // A later writer (e.g. the supervisor after the pump already latched) must
     // not overwrite the first surfaced cause.
@@ -785,7 +784,7 @@ fn report_endpoint_death_latches_203_and_first_cause_wins() {
         "the first call latches the cause and arms the backstop"
     );
     assert!(!second, "a later writer does not re-latch (returns false)");
-    let msg = latch.lock_ok().remove(&5).expect("a cause must be latched");
+    let msg = latch.take(5).expect("a cause must be latched");
     assert!(
         msg.contains("(fault -203)"),
         "must carry the -203 code: {msg}"
@@ -807,7 +806,7 @@ fn engine_shutdown_settles_a_latched_endpoint_death() {
     ));
     engine.shutdown();
     assert!(
-        !engine.latched.endpoint_death.lock_ok().contains_key(&5),
+        !engine.latched.endpoint_death.is_pending(5),
         "the session that would take the death is gone, so the watchdog would abort on it"
     );
 }
