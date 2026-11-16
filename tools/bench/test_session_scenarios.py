@@ -86,6 +86,12 @@ def test_the_estop_dwell_print_ends_with_the_zigzag_then_one_dwell():
     assert lines.count(scenarios.DWELL_LINE) == 1
 
 
+def test_the_sparse_pause_print_is_the_zigzag_alone():
+    lines = SCENARIO_BY_NAME["pause_sparse"].gcode.lines()
+    zigzag = list(scenarios.zigzag_moves())
+    assert lines == [*run.PREAMBLE, *zigzag, *run.POSTAMBLE]
+
+
 def test_a_gcode_describes_its_source_and_cut():
     assert Gcode(limit=200).describe() == (
         "tools/sim/gcode/voron_first_layers.gcode[:200]"
