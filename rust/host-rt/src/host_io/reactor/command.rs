@@ -35,10 +35,6 @@ impl Reactor {
             ReactorCommand::SetMcuLogHook(hook) => {
                 self.event_dispatcher.set_mcu_log_hook(hook);
             }
-            ReactorCommand::SubscribeFault { sender, reply } => {
-                let result = self.event_dispatcher.fault_latch.subscribe(sender);
-                let _ = reply.send(result);
-            }
             ReactorCommand::SubscribeRuntimeEvents {
                 priority,
                 bulk,
