@@ -1372,10 +1372,17 @@ fn channel_depth_tracks_occupancy_and_refuses_overflow_at_capacity() {
 fn drain_requests_refuse_a_full_channel_instead_of_blocking() {
     let (sender, _inbox) = bounded::<StreamMsg>(1);
     let (execution_control, _pump_inbox) = crossbeam_channel::unbounded();
+    let links: Arc<WorkerLinks> = Arc::default();
+    let intake = Arc::new(intake_gate::IntakeGate::new(
+        Arc::default(),
+        Arc::clone(&links),
+        0.0,
+    ));
     let h = StreamWorkerHandle {
         sender,
         join_handle: None,
-        links: Arc::default(),
+        links,
+        intake,
         execution_control,
     };
     h.submit_move(line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]))
