@@ -20,6 +20,7 @@ PI_CONFIG = "printer_data/config/printer.cfg"
 PI_LOGS = "printer_data/logs"
 REPO_CFG = Path(__file__).with_name("printer.cfg")
 READY_TIMEOUT_S = 60.0
+HTTP_TIMEOUT_S = 30.0
 SCP_ATTEMPTS = 3
 SCP_RETRY_DELAY_S = 2.0
 FORBIDDEN_PINS = {
@@ -43,22 +44,24 @@ def http(
     path: str,
     body: bytes | None = None,
     headers: dict | None = None,
+    timeout_s: float = HTTP_TIMEOUT_S,
 ) -> dict:
     request = urllib.request.Request(
         MOONRAKER + path, data=body, method=method, headers=headers or {}
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
         payload = json.loads(response.read())
         return payload.get("result", payload)
 
 
-def gcode_script(script: str) -> None:
+def gcode_script(script: str, timeout_s: float = HTTP_TIMEOUT_S) -> None:
     body = json.dumps({"script": script}).encode()
     http(
         "POST",
         "/printer/gcode/script",
         body,
         {"Content-Type": "application/json"},
+        timeout_s,
     )
 
 
@@ -129,6 +132,13 @@ def firmware_restart() -> None:
 
 
 DEPLOY_RECORD = "klipper/.bench-deploy.json"
+DEPLOY_IDENTITY = (
+    "worktree",
+    "head",
+    "diff_sha256",
+    "rust_build_id",
+    "timestamp",
+)
 
 
 def write_deployed(identity: dict) -> None:
@@ -144,6 +154,18 @@ def write_deployed(identity: dict) -> None:
 
 def read_deployed() -> dict:
     return json.loads(ssh(f"cat {DEPLOY_RECORD}"))
+
+
+def foreign_deploy(expected: dict) -> str | None:
+    current = read_deployed()
+    if all(current.get(key) == expected.get(key) for key in DEPLOY_IDENTITY):
+        return None
+    return (
+        f"the Pi runs {current.get('worktree')} head "
+        f"{str(current.get('head'))[:9]} synced {current.get('timestamp')}, "
+        f"not {expected.get('worktree')} head {str(expected.get('head'))[:9]} "
+        f"synced {expected.get('timestamp')}: another session took the bench"
+    )
 
 
 def flashed_firmware() -> dict:
@@ -167,6 +189,10 @@ def mcu_version(mcu: str = "mcu") -> str:
 
 def klipper_pid() -> int:
     return int(ssh("systemctl show -p MainPID --value klipper").strip())
+
+
+def klipper_journal(since_wall_s: float) -> str:
+    return ssh(f"journalctl -u klipper --since @{int(since_wall_s)} --no-pager")
 
 
 def restart_klipper() -> None:

@@ -1,0 +1,157 @@
+{
+ "run_dir": "/home/dderg/bench/runs/sweep-pacer-runway-2/20261116-004927-print_twice",
+ "head": "0bae8f1a04e774fb37e5c71009c2f8b153445501",
+ "scenario": "print_twice",
+ "window": [
+  1794786571.3688,
+  1794786751.9987
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794786572.371853,
+   "returned": 1794786572.371853,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794786666.058754,
+   "returned": 1794786666.0704114,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794786572.3905,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794786665.5572,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  },
+  {
+   "t": 1794786666.0704,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794786744.986,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794786750.5038824,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794786751.8860834,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794786587.0496,
+   1794786665.4268,
+   829213
+  ],
+  [
+   1794786666.3658,
+   1794786744.7438,
+   829213
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794786572.391,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794786572",
+   "file": "bench_20261116-004927-print_twice.gcode"
+  },
+  {
+   "t": 1794786665.55,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794786572",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 93.15948681499867,
+   "filament_mm": 186.93646999999967
+  },
+  {
+   "t": 1794786666.071,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794786666",
+   "file": "bench_20261116-004927-print_twice.gcode"
+  },
+  {
+   "t": 1794786744.866,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794786666",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 78.79579219299922,
+   "filament_mm": 186.9364699999995
+  }
+ ],
+ "journal": []
+}
