@@ -155,11 +155,6 @@ impl SerialFrameIo {
             std::thread::sleep(DRAIN_POLL);
         }
     }
-
-    #[cfg(any(test, feature = "test-harness"))]
-    pub fn link_mut(&mut self) -> &mut dyn ByteLink {
-        &mut *self.link
-    }
 }
 
 #[cfg(test)]
