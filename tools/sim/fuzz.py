@@ -52,7 +52,11 @@ def _parse(argv) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     which = parser.add_mutually_exclusive_group(required=True)
     which.add_argument("--seeds", type=_seed_range, help="inclusive range A..B")
-    which.add_argument("--seed", type=int)
+    which.add_argument(
+        "--seed",
+        type=lambda text: [int(s) for s in text.split(",")],
+        help="one seed or a comma list",
+    )
     which.add_argument(
         "--replay", type=pathlib.Path, help="a saved scenario directory"
     )
@@ -63,6 +67,9 @@ def _parse(argv) -> argparse.Namespace:
         default=int(os.environ.get("SIM_FUZZ_JOBS", DEFAULT_JOBS)),
     )
     parser.add_argument("--budget-s", type=float, default=None)
+    parser.add_argument(
+        "--repeat", type=int, default=1, help="run each scenario N times"
+    )
     parser.add_argument("--minimize", action="store_true")
     parser.add_argument("--keep-passing", action="store_true")
     parser.add_argument(
@@ -173,28 +180,38 @@ class Runner:
         started = time.monotonic()
         futures = []
         for seed in seeds:
-            if (
-                self.args.budget_s
-                and time.monotonic() - started > self.args.budget_s
-            ):
-                break
-            futures.append(self.pool.submit(self._seed, seed))
-            while sum(not f.done() for f in futures) >= self.args.jobs:
-                time.sleep(0.2)
+            for attempt in range(self.args.repeat):
+                if (
+                    self.args.budget_s
+                    and time.monotonic() - started > self.args.budget_s
+                ):
+                    return [future.result() for future in futures]
+                futures.append(self.pool.submit(self._seed, seed, attempt))
+                while sum(not f.done() for f in futures) >= self.args.jobs:
+                    time.sleep(0.2)
         return [future.result() for future in futures]
 
-    def _seed(self, seed: int) -> dict:
-        directory = self._prepare(scenario.generate(seed), f"seed-{seed}")
+    def _name(self, stem: str, attempt: int) -> str:
+        return stem if self.args.repeat == 1 else f"{stem}-r{attempt}"
+
+    def _seed(self, seed: int, attempt: int) -> dict:
+        name = self._name(f"seed-{seed}", attempt)
+        directory = self._prepare(scenario.generate(seed), name)
         result = self.evaluate(directory, seed_mode=True)
         print(_line(result), flush=True)
         return result
 
-    def replay(self, source: pathlib.Path) -> dict:
+    def replay(self, source: pathlib.Path) -> list[dict]:
         chosen = scenario.load(source)
-        directory = self._prepare(chosen, f"replay-{chosen.seed}")
-        result = self.evaluate(directory, seed_mode=False)
-        print(_line(result), flush=True)
-        return result
+
+        def one(attempt: int) -> dict:
+            name = self._name(f"replay-{chosen.seed}", attempt)
+            directory = self._prepare(chosen, name)
+            result = self.evaluate(directory, seed_mode=False)
+            print(_line(result), flush=True)
+            return result
+
+        return list(self.pool.map(one, range(self.args.repeat)))
 
     def minimize(self, result: dict) -> dict:
         source = result["dir"]
@@ -262,12 +279,16 @@ def main(argv=None) -> int:
     runner = Runner(args)
     started = time.monotonic()
     if args.replay:
-        results = [runner.replay(args.replay)]
+        results = runner.replay(args.replay)
     else:
-        seeds = [args.seed] if args.seed is not None else args.seeds
+        seeds = args.seed if args.seed is not None else args.seeds
         results = runner.run_seeds(seeds)
     if args.minimize:
-        for result in [r for r in results if r["status"] == FAIL]:
+        first_failures = {}
+        for result in results:
+            if result["status"] == FAIL:
+                first_failures.setdefault(result["seed"], result)
+        for result in first_failures.values():
             runner.minimize(result)
     summary = _summary(results, time.monotonic() - started)
     (runner.run_dir / "summary.txt").write_text(summary + "\n")

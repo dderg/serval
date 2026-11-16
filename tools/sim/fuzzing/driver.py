@@ -198,7 +198,7 @@ class Session:
         }
 
     def _rebase(self, position) -> None:
-        steps = self._steps()
+        steps = self._still_steps("re-homing at the start position")
         for motor in self._checked():
             self.base[motor.name] = (
                 steps[motor.name],
