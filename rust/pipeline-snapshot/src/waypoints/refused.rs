@@ -3,9 +3,9 @@
 //! host ignores too (temperatures, fans, display, progress, object markers)
 //! or does not know, which it drops with a warning.
 
-const ARC: &str = "the live host drops arcs as an unknown command ([gcode_arcs] refuses to load), and straight segments planned in their place would misrepresent the print";
+const ARC: &str = "an arc; the live host stops the print on it ([gcode_arcs] refuses to load): disable arc fitting in the slicer";
 const CURVE: &str = "a curve move; the snapshot plans straight G0/G1 segments only";
-const RETRACTION: &str = "firmware retraction; the live host drops it as an unknown command ([firmware_retraction] refuses to load), and the snapshot cannot know the move it stands for";
+const RETRACTION: &str = "firmware retraction; the live host stops the print on it ([firmware_retraction] refuses to load): disable firmware retraction in the slicer";
 const UNKNOWN_MOTION: &str =
     "moves the toolhead by a homing, probing or calibration sequence the snapshot cannot know";
 const MOTOR_DRIVE: &str = "drives motors outside the planned toolhead path";
