@@ -130,7 +130,7 @@ impl UnsoundPlanner {
         &self,
         planned: impl IntoIterator<Item = PlannedItem>,
     ) -> (Vec<PlannedMove>, Vec<usize>) {
-        let mut guard = TurningGuard::new(self.config.clone(), &self.chains);
+        let mut guard = TurningGuard::new(self.config.clone(), &self.chains, &[]);
         let mut emitted = Vec::new();
         let mut at_drains = Vec::new();
         for item in planned {
