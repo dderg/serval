@@ -94,8 +94,10 @@ class _EventCursor:
 def _boot(sim_world, monkeypatch):
     monkeypatch.setenv("RUST_LOG", PACER_LOG)
     world = sim_world(
-        lambda w: configs.neptune_print_config(w.h7_pty, str(w.gcode_dir))
-        + PAUSE_RESUME,
+        lambda w: (
+            configs.neptune_print_config(w.h7_pty, str(w.gcode_dir))
+            + PAUSE_RESUME
+        ),
         dual_mcu=False,
     )
     world.gcode_ok("SET_KINEMATIC_POSITION X=0 Y=0 Z=0", timeout=10)
