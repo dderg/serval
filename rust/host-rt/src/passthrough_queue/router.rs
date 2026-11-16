@@ -76,6 +76,13 @@ impl std::fmt::Display for RouterError {
 
 impl std::error::Error for RouterError {}
 
+fn require_positive_rate(mcu: McuHandle, freq: f64) -> Result<(), RouterError> {
+    if freq.is_finite() && freq > 0.0 {
+        return Ok(());
+    }
+    Err(RouterError::ClockRateNotPositive { mcu, freq })
+}
+
 /// A record this old has missed samples. Measured healthy sim worlds gap up to
 /// ~9 s (klippy's outlier rejection drops samples and a loaded reactor defers
 /// the timer), so this is a loud degradation signal, not a hard stop.
@@ -251,6 +258,7 @@ impl PassthroughRouter {
         offset: f64,
         last_clock: u64,
     ) -> Result<(), RouterError> {
+        require_positive_rate(mcu, freq)?;
         tracing::info!(
             subsystem = "clocksync",
             event = "set_clock_est",
@@ -302,6 +310,7 @@ impl PassthroughRouter {
         converged: bool,
         host_now_raw: f64,
     ) -> Result<(), RouterError> {
+        require_positive_rate(mcu, freq)?;
         let bridge_now_instant = instant_to_f64(self.clock.now());
         let bridge_now_raw = crate::clock::monotonic_raw_secs();
         let raw_at_anchor = bridge_now_raw - bridge_now_instant;
@@ -351,6 +360,7 @@ impl PassthroughRouter {
         host_send: Instant,
         mcu_at_send: u64,
     ) -> Result<(), RouterError> {
+        require_positive_rate(mcu, freq)?;
         let clock_offset = instant_to_f64(host_send);
         tracing::info!(
             subsystem = "clocksync",
