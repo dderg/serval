@@ -37,6 +37,7 @@ class FakeClockSync:
 class ReconnectingMcu:
     non_critical_recon_event = mcu.MCU.non_critical_recon_event
     recon_mcu = mcu.MCU.recon_mcu
+    _abandon_reconnect = mcu.MCU._abandon_reconnect
 
     def __init__(self, identify, connect=lambda: None):
         self._name = "beacon"
