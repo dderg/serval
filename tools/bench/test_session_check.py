@@ -302,12 +302,26 @@ def test_a_stats_gap_or_a_second_klippy_session_fails_the_soak():
     del evidence["stats"][10:15]
     gap = _soak_verdicts(evidence)["klippy_stats"]
     assert not gap.ok
-    assert "longest gap 6.000 s > 2 s (#406)" in gap.detail
+    assert "longest gap in a print 6.000 s > 2 s (#406)" in gap.detail
     evidence = _soak_evidence("pacer_runway-pause_resume")
     evidence["stats"][-1]["session_id"] = "k-2"
     restarted = _soak_verdicts(evidence)["klippy_stats"]
     assert not restarted.ok
     assert "from 2 klippy session(s)" in restarted.detail
+
+
+def test_no_stats_while_paused_or_idle_is_no_gap():
+    evidence = _soak_evidence("pacer_runway-pause_resume")
+    view = session_check.Evidence(evidence)
+    [(paused, resumed)] = view.pauses()
+    [first_print] = view.prints()
+    evidence["stats"] = [
+        row
+        for row in evidence["stats"]
+        if not paused <= row["t"] <= resumed and row["t"] < first_print.end
+    ]
+    verdict = _soak_verdicts(evidence)["klippy_stats"]
+    assert verdict.ok, verdict.detail
 
 
 def test_evidence_without_stats_fails_the_stats_check():

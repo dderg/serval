@@ -442,22 +442,35 @@ def reserve_growth_check(
     return Verdict("pacer_reserve_growth", True, detail)
 
 
+def stats_gaps(evidence: Evidence) -> list[tuple[float, float]]:
+    """(gap, start) between Stats lines inside each print, outside its
+    commanded pauses: klippy logs Stats only while it is active."""
+    prints = evidence.prints()
+    pauses = evidence.pauses()
+    gaps = []
+    for index in range(len(prints)):
+        lo, hi = evidence.print_window(index, prints)
+        times = [row["t"] for row in evidence.stats if lo <= row["t"] < hi]
+        for before, after in zip(times, times[1:]):
+            if not any(
+                p_lo <= after and before <= p_hi for p_lo, p_hi in pauses
+            ):
+                gaps.append((after - before, before))
+    return gaps
+
+
 def stats_check(evidence: Evidence, check: StatsSteady) -> Verdict:
     stats = evidence.stats
     if not stats:
         return Verdict("klippy_stats", False, "no klippy Stats line in the run")
     sessions = {row["session_id"] for row in stats}
-    times = [
-        evidence.window_start,
-        *(row["t"] for row in stats),
-        evidence.window_end,
-    ]
-    longest = max(later - earlier for earlier, later in zip(times, times[1:]))
+    longest, at = max(stats_gaps(evidence), default=(0.0, evidence.origin))
     first, last = stats[0], stats[-1]
     detail = (
         f"{len(stats)} Stats lines from {len(sessions)} klippy session(s); "
-        f"{check.bound.judge('longest gap', longest)}; memavail "
-        f"{first['memavail_kb']} -> {last['memavail_kb']} kB; klippy cputime "
+        f"{check.bound.judge('longest gap in a print', longest)} at "
+        f"{evidence.at(at)}; memavail {first['memavail_kb']} -> "
+        f"{last['memavail_kb']} kB; klippy cputime "
         f"+{last['cputime_s'] - first['cputime_s']:.1f} s"
     )
     return Verdict(
