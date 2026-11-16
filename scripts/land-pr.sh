@@ -176,6 +176,8 @@ finish() {
         echo "+ git worktree remove $tree"
     fi
     [ "$dry_run" -eq 1 ] || git log --oneline -1 origin/main
+    [ "$dry_run" -eq 1 ] || python3 "$(dirname "$gh_util")/qualify.py" status --line \
+        || echo "land-pr: qualify.py status failed; the landing stands" >&2
 }
 
 main() {

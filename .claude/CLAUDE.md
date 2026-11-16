@@ -161,6 +161,25 @@ The Pi bench is shared: every use goes through `tools/bench/lock.py hold -- <cmd
 queues behind the current holder and prints who holds it and for how long (waits of
 20 minutes were seen). Hold it for the whole session script, not per command.
 
+# Qualification
+
+`main` is not stable. A PR lands on CI alone: `throughput-gate` keeps every rule a runner can
+decide (Ir tolerance, unpinned floor predictions, the pinned Ir shortfall, calibration replay)
+and prints `DEFERRED to qualification` for the two that needed the Pi per PR (the pinned
+config's exact-tree `PINNED_CORES` window, the calibration's age, now 10 days). A PR that
+commits a `pi_window.json` for its exact tree is still held to it.
+
+A tag is gated by `uv run python scripts/qualify.py run [REV]` (one bench hold: deploy + F401
+identity, full suite, soak group, `throughput_pi.py`, calibration; README "Qualification").
+A pass pushes `qualified-<UTC date>[-n]`; a failure prints the bisect command.
+`qualify.py status` shows the debt; `land-pr.sh` prints it after each landing.
+**Print from the latest `qualified-*` tag, not from main.**
+
+How far CI decides per config is the gate's `trust:` line (lowest prediction lowered by the worst
+residual `pi_calibration` recorded). On 11-16: p3_voron_direct_drive_ramp 4.30x, +115 % over the
+floor, residual 25.3 %: CI; p3_voron_direct_drive_kernel 5.06x, +153 %, 13.4 %: CI;
+trident_kernel (#836) 1.85x, -7 %, 14.2 %: only qualification decides.
+
 # Workflow audit, round 2 (7 agents, 80 merges after 04:00 on 11-04 vs 81 before)
 
 | measure | before ship.py/wt.sh/slots | after |

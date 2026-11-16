@@ -20,9 +20,11 @@ from pathlib import Path
 import lock
 import pi
 import run
+import soak_gcode
 from capture import Capture
 from session_scenarios import (
     SCENARIO_BY_NAME,
+    SOAK_SCENARIOS,
     Act,
     Action,
     After,
@@ -31,7 +33,6 @@ from session_scenarios import (
 
 POLL_S = 0.25
 SETTLE_S = 4.0
-TIMELINE_TIMEOUT_S = 1800.0
 ACTION_TIMEOUT_S = 120.0
 UNREACHABLE = "unreachable"
 ERROR_TEXT_LIMIT = 400
@@ -167,7 +168,7 @@ class Session:
         self.last_sent = 0.0
 
     def drive(self, capture: Capture) -> dict:
-        deadline = time.monotonic() + TIMELINE_TIMEOUT_S
+        deadline = time.monotonic() + self.scenario.timeline_timeout_s
         self.last_sent = time.time()
         with ThreadPoolExecutor(len(self.scenario.timeline)) as requests:
             for action in self.scenario.timeline:
@@ -193,7 +194,8 @@ class Session:
             if time.monotonic() > deadline:
                 raise run.BenchError(
                     f"{self.scenario.name}: waiting for {what} timed out "
-                    f"after {TIMELINE_TIMEOUT_S:.0f} s of timeline"
+                    f"after {self.scenario.timeline_timeout_s:.0f} s of "
+                    "timeline"
                 )
             time.sleep(POLL_S)
 
@@ -304,12 +306,11 @@ def main() -> None:
     )
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
+    scenario = SCENARIO_BY_NAME[args.scenario]
+    if scenario in SOAK_SCENARIOS:
+        soak_gcode.ensure()
     with lock.bench_lock(args.lock_timeout):
-        print(
-            run_scenario(
-                SCENARIO_BY_NAME[args.scenario], args.runs_dir.expanduser()
-            )
-        )
+        print(run_scenario(scenario, args.runs_dir.expanduser()))
 
 
 if __name__ == "__main__":

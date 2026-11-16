@@ -2,6 +2,7 @@
 
 uv run python tools/bench/deploy.py sync [--tree DIR]
 uv run python tools/bench/deploy.py flash-target [--tree DIR]
+uv run python tools/bench/deploy.py ensure-target [--tree DIR]
 uv run python tools/bench/deploy.py flash-capture [--tree DIR]
 uv run python tools/bench/deploy.py config [--config CFG]
 uv run python tools/bench/deploy.py reset-target
@@ -12,7 +13,8 @@ tools/bench/capture-fw/target for the F407), never in a directory another
 tree shares. Each flash bakes the tree's firmware build id
 (firmware_build_id.py) into the image, requires the board to report it back,
 and records it under "firmware" in the deploy record, which run.py copies
-into every run.json; a sync keeps the boards' entries.
+into every run.json; a sync keeps the boards' entries. ensure-target
+flashes the F401 only when it reports another build than the tree's.
 """
 
 from __future__ import annotations
@@ -261,6 +263,19 @@ def cmd_flash_target(tree: Path) -> None:
     )
 
 
+def cmd_ensure_target(tree: Path) -> None:
+    build_id = firmware_build_id.target_build_id(tree, tree / TARGET_CONFIG)
+    reported = pi.mcu_version()
+    if reported.endswith(build_id):
+        print(f"target already runs this tree's firmware {build_id}")
+        return
+    print(
+        f"target reports {reported!r}, not this tree's {build_id}: flashing",
+        flush=True,
+    )
+    cmd_flash_target(tree)
+
+
 def cmd_reset_target() -> None:
     output = pi.ssh(
         "openocd -f ~/klipper/tools/bench/openocd-target.cfg"
@@ -330,6 +345,7 @@ def cmd_config(config: Path) -> None:
 
 TREE_COMMANDS = {
     "flash-target": cmd_flash_target,
+    "ensure-target": cmd_ensure_target,
     "flash-capture": cmd_flash_capture,
 }
 COMMANDS = {

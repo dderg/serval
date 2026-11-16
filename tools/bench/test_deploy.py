@@ -161,3 +161,22 @@ def test_rsync_reaches_the_pi_at_its_address_through_the_alias(
     assert shell == shlex.join(["ssh", *deploy.pi.PI_ADDRESS])
     assert f"HostName={deploy.pi.PI_HOST}" in shell
     assert calls[0][-1] == f"{deploy.pi.PI_SSH}:klipper/"
+
+
+@pytest.mark.parametrize(
+    "reported, flashed",
+    [("v0.12-fw-abc123", []), ("v0.12-fw-other", ["tree"])],
+)
+def test_the_target_is_flashed_only_off_this_trees_build(
+    monkeypatch, tmp_path, reported, flashed
+):
+    calls = []
+    monkeypatch.setattr(
+        deploy.firmware_build_id, "target_build_id", lambda tree, cfg: "abc123"
+    )
+    monkeypatch.setattr(deploy.pi, "mcu_version", lambda: reported)
+    monkeypatch.setattr(
+        deploy, "cmd_flash_target", lambda tree: calls.append("tree")
+    )
+    deploy.cmd_ensure_target(tmp_path)
+    assert calls == flashed

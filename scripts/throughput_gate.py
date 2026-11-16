@@ -2,6 +2,7 @@
 """Replay-throughput gate: every user-space instruction, plus a live 2-core replay.
 
     python3 scripts/throughput_gate.py [--accept --reason R] [--accept-base REV]
+    python3 scripts/throughput_gate.py --qualify {pi-window,calibration}
     ./scripts/ci.sh throughput-gate [same arguments]
 
 tools/bench/throughput_baseline.json records an accepted commit (the
@@ -69,12 +70,21 @@ The gate fails when, for any config:
   prediction is not judged. A pinned shortfall that shrinks passes; once
   its Ir prediction reaches the floor, both predictions are judged against
   the floor again, and the report says to unpin it;
-- a config FLOOR_SHORTFALLS pins has no Pi worst window on PINNED_CORES,
-  one core more than the floor's, at or above PI_FLOOR_X in PI_WINDOW for
-  exactly this tree: a 2-core shortfall ships only while the Pi keeps the
-  config realtime with a third core. PI_COMMAND measures it for every
-  pinned config; a stale or missing measurement fails like a low one;
+- a config FLOOR_SHORTFALLS pins has a Pi worst window on PINNED_CORES, one
+  core more than the floor's, below PI_FLOOR_X in PI_WINDOW for exactly this
+  tree: a 2-core shortfall ships only while the Pi keeps the config realtime
+  with a third core. Without such a measurement a PR defers this rule to
+  qualification (QUALIFY_COMMAND, scripts/qualify.py), and says so: every
+  merge changes the tree, so the rule cost each PR an hour of the one
+  bench Pi;
 - the calibration replay is inconsistent (below).
+
+`--qualify pi-window` judges what a qualification measured with PI_COMMAND
+on exactly this tree, without any runner measurement: the Pi decides, so
+every unpinned config's 2-core worst window and every pinned config's on
+PINNED_CORES must reach PI_FLOOR_X. `--qualify calibration` fails a stale
+calibration (below). The rules above already ran on the merge commit's
+tree in CI.
 
 Both Pi predictions come from fits over paired points that
 scripts/throughput_recheck.py measures: commits and patched variants of
@@ -101,7 +111,10 @@ keeps the points, the fits, and each fit's error and leave-one-out error, in
 to its predictions. #663's thread handoffs cost the Pi more per unit of x86
 cost than the other changes do, so the models under-predict that kind of
 regression: treat a prediction within ~10 % of PI_FLOOR_X as uncertain, and
-measure the Pi.
+measure the Pi. The report's trust line does this per config: when the
+lowest prediction, lowered by the worst residual its models recorded, still
+reaches PI_FLOOR_X, CI decides; otherwise only qualification's Pi
+measurement does.
 
 The normalisation is only as good as the calibration replay, so the gate
 fails when it is inconsistent:
@@ -122,12 +135,14 @@ the prediction at the reference is the Pi's own measurement on every runner
 CPU, and the CPU-dependent error only enters through the head's distance
 from it. The calibration goes stale: the head drifts away from it and from
 the code the points were measured on, and a toolchain bump or a Pi OS
-update moves the Pi without moving the runner. So the gate fails once the
-Pi measurement is more than PI_CALIBRATION_STALE_DAYS old, and names the
-re-check that re-measures every point, re-pins and refits. Main took 11
-accepts in the 3 days before the first calibration; 11 changes of ~2 %
-each move the head by about as much as the fit's own error, so 3 days is
-the limit.
+update moves the Pi without moving the runner. So qualification fails once
+the Pi measurement is more than PI_CALIBRATION_STALE_DAYS old, and
+scripts/qualify.py runs the re-check that re-measures every point, re-pins
+and refits; a PR only prints the age as deferred. Age itself barely moves
+the Pi: one tree repeated within 1.6 % over the 10 days of four re-checks
+(11-05 to 11-15), inside the fits' own error, so 10 days is the bound.
+What does move it, the head's code, qualification measures on the head
+itself.
 
 Accepting (`--accept --reason "..."`) makes HEAD the reference and rewrites
 every config's Ir with this run's. It refuses a dirty tree, so the recorded
@@ -154,6 +169,7 @@ import argparse
 import concurrent.futures
 import dataclasses
 import datetime
+import enum
 import io
 import json
 import math
@@ -189,7 +205,7 @@ PINNED_CORES = "0,1,2"
 PI_FLOOR_X = 2.0
 SHORTFALL_TOLERANCE_PCT = 2.0
 PI_FLOOR_FAILS = True
-PI_CALIBRATION_STALE_DAYS = 3
+PI_CALIBRATION_STALE_DAYS = 10
 CALIBRATION_SPREAD_PCT = 8.0
 CALIBRATION_SPEED_MARGIN_PCT = 35.0
 RECHECK_COMMAND = "python3 scripts/throughput_recheck.py"
@@ -202,6 +218,7 @@ CI_CARGO_HOME = "/home/runner/.cargo"
 DOCKER_CACHE = RUST / "target" / "throughput-gate"
 PI_WINDOW = ROOT / "tools" / "bench" / "pi_window.json"
 PI_COMMAND = "python3 scripts/throughput_pi.py"
+QUALIFY_COMMAND = "uv run python scripts/qualify.py run"
 ACCEPT_BLOCK = re.compile(r"```throughput-accept[ \t]*\n(.*?)```", re.S)
 STREAM_SECS = re.compile(r"\bstream_secs=([0-9.]+)")
 Replay = TypeVar("Replay")
@@ -209,6 +226,16 @@ Replay = TypeVar("Replay")
 
 class GateError(RuntimeError):
     pass
+
+
+class Mode(enum.Enum):
+    PR = "pr"
+    QUALIFICATION = "qualification"
+
+
+class Qualification(enum.Enum):
+    PI_WINDOW = "pi-window"
+    CALIBRATION = "calibration"
 
 
 @dataclass(frozen=True)
@@ -247,9 +274,8 @@ class Verdict:
 @dataclass(frozen=True)
 class FloorShortfall:
     """A config's Pi 2-core worst window below PI_FLOOR_X, as the gate
-    predicts it from Ir, owned by GitHub issue `issue`. It passes only while
-    PI_WINDOW holds this tree's Pi worst window on PINNED_CORES at or above
-    PI_FLOOR_X."""
+    predicts it from Ir, owned by GitHub issue `issue`. It qualifies only
+    while the Pi's worst window on PINNED_CORES reaches PI_FLOOR_X."""
 
     issue: int
     predicted_ir_x: float
@@ -833,24 +859,40 @@ def calibration_replay_problems(
     return problems
 
 
-def calibration_problem(
-    baseline: dict, configs: tuple[str, ...], now: datetime.datetime
-) -> str | None:
+def calibration_problem(baseline: dict, configs: tuple[str, ...]) -> str | None:
     calibration = baseline.get("pi_calibration", {})
-    measured_at = calibration.get("measured_at")
-    if not measured_at:
+    if not calibration.get("measured_at"):
         return f"the baseline records no Pi calibration: run {RECHECK_COMMAND}"
     missing = [c for c in configs if c not in calibration.get("configs", {})]
     if missing:
         return f"the Pi calibration has no model for {missing}: run {RECHECK_COMMAND}"
-    age = now - datetime.datetime.fromisoformat(measured_at)
-    if age > datetime.timedelta(days=PI_CALIBRATION_STALE_DAYS):
-        return (
-            f"the Pi was last measured {age.days} days ago ({measured_at}, at "
-            f"{calibration['commit']}), past the {PI_CALIBRATION_STALE_DAYS}-day "
-            f"bound: re-measure it and refit with {RECHECK_COMMAND}"
-        )
     return None
+
+
+def calibration_age(
+    calibration: dict, now: datetime.datetime, mode: Mode
+) -> tuple[str | None, str]:
+    """(problem, note): qualification fails a calibration older than
+    PI_CALIBRATION_STALE_DAYS, a PR only notes its age as deferred."""
+    measured_at = calibration["measured_at"]
+    age = now - datetime.datetime.fromisoformat(measured_at)
+    stale = age > datetime.timedelta(days=PI_CALIBRATION_STALE_DAYS)
+    stated = (
+        f"the Pi was last measured {age.days} days ago ({measured_at}, at "
+        f"{calibration['commit']}), {'past' if stale else 'within'} the "
+        f"{PI_CALIBRATION_STALE_DAYS}-day bound"
+    )
+    if mode is Mode.PR:
+        return None, (
+            f"DEFERRED to qualification ({QUALIFY_COMMAND}): the calibration's "
+            f"age; {stated}"
+        )
+    if stale:
+        return (
+            f"{stated}: re-measure it and refit with {RECHECK_COMMAND}",
+            stated,
+        )
+    return None, stated
 
 
 def ir_growth_problems(delta_pct: float) -> list[str]:
@@ -962,6 +1004,16 @@ def pinned_cores_miss(issue: int, pinned_cores_x: float | None) -> str | None:
     return None
 
 
+def pinned_cores_deferred(issue: int) -> str:
+    return (
+        f"DEFERRED to qualification ({QUALIFY_COMMAND}): the floor shortfall "
+        f"pinned for #{issue} needs the Pi's worst window on cores "
+        f"{PINNED_CORES} at or above the {PI_FLOOR_X:.1f}x floor, and "
+        f"{PI_WINDOW.relative_to(ROOT)} has none for this tree ({PI_COMMAND} "
+        "measures it now)"
+    )
+
+
 def shortfall_miss(
     source: str, predicted: float, band_pct: float, pinned_x: float, issue: int
 ) -> str | None:
@@ -1020,7 +1072,9 @@ def judge(
             "Ir", ir_x, 0.0, pin.predicted_ir_x, pin.issue
         )
         floor_misses = [shortfall] if shortfall else []
-    if pin is not None:
+    if pin is not None and pi_pinned_cores_x is None:
+        notes.append(pinned_cores_deferred(pin.issue))
+    elif pin is not None:
         pinned_miss = pinned_cores_miss(pin.issue, pi_pinned_cores_x)
         if pinned_miss:
             floor_misses.append(pinned_miss)
@@ -1069,6 +1123,36 @@ def model_summary(model: dict, measurement: Measurement) -> list[str]:
     ]
 
 
+def worst_residual_pct(model: dict) -> float:
+    ir, live = model["ir"], model["live"]
+    return max(
+        ir["max_residual_pct"],
+        ir["max_loo_residual_pct"],
+        live["max_residual_pct"],
+        live["max_loo_residual_pct"],
+        live["max_cpu_out_residual_pct"],
+    )
+
+
+def trust(predicted_x: tuple[float, float], model: dict) -> str:
+    """How far a Pi-free verdict holds: the lowest prediction lowered by
+    the predictors' worst recorded residual, against the floor."""
+    lowest = min(predicted_x)
+    residual_pct = worst_residual_pct(model)
+    lowered = lowest * (1.0 - residual_pct / 100.0)
+    decider = (
+        "CI decides"
+        if lowered >= PI_FLOOR_X
+        else "only qualification's Pi measurement decides"
+    )
+    return (
+        f"trust: lowest prediction {lowest:.2f}x, "
+        f"{100.0 * (lowest / PI_FLOOR_X - 1.0):+.0f} % over the "
+        f"{PI_FLOOR_X:.1f}x floor; the predictors' worst recorded residual "
+        f"{residual_pct:.1f} % leaves {lowered:.2f}x: {decider}"
+    )
+
+
 def report(
     verdicts: list[Verdict], reference_commit: str, calibration: dict
 ) -> None:
@@ -1099,8 +1183,10 @@ def report(
             f"{m.calibration_wall_secs:.2f} s; per-rep ratio band "
             f"+-{m.calibration_band_pct:.1f} % ({LIVE_BAND_SIGMAS:g} sigma)"
         )
-        for line in model_summary(calibration["configs"][verdict.config], m):
+        model = calibration["configs"][verdict.config]
+        for line in model_summary(model, m):
             print(line)
+        print(f"  {trust(verdict.predicted_x, model)}")
         if verdict.ir_delta_pct < -IR_TOLERANCE_PCT:
             print(
                 f"  Ir shrank {verdict.ir_delta_pct:+.2f} %: an accept would "
@@ -1191,6 +1277,74 @@ def baseline_problem(baseline: dict, configs: tuple[str, ...]) -> str | None:
     return None
 
 
+def measured_floor_miss(worst_x: float | None) -> str | None:
+    if worst_x is None:
+        return (
+            f"{PI_WINDOW.relative_to(ROOT)} has no Pi worst window of this "
+            f"tree on cores {LIVE_CORES}: measure it with {PI_COMMAND}"
+        )
+    if worst_x < PI_FLOOR_X:
+        return (
+            f"the Pi measured this tree's worst window at {worst_x:.2f}x on "
+            f"cores {LIVE_CORES}, below the {PI_FLOOR_X:.1f}x floor"
+        )
+    return None
+
+
+def qualification_problems(
+    window: PiWindow,
+    configs: tuple[str, ...],
+    shortfalls: dict[str, FloorShortfall] = FLOOR_SHORTFALLS,
+) -> list[str]:
+    problems = []
+    for config in configs:
+        pin = shortfalls.get(config)
+        miss = (
+            measured_floor_miss(window.worst_x.get(config))
+            if pin is None
+            else pinned_cores_miss(pin.issue, window.pinned_cores_x.get(config))
+        )
+        if miss:
+            problems.append(f"{config}: {miss}")
+    return problems
+
+
+def print_window(window: PiWindow, configs: tuple[str, ...]) -> None:
+    for config in configs:
+        pinned = window.pinned_cores_x.get(config)
+        on_pinned = (
+            "" if pinned is None else f", cores {PINNED_CORES} {pinned:.2f}x"
+        )
+        print(
+            f"{config}: cores {LIVE_CORES} {window.worst_x.get(config)}x"
+            f"{on_pinned}"
+        )
+
+
+def qualify(scope: Qualification, configs: tuple[str, ...]) -> list[str]:
+    if scope is Qualification.CALIBRATION:
+        baseline = load_baseline()
+        problem = calibration_problem(baseline, configs)
+        if problem:
+            return [problem]
+        problem, stated = calibration_age(
+            baseline["pi_calibration"],
+            datetime.datetime.now(datetime.timezone.utc),
+            Mode.QUALIFICATION,
+        )
+        print(stated)
+        return [problem] if problem else []
+    trees = measured_trees()
+    if trees is None:
+        raise GateError(
+            "the measured trees have uncommitted changes: a Pi measurement "
+            "names committed code only"
+        )
+    window = pi_window(trees)
+    print_window(window, configs)
+    return qualification_problems(window, configs)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -1204,8 +1358,19 @@ def main() -> int:
     parser.add_argument(
         "--configs", nargs="+", default=list(CONFIGS), help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        "--qualify", choices=[scope.value for scope in Qualification]
+    )
     args = parser.parse_args()
     configs = tuple(args.configs)
+
+    if args.qualify:
+        problems = qualify(Qualification(args.qualify), configs)
+        for problem in problems:
+            print(f"FAIL: {problem}")
+        verdict = "FAIL" if problems else "PASS"
+        print(f"throughput qualification ({args.qualify}): {verdict}")
+        return 1 if problems else 0
 
     if args.measure_json:
         measurements = measure_here(configs, args.calibration)
@@ -1230,9 +1395,7 @@ def main() -> int:
     problem = baseline_problem(baseline, configs)
     if problem and not args.accept:
         raise GateError(problem)
-    problem = calibration_problem(
-        baseline, configs, datetime.datetime.now(datetime.timezone.utc)
-    )
+    problem = calibration_problem(baseline, configs)
     if problem:
         raise GateError(problem)
     calibration = baseline["pi_calibration"]
@@ -1273,6 +1436,10 @@ def main() -> int:
         for c in configs
     ]
     report(verdicts, reference_commit, calibration)
+    _, deferred = calibration_age(
+        calibration, datetime.datetime.now(datetime.timezone.utc), Mode.PR
+    )
+    print(f"NOTE: {deferred}")
     failed = [v.config for v in verdicts if v.problems]
     if failed:
         print(
@@ -1283,8 +1450,8 @@ def main() -> int:
         f"throughput gate: PASS ({len(verdicts)} configs: Ir grew at most "
         f"{IR_TOLERANCE_PCT} %, and Ir and the live replay predict the Pi "
         f"window at or above {PI_FLOOR_X}x, its pinned shortfall, or a Pi "
-        "measurement of this tree reaches it; the Pi measured every pinned "
-        f"config at or above {PI_FLOOR_X}x on cores {PINNED_CORES})"
+        "measurement of this tree reaches it; what needs the Pi itself is "
+        f"deferred to qualification: {QUALIFY_COMMAND})"
     )
     return 0
 
