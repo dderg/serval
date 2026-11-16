@@ -16,9 +16,9 @@ import run
 BENCH = Path(__file__).resolve().parent
 REPO = BENCH.parents[1]
 PRINTER_CFG = BENCH / "printer.cfg"
-SESSION_CFG = BENCH / "configs" / "session"
-PRINT_MACROS = SESSION_CFG / "print_macros.cfg"
-BED_MESH_WAVY = SESSION_CFG / "bed_mesh_wavy.cfg"
+CONFIG_FRAGMENTS = BENCH / "config_fragments"
+PRINT_MACROS = CONFIG_FRAGMENTS / "print_macros.cfg"
+BED_MESH_WAVY = CONFIG_FRAGMENTS / "bed_mesh_wavy.cfg"
 FIRST_LAYERS = REPO / "tools" / "sim" / "gcode" / "voron_first_layers.gcode"
 AUTOSAVE_PREFIX = "#*#"
 
