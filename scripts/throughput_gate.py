@@ -888,7 +888,10 @@ def calibration_age(
             f"age; {stated}"
         )
     if stale:
-        return f"{stated}: re-measure it and refit with {RECHECK_COMMAND}", stated
+        return (
+            f"{stated}: re-measure it and refit with {RECHECK_COMMAND}",
+            stated,
+        )
     return None, stated
 
 

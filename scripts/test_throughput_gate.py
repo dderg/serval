@@ -476,7 +476,10 @@ def test_a_stale_calibration_is_deferred_by_a_pr_and_fails_qualification():
     measured = datetime.datetime(2026, 11, 4, 12, tzinfo=datetime.timezone.utc)
     fitted = calibration(measured)["pi_calibration"]
     bound = datetime.timedelta(days=gate.PI_CALIBRATION_STALE_DAYS)
-    fresh, stale = measured + bound, measured + bound + datetime.timedelta(hours=1)
+    fresh, stale = (
+        measured + bound,
+        measured + bound + datetime.timedelta(hours=1),
+    )
     problem, _ = gate.calibration_age(fitted, fresh, gate.Mode.QUALIFICATION)
     assert problem is None
     problem, note = gate.calibration_age(fitted, stale, gate.Mode.PR)
