@@ -25,6 +25,7 @@ EVENT_NAMES = (
     "print.end",
     "reactor_poller_late",
     "pacer_reserve_raised",
+    "pipe_drain",
     "pacer_reserve_capped",
     "anchor_idle_resume",
     "anchor_underrun",

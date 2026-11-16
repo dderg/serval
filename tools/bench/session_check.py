@@ -6,7 +6,8 @@ uv run python tools/bench/session_check.py --evidence <session_evidence.json>
 From a run dir it writes session_evidence.json (session_evidence.py) and
 session_checks.json next to run.json. Prints one line per check and exits
 1 when any fails. Every scenario gets the generic checks; the stop latency,
-second-print and pacer-reserve checks are declared per scenario.
+engine account, second-print and pacer-reserve checks are declared per
+scenario.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from session_scenarios import (
     SecondPrintLikeFirst,
     SpecificCheck,
     StopsWithin,
+    StopsWithinEngineAccount,
 )
 
 EVIDENCE_FILE = "session_evidence.json"
@@ -42,6 +44,7 @@ ESTOP_SHUTDOWN_REASONS = frozenset(
 )
 SHUTDOWN_EVENTS = frozenset({"klippy_shutdown", "mcu_shutdown"})
 JOURNAL_LINES_SHOWN = 3
+CLOSING_BRAKE_CAUSE = "RunwayExhausted"
 
 
 @dataclass(frozen=True)
@@ -277,6 +280,58 @@ def stop_check(evidence: Evidence, check: StopsWithin) -> Verdict:
     return Verdict(name, ok, "; ".join(details))
 
 
+def closing_brake(evidence: Evidence, mark: float) -> dict | None:
+    boundary = evidence.next_boundary(mark)
+    brakes = [
+        brake
+        for brake in evidence.named("pipe_drain")
+        if mark <= brake["t"] <= boundary
+        and brake["cause"] == CLOSING_BRAKE_CAUSE
+    ]
+    return brakes[0] if brakes else None
+
+
+def stop_accounted(evidence: Evidence, request: dict) -> tuple[bool, str]:
+    mark = request["sent"]
+    latency, why = stop_latency(evidence, mark)
+    if latency is None:
+        return False, why
+    if request["returned"] is None:
+        return False, "the request never returned"
+    brake = closing_brake(evidence, mark)
+    if brake is None:
+        boundary = evidence.at(evidence.next_boundary(mark))
+        return False, (
+            f"no closing pacer brake (pipe_drain {CLOSING_BRAKE_CAUSE}) "
+            f"before {boundary}"
+        )
+    after_feed = mark + latency - request["returned"]
+    account = brake["peak_ahead_s"] + brake["drained_s"]
+    held = after_feed <= account
+    relation = "<=" if held else ">"
+    return held, (
+        f"moved {after_feed:.3f} s after the request returned {relation} "
+        f"the engine account {account:.3f} s (peak_ahead_s "
+        f"{brake['peak_ahead_s']:.3f} + drained_s {brake['drained_s']:.3f})"
+    )
+
+
+def account_check(
+    evidence: Evidence, check: StopsWithinEngineAccount
+) -> Verdict:
+    name = f"stop_account_after_{check.act.value}"
+    requests = [a for a in evidence.actions if a["act"] == check.act.value]
+    if not requests:
+        return Verdict(name, False, f"no {check.act.value} was sent")
+    ok = True
+    details = []
+    for request in requests:
+        held, detail = stop_accounted(evidence, request)
+        ok = ok and held
+        details.append(f"at {evidence.at(request['sent'])}: {detail}")
+    return Verdict(name, ok, "; ".join(details))
+
+
 def motion_s(evidence: Evidence, printed: Print) -> float:
     spans = evidence.spans_within(printed.start, printed.end)
     return spans[-1][1] - spans[0][0] if spans else 0.0
@@ -313,6 +368,8 @@ def reserve_check(evidence: Evidence, check: ReserveBounded) -> Verdict:
 def specific_check(evidence: Evidence, check: SpecificCheck) -> Verdict:
     if isinstance(check, StopsWithin):
         return stop_check(evidence, check)
+    if isinstance(check, StopsWithinEngineAccount):
+        return account_check(evidence, check)
     if isinstance(check, SecondPrintLikeFirst):
         return second_print_check(evidence, check)
     return reserve_check(evidence, check)

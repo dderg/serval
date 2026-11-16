@@ -120,6 +120,20 @@
    "reason": "",
    "duration_s": 20.50293295099982,
    "filament_mm": 18.186369999999997
+  },
+  {
+   "t": 1794787317.331,
+   "event": "pipe_drain",
+   "cap_s": 2.29,
+   "cause": "RunwayExhausted",
+   "drained_s": 2.0182725154288654,
+   "level": "info",
+   "peak_ahead_s": 4.577471742087094,
+   "print_id": "",
+   "reserve_s": 0.29,
+   "runway_s": 0.289935702,
+   "source": "host-rust",
+   "t_us": 518907499
   }
  ],
  "journal": []
