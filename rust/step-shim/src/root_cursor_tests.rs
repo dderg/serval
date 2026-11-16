@@ -5,7 +5,7 @@ use trajectory::{
     ClockedMotorSpan, ContinuousAxis, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
 };
 
-use super::{EVAL_COUNT, Lane, Slope, StepRootCursor};
+use super::{EVAL_COUNT, LINE_REACH_STEPS, Lane, Slope, StepRootCursor};
 use crate::ring::SpanQueue;
 use crate::{MotorConfig, ShimError, StepEncoder};
 
@@ -144,7 +144,8 @@ fn position_at(view: &ClockedMotorSpan, clock: u64) -> f64 {
         .expect("a clock inside the view")
 }
 
-fn least_clock_reaching(view: &ClockedMotorSpan, level: f64) -> u64 {
+fn least_clock_reaching(view: &ClockedMotorSpan, line: f64, microstep_mm: f64) -> u64 {
+    let level = line - LINE_REACH_STEPS * microstep_mm;
     let mut low = view.start_clock;
     let mut high = view.end_clock;
     assert!(
@@ -175,7 +176,7 @@ fn an_on_lattice_ramp_solves_each_root_within_a_constant_probe_budget() {
     assert_eq!(view.end_clock, steps * SPACING);
     let level = |step: u64| step as f64 * MICROSTEP_MM;
     let expected = (1..=steps)
-        .map(|step| least_clock_reaching(&view, level(step)))
+        .map(|step| least_clock_reaching(&view, level(step), MICROSTEP_MM))
         .collect::<Vec<u64>>();
     let landing_on_the_level = expected
         .iter()
@@ -338,7 +339,7 @@ fn a_spline_sweep_settles_its_roots_on_the_polynomial_alone() {
     let view = spline_sweep(TRAVEL_MM, 0.05);
     let steps = (TRAVEL_MM / MICROSTEP_MM) as u64;
     let expected = (1..steps)
-        .map(|step| least_clock_reaching(&view, step as f64 * MICROSTEP_MM))
+        .map(|step| least_clock_reaching(&view, step as f64 * MICROSTEP_MM, MICROSTEP_MM))
         .collect::<Vec<u64>>();
 
     let config = MotorConfig {
@@ -399,9 +400,10 @@ fn spatial_view(axis: ContinuousAxis, t_start: f64, t_end: f64, freq: f64) -> Cl
         .expect("a clocked motor span")
 }
 
-/// The bench: Z descended to 2.0 mm through a spline whose endpoint carries
-/// roundoff just above 2.0, so the last falling step stayed pending, then a
-/// hold parked the axis at exactly 2.0 - the pending step's own threshold.
+/// The bench: Z descended to 2.0 mm through a spline whose endpoint stopped
+/// just above 2.0 (by roundoff there, which the reach band absorbs; by twice
+/// the band here), so the last falling step stayed pending, then a hold
+/// parked the axis at exactly 2.0 - the pending step's own threshold.
 /// A hold certifies as rising, and the rising threshold is never reached,
 /// so the run must still notice the falling step that is due at its first
 /// clock instead of reporting the lattice adrift by one microstep.
@@ -410,7 +412,7 @@ fn a_hold_resting_on_the_falling_threshold_emits_the_pending_step() {
     const FREQ: f64 = 1_000_000.0;
     const MICROSTEP_MM: f64 = 0.001_25;
     let descent = 0.01;
-    let landing = 2.0 + 4.0 * f64::EPSILON;
+    let landing = 2.0 + 2.0 * LINE_REACH_STEPS * MICROSTEP_MM;
     let curve = ScalarNurbs::try_new(1, vec![0.0, 0.0, descent, descent], vec![2.5, landing])
         .expect("a linear descent");
     let fall = spatial_view(ContinuousAxis::Spline(Arc::new(curve)), 0.0, descent, FREQ);
@@ -559,7 +561,10 @@ fn a_rest_ulps_short_of_its_line_takes_that_step() {
 
     let strokes = drain_strokes(MICROSTEP_MM, &[out, back]);
 
-    assert_eq!(strokes[0].1, 4800, "the forward stroke rests on its 4800th step");
+    assert_eq!(
+        strokes[0].1, 4800,
+        "the forward stroke rests on its 4800th step"
+    );
     assert!(
         strokes[1].0.iter().all(|&advance| advance == -1),
         "the return steps backward only"
