@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pytest
+import session_check
 import session_evidence
 
 TICK_HZ = 40_000.0
@@ -201,6 +202,12 @@ def test_a_run_dir_reduces_to_its_evidence(tmp_path):
     assert [e["event"] for e in evidence["events"]] == ["print.start"]
     assert evidence["journal"] == []
     assert evidence["actions"] == [action]
+    assert [type(value) for value in evidence["spans"][0]] == [
+        float,
+        float,
+        int,
+    ]
+    json.dumps(session_check.judge(evidence))
 
 
 def test_a_run_dir_without_a_session_record_is_refused(tmp_path):

@@ -90,7 +90,7 @@ def collect(run_dir: Path) -> dict:
 
 
 def _at(wall_s: float) -> float:
-    return round(wall_s, TIME_DECIMALS)
+    return round(float(wall_s), TIME_DECIMALS)
 
 
 def state_changes(samples: list[dict]) -> list[dict]:
