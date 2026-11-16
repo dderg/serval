@@ -374,17 +374,26 @@ def test_a_pin_fails_with_the_pinned_cores_window_below_the_floor():
     )
 
 
-def test_a_pin_without_a_pinned_cores_window_of_this_tree_fails():
+def test_a_pin_without_a_pinned_cores_window_of_this_tree_passes_deferred():
     verdict = judge_pinned(measurement(), model(1.6), None)
+    assert verdict.problems == ()
+    assert len(verdict.notes) == 1
+    assert verdict.notes[0].startswith("DEFERRED to qualification")
+    assert gate.QUALIFY_COMMAND in verdict.notes[0]
+    assert "has none for this tree" in verdict.notes[0]
+
+
+def test_an_ir_regression_on_an_unmeasured_pin_still_fails():
+    verdict = judge_pinned(measurement(stream=9.0), model(1.6), None)
     assert len(verdict.problems) == 1
-    assert "has none for this tree" in verdict.problems[0]
-    assert gate.PI_COMMAND in verdict.problems[0]
+    assert "grew the floor shortfall" in verdict.problems[0]
+    assert verdict.notes[0].startswith("DEFERRED to qualification")
 
 
-def test_a_vanished_pin_still_needs_its_pinned_cores_window():
+def test_a_vanished_pin_defers_its_pinned_cores_window():
     verdict = judge_pinned(measurement(stream=13.0), model(1.6, 1.0, 2.1), None)
-    assert len(verdict.problems) == 1
-    assert "has none for this tree" in verdict.problems[0]
+    assert verdict.problems == ()
+    assert verdict.notes[-1].startswith("DEFERRED to qualification")
 
 
 def test_an_unpinned_config_needs_no_pinned_cores_window():
@@ -434,8 +443,8 @@ def test_a_pinned_shortfall_only_warns_while_the_floor_checks_are_off(
     monkeypatch.setattr(gate, "PI_FLOOR_FAILS", False)
     verdict = judge_pinned(measurement(stream=9.0), model(1.6), None)
     assert verdict.problems == ()
+    assert len(verdict.warnings) == 1
     assert "grew the floor shortfall" in verdict.warnings[0]
-    assert "has none for this tree" in verdict.warnings[1]
 
 
 def test_a_pin_at_or_above_the_floor_is_refused():
@@ -445,28 +454,68 @@ def test_a_pin_at_or_above_the_floor_is_refused():
         gate.FloorShortfall(issue=693, predicted_ir_x=2.1)
 
 
-def test_a_missing_or_stale_pi_calibration_fails_with_the_recheck_command():
-    measured = datetime.datetime(2026, 11, 4, 12, tzinfo=datetime.timezone.utc)
-    baseline = {
+def calibration(measured: datetime.datetime) -> dict:
+    return {
         "pi_calibration": {
             "measured_at": measured.isoformat(),
             "commit": "abc",
             "configs": {"a.cfg": model()},
         }
     }
-    bound = datetime.timedelta(days=gate.PI_CALIBRATION_STALE_DAYS)
-    fresh = measured + bound
-    assert gate.calibration_problem(baseline, ("a.cfg",), fresh) is None
-    stale = gate.calibration_problem(
-        baseline, ("a.cfg",), fresh + datetime.timedelta(hours=1)
-    )
-    assert f"{gate.PI_CALIBRATION_STALE_DAYS}-day bound" in stale
-    assert gate.RECHECK_COMMAND in stale
-    missing = gate.calibration_problem(baseline, ("b.cfg",), fresh)
+
+
+def test_a_missing_pi_calibration_fails_with_the_recheck_command():
+    baseline = calibration(datetime.datetime.now(datetime.timezone.utc))
+    assert gate.calibration_problem(baseline, ("a.cfg",)) is None
+    missing = gate.calibration_problem(baseline, ("b.cfg",))
     assert "b.cfg" in missing
-    assert gate.RECHECK_COMMAND in gate.calibration_problem(
-        {}, ("a.cfg",), fresh
+    assert gate.RECHECK_COMMAND in gate.calibration_problem({}, ("a.cfg",))
+
+
+def test_a_stale_calibration_is_deferred_by_a_pr_and_fails_qualification():
+    measured = datetime.datetime(2026, 11, 4, 12, tzinfo=datetime.timezone.utc)
+    fitted = calibration(measured)["pi_calibration"]
+    bound = datetime.timedelta(days=gate.PI_CALIBRATION_STALE_DAYS)
+    fresh, stale = measured + bound, measured + bound + datetime.timedelta(hours=1)
+    problem, _ = gate.calibration_age(fitted, fresh, gate.Mode.QUALIFICATION)
+    assert problem is None
+    problem, note = gate.calibration_age(fitted, stale, gate.Mode.PR)
+    assert problem is None
+    assert note.startswith("DEFERRED to qualification")
+    assert f"past the {gate.PI_CALIBRATION_STALE_DAYS}-day bound" in note
+    problem, _ = gate.calibration_age(fitted, stale, gate.Mode.QUALIFICATION)
+    assert f"past the {gate.PI_CALIBRATION_STALE_DAYS}-day bound" in problem
+    assert gate.RECHECK_COMMAND in problem
+
+
+def test_qualification_holds_every_config_to_the_pis_own_window():
+    pins = pinned(1.6)
+    passing = gate.PiWindow({"c": 1.8, "d": 2.1}, {"c": 2.3})
+    assert gate.qualification_problems(passing, ("c", "d"), pins) == []
+    low = gate.PiWindow({"c": 1.8, "d": 1.9}, {"c": 1.95})
+    problems = gate.qualification_problems(low, ("c", "d"), pins)
+    assert len(problems) == 2
+    assert "cores 0,1,2" in problems[0] and "1.95x" in problems[0]
+    assert "1.90x" in problems[1] and "below the 2.0x floor" in problems[1]
+
+
+def test_qualification_without_a_measurement_of_this_tree_fails():
+    problems = gate.qualification_problems(
+        gate.PiWindow({}, {}), ("c", "d"), pinned(1.6)
     )
+    assert len(problems) == 2
+    assert "has none for this tree" in problems[0]
+    assert gate.PI_COMMAND in problems[1]
+
+
+def test_trust_names_ci_only_above_the_floor_by_the_worst_residual():
+    fit = model()
+    assert gate.worst_residual_pct(fit) == 12.0
+    assert gate.trust((2.4, 2.3), fit).endswith("CI decides")
+    near = gate.trust((2.2, 2.25), fit)
+    assert near.endswith("only qualification's Pi measurement decides")
+    assert "+10 % over the 2.0x floor" in near
+    assert "12.0 % leaves 1.94x" in near
 
 
 def test_a_baseline_without_its_slice_reference_or_configs_is_refused():
@@ -544,7 +593,7 @@ def test_a_pi_measurement_counts_only_for_the_trees_it_measured(
     assert gate.pi_window(TREES) == none
 
 
-def test_a_stale_pinned_cores_window_fails_the_pin(tmp_path, monkeypatch):
+def test_a_stale_pinned_cores_window_defers_the_pin(tmp_path, monkeypatch):
     recorded_window(
         tmp_path,
         monkeypatch,
@@ -555,8 +604,8 @@ def test_a_stale_pinned_cores_window_fails_the_pin(tmp_path, monkeypatch):
     verdict = judge_pinned(
         measurement(), model(1.6), stale.pinned_cores_x.get("c")
     )
-    assert len(verdict.problems) == 1
-    assert "has none for this tree" in verdict.problems[0]
+    assert verdict.problems == ()
+    assert verdict.notes[0].startswith("DEFERRED to qualification")
 
 
 def test_a_window_without_pinned_cores_serves_unpinned_configs(

@@ -5,8 +5,9 @@
 
 The gate (scripts/throughput_gate.py) fails a config either of whose Pi
 predictions falls below its floor, unless the Pi itself measured the tree,
-and fails a config FLOOR_SHORTFALLS pins unless the Pi measured the tree at
-or above the floor on PINNED_CORES: this script takes both measurements.
+and holds a config FLOOR_SHORTFALLS pins to the Pi's window on PINNED_CORES:
+a PR may measure it, qualification (scripts/qualify.py) always does. This
+script takes both measurements.
 Under tools/bench/lock.py it syncs the committed measured trees to the bench
 Pi, builds the replay there, and runs the full dense print of every gated
 config PI_RUNS times under `taskset -c LIVE_CORES`, and of every pinned
