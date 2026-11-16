@@ -27,6 +27,9 @@ def bench(monkeypatch):
     monkeypatch.setattr(
         run, "scp_from_pi", lambda src, *_a, **_k: fetched.append(src)
     )
+    monkeypatch.setattr(
+        run, "klipper_journal", lambda since: fetched.append("journal") or ""
+    )
     return fetched
 
 
@@ -42,9 +45,18 @@ def test_a_failing_cancel_does_not_hide_why_the_print_failed(
     monkeypatch.setattr(run, "poll_print", print_fails)
     monkeypatch.setattr(run, "cancel_active_print", cancel_fails)
     with pytest.raises(run.BenchError, match="capture stalled") as raised:
-        run.execute(tmp_path, "x.gcode", {}, 1.0, False, False, False, None)
+        run.execute(
+            tmp_path,
+            {},
+            False,
+            False,
+            False,
+            None,
+            run.print_file("x.gcode", 1.0),
+        )
     assert any("No registered callback" in n for n in raised.value.__notes__)
     assert any(src.endswith("klippy.log") for src in bench)
+    assert "journal" in bench
     assert (
         json.loads((tmp_path / "run.json").read_text())["print_state"] is None
     )
@@ -92,7 +104,9 @@ def test_a_completed_run_fetches_the_dispatch_record_it_asked_for(
     tmp_path, monkeypatch, bench
 ):
     monkeypatch.setattr(run, "poll_print", lambda *_a: {"state": "complete"})
-    run.execute(tmp_path, "x.gcode", {}, 1.0, False, False, True, None)
+    run.execute(
+        tmp_path, {}, False, False, True, None, run.print_file("x.gcode", 1.0)
+    )
     assert f"{run.PI_DISPATCH_RECORD_DIR}/dispatch_record_*.bin" in bench
 
 

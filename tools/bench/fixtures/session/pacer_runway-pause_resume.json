@@ -1,0 +1,173 @@
+{
+ "run_dir": "/home/dderg/bench/runs/sweep-pacer-runway-2/20261116-005613-pause_resume",
+ "head": "0bae8f1a04e774fb37e5c71009c2f8b153445501",
+ "scenario": "pause_resume",
+ "window": [
+  1794786976.559,
+  1794787148.4458
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794786977.5592449,
+   "returned": 1794786977.5592449,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "pause",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794786997.7283494,
+   "returned": 1794786998.798236,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "resume",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794787007.639102,
+   "returned": 1794787007.650632,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794786977.6879,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794786998.7982,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "paused",
+   "print_message": ""
+  },
+  {
+   "t": 1794787007.6506,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794787141.4361,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794787146.9547105,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794787148.4109955,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794786992.949,
+   1794787003.2532,
+   98878
+  ],
+  [
+   1794787008.0206,
+   1794787141.5217,
+   1615381
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794786977.689,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794786977",
+   "file": "bench_20261116-005613-pause_resume.gcode"
+  },
+  {
+   "t": 1794786998.715,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794786977"
+  },
+  {
+   "t": 1794787007.651,
+   "event": "print.resume",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794786977",
+   "pause_duration_s": 8.936038660998747
+  },
+  {
+   "t": 1794787007.727,
+   "event": "anchor_idle_resume",
+   "lead_secs": 0.29,
+   "level": "info",
+   "margin_s": -4.468360590799136,
+   "print_id": "print-1794786977",
+   "seg_t_start": 10.317400998200858,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794787141.65,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794786977",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 163.96242503200483,
+   "filament_mm": 357.6092299999985
+  }
+ ],
+ "journal": []
+}

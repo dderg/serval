@@ -1,0 +1,144 @@
+{
+ "run_dir": "/home/dderg/bench/runs/reactor-drain/20261116-014107-cancel_macro_mesh",
+ "head": "cf06ef6b3041473c6ce46e69d01f46660329aada",
+ "scenario": "cancel_macro_mesh",
+ "window": [
+  1794789670.933,
+  1794789724.1921
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794789671.933398,
+   "returned": 1794789671.933398,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "cancel",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794789692.321089,
+   "returned": 1794789703.892494,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794789671.9496,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794789703.8925,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794789709.3113453,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794789723.8537383,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794789684.2092,
+   1794789709.1281,
+   212141
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794789671.948,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794789671",
+   "file": "bench_20261116-014107-cancel_macro_mesh.gcode"
+  },
+  {
+   "t": 1794789671.948,
+   "event": "pacer_reserve_raised",
+   "latency_s": 5.3278e-05,
+   "level": "info",
+   "print_id": "print-1794789671",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794789703.831,
+   "event": "pacer_reserve_raised",
+   "latency_s": 5.47139753,
+   "level": "info",
+   "print_id": "print-1794789671",
+   "reserve_s": 14.203799651999999,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794789703.886,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794789671"
+  },
+  {
+   "t": 1794789703.886,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794789671",
+   "outcome": "cancelled",
+   "reason": "",
+   "duration_s": 31.93852001799678,
+   "filament_mm": 70.37399000000005
+  }
+ ],
+ "journal": []
+}

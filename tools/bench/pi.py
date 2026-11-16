@@ -20,6 +20,7 @@ PI_CONFIG = "printer_data/config/printer.cfg"
 PI_LOGS = "printer_data/logs"
 REPO_CFG = Path(__file__).with_name("printer.cfg")
 READY_TIMEOUT_S = 60.0
+HTTP_TIMEOUT_S = 30.0
 SCP_ATTEMPTS = 3
 SCP_RETRY_DELAY_S = 2.0
 FORBIDDEN_PINS = {
@@ -43,22 +44,24 @@ def http(
     path: str,
     body: bytes | None = None,
     headers: dict | None = None,
+    timeout_s: float = HTTP_TIMEOUT_S,
 ) -> dict:
     request = urllib.request.Request(
         MOONRAKER + path, data=body, method=method, headers=headers or {}
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
         payload = json.loads(response.read())
         return payload.get("result", payload)
 
 
-def gcode_script(script: str) -> None:
+def gcode_script(script: str, timeout_s: float = HTTP_TIMEOUT_S) -> None:
     body = json.dumps({"script": script}).encode()
     http(
         "POST",
         "/printer/gcode/script",
         body,
         {"Content-Type": "application/json"},
+        timeout_s,
     )
 
 
@@ -167,6 +170,10 @@ def mcu_version(mcu: str = "mcu") -> str:
 
 def klipper_pid() -> int:
     return int(ssh("systemctl show -p MainPID --value klipper").strip())
+
+
+def klipper_journal(since_wall_s: float) -> str:
+    return ssh(f"journalctl -u klipper --since @{int(since_wall_s)} --no-pager")
 
 
 def restart_klipper() -> None:

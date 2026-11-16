@@ -1,0 +1,176 @@
+{
+ "run_dir": "/home/dderg/bench/runs/followup-interrupt/20261115-213907-pause_park_resume_nomesh",
+ "head": "0b90eeaf39191ef3a83d4c2f78ddb53883d6e2ae",
+ "scenario": "pause_park_resume_mesh",
+ "window": [
+  1794775150.7504,
+  1794775322.5987
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794775151.751238,
+   "returned": 1794775151.751238,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "pause",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794775172.2021449,
+   "returned": 1794775172.7786012,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "resume",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794775183.8062177,
+   "returned": 1794775183.817576,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794775151.8342,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794775172.7786,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "paused",
+   "print_message": ""
+  },
+  {
+   "t": 1794775183.8176,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794775314.979,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794775321.071726,
+  "lines": [
+   {
+    "line": "M104 S0",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794775322.3982706,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794775167.3392,
+   1794775314.9647,
+   1750850
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794775151.767,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794775151",
+   "file": "bench_20261115-213907-pause_park_resume_nomesh.gcode"
+  },
+  {
+   "t": 1794775151.768,
+   "event": "pacer_reserve_raised",
+   "latency_s": 5.0555e-05,
+   "level": "info",
+   "print_id": "print-1794775151",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775172.758,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794775151"
+  },
+  {
+   "t": 1794775183.82,
+   "event": "print.resume",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794775151",
+   "pause_duration_s": 11.062633215995447
+  },
+  {
+   "t": 1794775299.41,
+   "event": "pacer_reserve_raised",
+   "latency_s": 3.631806593,
+   "level": "info",
+   "print_id": "print-1794775151",
+   "reserve_s": 14.178540419999997,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794775315.094,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794775151",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 163.3284403650032,
+   "filament_mm": 357.6092299999985
+  }
+ ],
+ "journal": []
+}

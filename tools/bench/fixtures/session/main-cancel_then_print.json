@@ -1,0 +1,344 @@
+{
+ "run_dir": "/home/dderg/bench/runs/sweep-interrupt/20261115-211346-cancel_then_print",
+ "head": "0b90eeaf39191ef3a83d4c2f78ddb53883d6e2ae",
+ "scenario": "cancel_then_print",
+ "window": [
+  1794773629.6627,
+  1794774028.7907
+ ],
+ "actions": [
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794773630.6658802,
+   "returned": 1794773630.6658802,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "cancel",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794773650.702628,
+   "returned": 1794773653.879893,
+   "ok": true,
+   "error": null
+  },
+  {
+   "act": "start_print",
+   "after": "previous",
+   "delay_s": 0.0,
+   "script": "",
+   "sent": 1794773656.7715287,
+   "returned": 1794773656.785081,
+   "ok": true,
+   "error": null
+  }
+ ],
+ "states": [
+  {
+   "t": 1794773630.7884,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794773653.8799,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "cancelled",
+   "print_message": ""
+  },
+  {
+   "t": 1794773656.7851,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "printing",
+   "print_message": ""
+  },
+  {
+   "t": 1794774021.535,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": ""
+  }
+ ],
+ "post_check": {
+  "started": 1794774027.044573,
+  "lines": [
+   {
+    "line": "SET_KINEMATIC_POSITION X=100 Y=100 Z=10",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G90",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X130 Y110 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "G1 X100 Y100 F6000",
+    "ok": true,
+    "error": null
+   },
+   {
+    "line": "M400",
+    "ok": true,
+    "error": null
+   }
+  ],
+  "after": {
+   "t": 1794774028.5426984,
+   "klippy": "ready",
+   "klippy_message": "Printer is ready",
+   "print": "complete",
+   "print_message": "",
+   "file_position": null
+  }
+ },
+ "spans": [
+  [
+   1794773642.2357,
+   1794773679.2292,
+   316982
+  ],
+  [
+   1794773679.6567,
+   1794773688.0182,
+   81826
+  ],
+  [
+   1794773691.2748,
+   1794773741.2714,
+   493732
+  ],
+  [
+   1794773747.668,
+   1794773767.5173,
+   250216
+  ],
+  [
+   1794773782.1769,
+   1794773805.4238,
+   332614
+  ],
+  [
+   1794773831.618,
+   1794773841.4219,
+   127911
+  ],
+  [
+   1794773842.044,
+   1794773856.4287,
+   181228
+  ],
+  [
+   1794773905.6681,
+   1794773913.1339,
+   104585
+  ],
+  [
+   1794773916.296,
+   1794773927.1025,
+   141432
+  ],
+  [
+   1794774021.5758,
+   1794774021.6471,
+   872
+  ]
+ ],
+ "events": [
+  {
+   "t": 1794773630.79,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794773630",
+   "file": "bench_20261115-211346-cancel_then_print.gcode"
+  },
+  {
+   "t": 1794773630.791,
+   "event": "pacer_reserve_raised",
+   "latency_s": 5.3444e-05,
+   "level": "info",
+   "print_id": "print-1794773630",
+   "reserve_s": 0.5,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773653.852,
+   "event": "print.pause",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794773630"
+  },
+  {
+   "t": 1794773653.852,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794773630",
+   "outcome": "cancelled",
+   "reason": "",
+   "duration_s": 23.0618497270043,
+   "filament_mm": 72.37399000000005
+  },
+  {
+   "t": 1794773656.787,
+   "event": "print.start",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794773656",
+   "file": "bench_20261115-211346-cancel_then_print.gcode"
+  },
+  {
+   "t": 1794773660.968,
+   "event": "pacer_reserve_raised",
+   "latency_s": 4.180376466,
+   "level": "info",
+   "print_id": "print-1794773656",
+   "reserve_s": 11.754371885999998,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773679.517,
+   "event": "anchor_idle_resume",
+   "lead_secs": 11.754371885999998,
+   "level": "info",
+   "margin_s": 8.504284662093141,
+   "print_id": "print-1794773656",
+   "seg_t_start": 8.372915809093161,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773700.651,
+   "event": "pacer_reserve_raised",
+   "latency_s": 4.525836494,
+   "level": "info",
+   "print_id": "print-1794773656",
+   "reserve_s": 17.532141760000002,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773727.51,
+   "event": "pacer_reserve_raised",
+   "latency_s": 5.814148647,
+   "level": "info",
+   "print_id": "print-1794773656",
+   "reserve_s": 20.108766066,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773727.556,
+   "event": "anchor_idle_resume",
+   "lead_secs": 20.108766066,
+   "level": "info",
+   "margin_s": 13.719431548390617,
+   "print_id": "print-1794773656",
+   "seg_t_start": 58.37711304748377,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773753.438,
+   "event": "pacer_reserve_raised",
+   "latency_s": 6.86519983,
+   "level": "info",
+   "print_id": "print-1794773656",
+   "reserve_s": 28.680359634,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773753.492,
+   "event": "anchor_idle_resume",
+   "lead_secs": 28.680359634,
+   "level": "info",
+   "margin_s": 14.02675614659995,
+   "print_id": "print-1794773656",
+   "seg_t_start": 78.23075121708362,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773787.579,
+   "event": "anchor_idle_resume",
+   "lead_secs": 44.03101332800001,
+   "level": "info",
+   "margin_s": 17.848987366822257,
+   "print_id": "print-1794773656",
+   "seg_t_start": 101.48641735790592,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773798.007,
+   "event": "anchor_idle_resume",
+   "lead_secs": 44.03101332800001,
+   "level": "info",
+   "margin_s": 43.41592734787207,
+   "print_id": "print-1794773656",
+   "seg_t_start": 111.29954350277801,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773837.895,
+   "event": "anchor_idle_resume",
+   "lead_secs": 67.765467114,
+   "level": "info",
+   "margin_s": 18.535244381029315,
+   "print_id": "print-1794773656",
+   "seg_t_start": 125.69130375580733,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773847.843,
+   "event": "pacer_reserve_raised",
+   "latency_s": 7.176171284,
+   "level": "info",
+   "print_id": "print-1794773656",
+   "reserve_s": 68.38741002200001,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773847.903,
+   "event": "anchor_idle_resume",
+   "lead_secs": 68.38741002200001,
+   "level": "info",
+   "margin_s": 65.23204928571693,
+   "print_id": "print-1794773656",
+   "seg_t_start": 133.1661120785243,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794773908.421,
+   "event": "anchor_idle_resume",
+   "lead_secs": 113.14560302400002,
+   "level": "info",
+   "margin_s": 18.68091243351023,
+   "print_id": "print-1794773656",
+   "seg_t_start": 143.9775196410345,
+   "source": "host-rust"
+  },
+  {
+   "t": 1794774021.762,
+   "event": "print.end",
+   "level": "info",
+   "source": "host-py",
+   "print_id": "print-1794773656",
+   "outcome": "complete",
+   "reason": "",
+   "duration_s": 364.9780652459958,
+   "filament_mm": 357.6092299999952
+  }
+ ],
+ "journal": [],
+ "fixture_note": "the source run fetched no journal; its journal list is empty, not clean"
+}

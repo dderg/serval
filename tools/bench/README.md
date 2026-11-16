@@ -42,7 +42,9 @@ Run from the repo root.
 uv run python tools/bench/deploy.py sync [--tree DIR]  # rsync a worktree (default: this one) to Pi ~/klipper, delete stale, build-native.sh if rust/ changed, restart klipper, write ~/klipper/.bench-deploy.json
 uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (for an MCU that no longer answers; a latched shutdown is already cleared by the FIRMWARE_RESTART that restart_klipper/prepare_printer send when klippy settles in shutdown), restart klipper, then `mco` (MCO1 on, DBGMCU_CR back to 0)
 uv run python tools/bench/lock.py hold -- <cmd...> # run a multi-step session under the bench lock
-uv run python tools/bench/suite.py [--quick] [--expect-fail NAME]  # regression matrix: sync + 9 runs (3 with --quick) + analyze, table, ~/bench/suites/<ts>/summary.json
+uv run python tools/bench/suite.py [--quick | --group matrix|session] [--expect-fail NAME] [--tree DIR]  # regression: sync (DIR, default this tree) + 11 matrix rows (4 with --quick) + 12 session rows, table, ~/bench/suites/<ts>/summary.json
+uv run python tools/bench/session.py <scenario> [--runs-dir DIR]   # one session scenario (session_scenarios.py) in one capture; prints the run dir
+uv run python tools/bench/session_check.py <run_dir> | --evidence FILE   # judge a session run: session_evidence.json + session_checks.json, exit 1 on any failed check
 uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config) in out/bench-f401, flash via Pi SWD, restart klippy, check the reported build id, then `mco` (MCO1 on, DBGMCU_CR back to 0)
 uv run python tools/bench/deploy.py flash-capture  # build capture-fw in its own target/, flash F407 via ST-Link, check the reported build id
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
@@ -89,9 +91,56 @@ python3 scripts/integrate_stack.py 443 444 [--run CMD]    # try a PR stack on a 
 
 `land-pr.sh` can be run from the branch's own worktree and re-updates the PR branch when main moves. Sync the committed, integrated tree to the Pi (`deploy.py sync --tree`), not a worktree with other agents' edits.
 
+## Session rows (`suite.py --group session`)
+
+A matrix row is one print on a freshly restarted klippy. On 2026-11-15 all 11 passed on a main that panicked with a bed mesh (#842), stalled the second print of a session (#843), paused and cancelled only after the buffered runway (#844), stalled the reactor on `BED_MESH_CLEAR` in a cancel macro (#406) and aborted on a FIRMWARE_RESTART right after an e-stop (#855). A session row keeps one klippy session through a timeline instead.
+
+- `session_scenarios.py` defines each scenario: printer.cfg plus fragments from `configs/session/` (`print_macros.cfg`: END_PRINT, PAUSE, RESUME and CANCEL_PRINT with retract, park and `BED_MESH_CLEAR`; `bed_mesh_wavy.cfg`: the 3×3 ±0.1 mm profile `wavy`, last because klippy reads `#*#` only at the end), a gcode cut from a print with lines spliced in (`BED_MESH_PROFILE LOAD=wavy` after the preamble, `END_PRINT` as the ending; spliced lines bypass run.py's allowlist), a timeline and the expected `print.end` outcomes. An action (start a print, pause, resume, cancel, FIRMWARE_RESTART, emergency stop, gcode line, wait) fires a delay after the previous one, after the print ended, or after the SD reader reached a marker line.
+- `session.py` runs one through run.py's `start_run`/`execute` (same lock, prepare, upload, capture, log fetch and run.json). It samples klippy and print state every 0.25 s, sends each action on its own thread, waits until the printer settles, then sends the post-check moves inside the capture. `run.json` gains `session`. Every run.py run now also saves `journal.txt` (`journalctl -u klipper` since the capture started).
+- `session_check.py` reduces the run dir to `session_evidence.json` (capture as spans of steps joined across < 0.25 s; watched events from `events/*.jsonl*`, rotated files included, with klippy log lines read from their host-py mirror because klippy.log has no wall time; journal abort lines) and writes `session_checks.json`.
+
+Bounds are `Bound` constants in `session_scenarios.py`, each naming the issue it guards.
+
+| check | rows | fails when |
+|---|---|---|
+| actions | all | an action request failed |
+| outcomes | all | the `print.end` outcomes differ from the scenario's, or klippy is not ready before the post-check |
+| journal | all | the journal shows a klippy panic or process exit |
+| shutdown | all | a klippy or MCU shutdown other than the commanded e-stop's |
+| reactor | all | any `reactor_poller_late` (#406) |
+| gaps | all | steps stop > 1 s inside a print, outside a commanded pause (#843) |
+| post_check | all | a post-check move fails, or klippy is not ready after it |
+| stop_after_pause / _cancel / _firmware_restart | pause_resume, pause_cancel, cancel_plain, firmware_restart | steps go on > 6 s after the request (#844) |
+| stop_after_emergency_stop | estop, estop_g4 | steps go on > 0.1 s after the request (#406) |
+| second_print | print_twice, cancel_then_print | the last completed print's motion span differs > 10 % from the first's (#843) |
+| pacer_reserve | print_twice, cancel_then_print | `pacer_reserve_raised.reserve_s` > 2 s (#843) |
+
+A stop check also fails when no motion was in flight at the request: such a run proves nothing.
+
+| scenario | guards | config | gcode | timeline |
+|---|---|---|---|---|
+| mesh_full_print | #842 | + macros, mesh | first_layers, mesh loaded | print |
+| pause_park_resume_mesh | #842 | + macros, mesh | first_layers, mesh loaded | pause +20 s, resume +12 s |
+| print_twice | #843 | printer.cfg | first 1500 lines | print, print again 5 s after it ends |
+| cancel_then_print | #843 | printer.cfg | first 1500 lines | print; print, cancel +20 s; print |
+| pause_resume | #844 | printer.cfg | first_layers | pause +20 s, resume +10 s |
+| pause_cancel | #844 | printer.cfg | first_layers | pause +20 s, cancel +8 s |
+| cancel_plain | #844 | printer.cfg | first_layers | cancel +20 s |
+| cancel_macro_mesh | #406 | + macros, mesh | first_layers, mesh loaded | cancel +20 s (macro clears the mesh) |
+| end_print_mesh | #406 | + macros, mesh | first 1500 lines, mesh loaded, END_PRINT | print |
+| firmware_restart | #844 | printer.cfg | first_layers | FIRMWARE_RESTART +20 s |
+| estop | #855 | printer.cfg | first_layers | e-stop +20 s, FIRMWARE_RESTART +5.5 s, wait 10 s |
+| estop_g4 | #406 | printer.cfg | first 200 lines, 120-stroke zigzag, `G4 P1` | e-stop 2 s after the reader reaches `G4 P1`, FIRMWARE_RESTART +5.5 s, wait 10 s |
+
+The e-stop recovery lands 5.5 s after the e-stop because the stepcompress barrier deadline latches the false endpoint death 5.2–5.4 s after it (#869); a restart just after that latch aborted klippy 5 s later on main (#855). The 10 s wait keeps that abort inside the journal window.
+
+No session row is analyzed: the analyzer plans its reference from the gcode alone, without a bed mesh, as one uninterrupted print, and every session row has a mesh, an interruption or several prints. `scripts/preflight.py --mesh` (branch `preflight`) replays a meshed print through the planner but yields no step reference. `session_checks.json` names the reason (`not_analyzed`).
+
+`test_session_check.py` judges evidence cut from the 2026-11-15/16 interrupt runs (`fixtures/session/`: `main-*` from origin/main 0b90eeaf3, `pacer_runway-*` and `reactor_drain-*` from the fix branches): each bad run fails its check with its reason, each good run passes.
+
 ## Run dir (`~/bench/runs/<YYYYmmdd-HHMMSS>/`)
 
-`print.gcode`, `printer.cfg`, `capture.bin` (count mode: int8, N×4, one row per 25 µs tick; channels a b z e; + = DIR high) or `events.bin` (event mode), `capture.json` (`mode`, `tick_hz`), `klippy.log`, `events/` (structured logs), `run.json`, and after analysis `analysis.json`, `*.png`.
+`print.gcode`, `printer.cfg`, `capture.bin` (count mode: int8, N×4, one row per 25 µs tick; channels a b z e; + = DIR high) or `events.bin` (event mode), `capture.json` (`mode`, `tick_hz`), `klippy.log`, `events/` (structured logs), `journal.txt` (klipper's journal since the capture started), `run.json`, and after analysis `analysis.json`, `*.png` (session rows: `session_evidence.json`, `session_checks.json`).
 
 ## Capture
 

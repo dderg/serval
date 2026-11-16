@@ -15,7 +15,7 @@ import secrets
 import time
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +29,7 @@ from pi import (
     BenchError,
     enable_mco,
     http,
+    klipper_journal,
     prepare_printer,
     printer_state,
     read_deployed,
@@ -118,6 +119,9 @@ def mcu_step_benchmarks() -> list[dict]:
     ]
 
 
+Drive = Callable[[Capture], dict]
+
+
 def poll_print(capture: Capture, timeout_s: float) -> dict:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -189,6 +193,40 @@ def build_sim(
     )
 
 
+def start_run(
+    lines: list[str], runs_dir: Path, config_text: str, source: dict
+) -> tuple[Path, str, dict]:
+    run_dir = runs_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir.mkdir(parents=True)
+    sanitized = ("\n".join(lines) + "\n").encode()
+    (run_dir / "print.gcode").write_bytes(sanitized)
+    config = run_dir / "printer.cfg"
+    config.write_text(config_text)
+
+    deployed = read_deployed()
+    prepare_printer(config)
+    remote_name = f"bench_{run_dir.name}.gcode"
+    upload(remote_name, sanitized)
+    summary: dict = {
+        **source,
+        "deployed": deployed,
+        "sanitized_lines": len(lines),
+        "step_benchmarks": mcu_step_benchmarks(),
+    }
+    return run_dir, remote_name, summary
+
+
+def print_file(remote_name: str, timeout_s: float) -> Drive:
+    def drive(capture: Capture) -> dict:
+        http(
+            "POST",
+            f"/printer/print/start?filename={urllib.parse.quote(remote_name)}",
+        )
+        return poll_print(capture, timeout_s)
+
+    return drive
+
+
 def run(
     gcode: Path,
     runs_dir: Path,
@@ -208,25 +246,17 @@ def run(
         if sim_path is None
         else build_sim(sim_path, config, kinematic_start(lines[0]))
     )
-    run_dir = runs_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir.mkdir(parents=True)
-    sanitized = ("\n".join(lines) + "\n").encode()
-    (run_dir / "print.gcode").write_bytes(sanitized)
-    (run_dir / "printer.cfg").write_text(config.read_text())
-
-    deployed = read_deployed()
-    prepare_printer(config)
-    remote_name = f"bench_{run_dir.name}.gcode"
-    upload(remote_name, sanitized)
-    summary: dict = {
-        "source_gcode": str(gcode.resolve()),
-        "config": str(config.resolve()),
-        "deployed": deployed,
-        "sanitized_lines": len(lines),
-        "sim": None if sim_path is None else str(sim_path.resolve()),
-        **stats,
-        "step_benchmarks": mcu_step_benchmarks(),
-    }
+    run_dir, remote_name, summary = start_run(
+        lines,
+        runs_dir,
+        config.read_text(),
+        {
+            "source_gcode": str(gcode.resolve()),
+            "config": str(config.resolve()),
+            "sim": None if sim_path is None else str(sim_path.resolve()),
+            **stats,
+        },
+    )
     with (
         throttle.throttled(host_throttle) as applied_throttle,
         recording_session(recordings(tap, dispatch_record)),
@@ -238,26 +268,29 @@ def run(
             enable_mco()
         execute(
             run_dir,
-            remote_name,
             summary,
-            timeout_s,
             events,
             tap,
             dispatch_record,
             sim,
+            print_file(remote_name, timeout_s),
+        )
+    if summary["print_state"] != "complete":
+        raise BenchError(
+            f"print ended in state {summary['print_state']!r}: "
+            f"{summary['print_message']}"
         )
     return run_dir
 
 
 def execute(
     run_dir: Path,
-    remote_name: str,
     summary: dict,
-    timeout_s: float,
     events: bool,
     tap: bool,
     dispatch_record: bool,
     sim: SimConfig | None,
+    drive: Drive,
 ) -> None:
     capture = Capture(
         run_dir,
@@ -271,11 +304,7 @@ def execute(
     capture.start()
     try:
         time.sleep(1)
-        http(
-            "POST",
-            f"/printer/print/start?filename={urllib.parse.quote(remote_name)}",
-        )
-        final = poll_print(capture, timeout_s)
+        final = drive(capture)
         time.sleep(1)
     except BaseException as exc:
         failure = exc
@@ -293,6 +322,7 @@ def execute(
 
     scp_from_pi(f"{PI_LOGS}/klippy.log", run_dir / "klippy.log")
     scp_from_pi(f"{PI_LOGS}/events", run_dir / "events", recursive=True)
+    (run_dir / "journal.txt").write_text(klipper_journal(started))
     if tap:
         scp_from_pi(f"{PI_STEP_TAP_DIR}/step_tap_mcu*.bin", run_dir)
     if dispatch_record:
@@ -307,10 +337,6 @@ def execute(
     (run_dir / "run.json").write_text(json.dumps(summary, indent=2))
     if failure is not None:
         raise failure
-    if final["state"] != "complete":
-        raise BenchError(
-            f"print ended in state {final['state']!r}: {final.get('message')}"
-        )
 
 
 def main() -> None:
