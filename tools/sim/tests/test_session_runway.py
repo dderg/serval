@@ -61,6 +61,9 @@ DENSE_TOP_FIRST_TRAVEL_END_S = 1.9
 FRONT_RELEASE_AT_START_S = 11.0
 MAX_PIPE_SPACE_WAIT_S = FRONT_RELEASE_AT_START_S + 1.0
 
+XY_STEP_LINES = (X_STEP_LINE, Y_STEP_LINE)
+BENCH_AB_STEP_LINES = (0, 3)
+
 PAUSE_RESUME = "\n[pause_resume]\n"
 
 
@@ -128,26 +131,23 @@ def _now_s(world) -> float:
     return world.vclock.now_ns() / NS_PER_S
 
 
-def _last_step_s(control) -> float:
+def _last_step_s(control, lines) -> float:
     return (
-        max(
-            control.get_step_times(X_STEP_LINE)["last_ns"],
-            control.get_step_times(Y_STEP_LINE)["last_ns"],
-        )
+        max(control.get_step_times(line)["last_ns"] for line in lines)
         / NS_PER_S
     )
 
 
-def _wait_motion_still(world, control) -> float:
-    """The time of the last X/Y step once the axes have been still for
+def _wait_motion_still(world, control, lines=XY_STEP_LINES) -> float:
+    """The time of the last step on `lines` once they have been still for
     MOTION_STILL_S."""
     world.wait_until(
-        lambda: _now_s(world) - _last_step_s(control) >= MOTION_STILL_S,
+        lambda: _now_s(world) - _last_step_s(control, lines) >= MOTION_STILL_S,
         timeout=PRINT_TIMEOUT_S,
         what=f"X/Y still for {MOTION_STILL_S}s",
         poll=0.05,
     )
-    return _last_step_s(control)
+    return _last_step_s(control, lines)
 
 
 def _start(world, path: pathlib.Path) -> float:
@@ -179,13 +179,15 @@ class _Stop:
     ended_s: float
 
 
-def _stop(world, control, command: str) -> _Stop:
+def _stop(world, control, command: str, lines=XY_STEP_LINES) -> _Stop:
     """Runs `command`, which returns once klippy has stopped feeding moves,
     and waits for the motion to end."""
     issued_s = _now_s(world)
     world.gcode_ok(command, timeout=PRINT_TIMEOUT_S)
     fed_until_s = _now_s(world)
-    return _Stop(issued_s, fed_until_s, _wait_motion_still(world, control))
+    return _Stop(
+        issued_s, fed_until_s, _wait_motion_still(world, control, lines)
+    )
 
 
 def _closing_brake(events: list[dict]) -> dict:
@@ -438,3 +440,24 @@ def test_a_dwell_behind_long_moves_starts_without_a_brake(
     world.print_file(path, timeout=PRINT_TIMEOUT_S)
 
     _assert_no_pacer_brake(world, printing.new())
+
+
+@pytest.mark.parametrize("command", ("PAUSE", "CANCEL_PRINT"))
+def test_a_stop_on_the_bench_printer_ends_within_bound(
+    sim_world, monkeypatch, command
+):
+    """Pi bench 2026-11-16, printer.cfg, first_layers, 20 s in: motion ran
+    on 7.4-8.5 s after PAUSE and CANCEL_PRINT, here 9.1 s. The turning
+    guard hands on up to 6.7 s of strokes at once there, straight into
+    the runway (#860); the engine must still account for all of it."""
+    world = _boot_bench(sim_world, monkeypatch, configs.bench_print_config)
+    control = world.sim_control("h7")
+    gcode = _first_layers(world)
+
+    started_s = _start(world, gcode)
+    _wait_print_time(world, started_s, ACTION_AT_S)
+    stopping = _EventCursor(world)
+    stop = _stop(world, control, command, BENCH_AB_STEP_LINES)
+
+    _assert_clean(world)
+    _assert_stopped_within_bound(world, command, stop, stopping.new())

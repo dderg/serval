@@ -92,6 +92,7 @@ impl Ingress {
         let cap_s = self.intake.cap_secs();
         let peak_ahead_s = self.intake.take_peak_ahead();
         let planned_from_s = self.pipeline.planned_through_s();
+        let ordered = Instant::now();
         self.drain_and_fence_as(DrainCause::PacerBrake);
         tracing::info!(
             subsystem = "motion",
@@ -102,6 +103,7 @@ impl Ingress {
             cap_s,
             peak_ahead_s,
             drained_s = self.pipeline.planned_through_s() - planned_from_s,
+            dispatch_wait_s = ordered.elapsed().as_secs_f64(),
             t_us = motion_pipeline::timing::mono_us(),
             "[pipe] pacer braked the stream to rest"
         );
