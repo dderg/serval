@@ -225,10 +225,6 @@ impl<'a> SampleRunView<'a> {
             })
     }
 
-    pub fn first_position(&self) -> Option<i32> {
-        self.samples.first().copied()
-    }
-
     pub fn last_position(&self) -> Option<i32> {
         self.samples.last().copied()
     }

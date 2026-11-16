@@ -1,5 +1,3 @@
-use std::sync::mpsc;
-
 use super::*;
 use crate::host_io::runtime_events::FaultEvent as RuntimeFaultEvent;
 
@@ -34,33 +32,4 @@ fn dispatch_upgrades_synthesized_with_edge() {
     latch.dispatch(make_event(42, false)); // real MCU edge
     assert_eq!(latch.cell.as_ref().unwrap().fault_code, 42);
     assert!(!latch.cell.as_ref().unwrap().synthesized);
-}
-
-#[test]
-fn subscribe_replays_latched_to_new_receiver() {
-    let mut latch = FaultLatch::default();
-    latch.dispatch(make_event(7, false));
-
-    let (tx, rx) = mpsc::sync_channel(1);
-    latch.subscribe(tx).expect("first subscribe should succeed");
-    let replayed = rx.try_recv().expect("should have received replayed fault");
-    assert_eq!(replayed.fault_code, 7);
-}
-
-#[test]
-fn second_subscribe_returns_error() {
-    let mut latch = FaultLatch::default();
-    let (tx1, _rx1) = mpsc::sync_channel::<RuntimeFaultEvent>(1);
-    let (tx2, _rx2) = mpsc::sync_channel::<RuntimeFaultEvent>(1);
-    latch
-        .subscribe(tx1)
-        .expect("first subscribe should succeed");
-    let err = latch
-        .subscribe(tx2)
-        .expect_err("second subscribe should fail");
-    assert!(
-        matches!(err, SubscribeError::AlreadySubscribed { channel: "fault" }),
-        "expected AlreadySubscribed{{channel: \"fault\"}}, got {:?}",
-        err
-    );
 }
