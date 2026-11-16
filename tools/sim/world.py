@@ -1195,6 +1195,12 @@ class SimWorld:
         )
 
     @_runs_free
+    def emergency_stop(self) -> dict:
+        return _api_request(
+            self.api_socket, "emergency_stop", {}, self.vclock.deadline(5.0)
+        )
+
+    @_runs_free
     def _wait_clock_sync(self, timeout: float) -> None:
         try:
             resp = _api_request(
