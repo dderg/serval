@@ -1,9 +1,11 @@
 """Reduce a session run dir (session.py) to the evidence session_check.py
 judges: the timeline the runner recorded (actions, klippy and print state
 changes, post-check), the capture's motion as spans of steps, the
-structured events that bear on the checks, and klippy aborts from the Pi
-journal. klippy.log lines are read from their timestamped mirror in
-events/host-py.jsonl; klippy.log itself carries no wall time.
+structured events that bear on the checks, klippy's once-a-second Stats
+lines, and klippy aborts from the Pi journal. klippy.log lines are read
+from their timestamped mirror in events/host-py.jsonl; klippy.log itself
+carries no wall time. A plain run.py run dir (collect_run) has no timeline:
+its evidence is the run window's events, Stats and journal.
 """
 
 from __future__ import annotations
@@ -59,6 +61,8 @@ JOURNAL_ABORT = re.compile(
     r"panicked at|Main process exited|Failed with result"
 )
 JOURNAL_PANIC = "panicked at"
+STATS_LINE = re.compile(r'"_msg":\s*"Stats ')
+STATS_FIELDS = re.compile(r"\b(memavail|cputime)=([\d.]+)")
 
 
 class EvidenceError(RuntimeError):
@@ -87,7 +91,55 @@ def collect(run_dir: Path) -> dict:
         "post_check": session["post_check"],
         "spans": activity_spans(capture.deltas, capture.tick_hz, start),
         "events": watched_events(run_dir / "events", start, end),
+        "stats": klippy_stats(run_dir / "events", start, end),
         "journal": abort_lines((run_dir / "journal.txt").read_text()),
+    }
+
+
+def collect_run(run_dir: Path) -> dict:
+    info = json.loads((run_dir / "run.json").read_text())
+    start, end = events.run_window(run_dir)
+    return {
+        "run_dir": str(run_dir),
+        "head": info["deployed"]["head"],
+        "scenario": None,
+        "window": [_at(start), _at(end)],
+        "actions": [],
+        "states": [],
+        "post_check": None,
+        "spans": [],
+        "events": watched_events(run_dir / "events", start, end),
+        "stats": klippy_stats(run_dir / "events", start, end),
+        "journal": abort_lines((run_dir / "journal.txt").read_text()),
+    }
+
+
+def klippy_stats(events_dir: Path, start: float, end: float) -> list[dict]:
+    found = []
+    for path in sorted(events_dir.glob("host-py.jsonl*")):
+        with path.open(errors="replace") as lines:
+            for number, line in enumerate(lines, 1):
+                if not STATS_LINE.search(line):
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError as exc:
+                    raise EvidenceError(
+                        f"{path}:{number}: unreadable Stats record: {exc}"
+                    ) from exc
+                when = events.record_time(record)
+                if start <= when <= end:
+                    found.append(stats_row(when, record))
+    return sorted(found, key=lambda row: row["t"])
+
+
+def stats_row(when: float, record: dict) -> dict:
+    fields = dict(STATS_FIELDS.findall(record["_msg"]))
+    return {
+        "t": _at(when),
+        "session_id": record.get("session_id"),
+        "memavail_kb": int(fields["memavail"]),
+        "cputime_s": float(fields["cputime"]),
     }
 
 

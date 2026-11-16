@@ -1,14 +1,19 @@
 """Run the bench regression matrix under one lock hold.
 
-uv run python tools/bench/suite.py [--quick | --group {matrix,session}]
-    [--expect-fail NAME ...]
+uv run python tools/bench/suite.py [--quick | --group {matrix,session,soak}
+    | --row NAME ...] [--expect-fail NAME ...] [--tree DIR]
 
 Syncs the tree, runs every row, prints a table and writes
 ~/bench/suites/<timestamp>/summary.json. Matrix rows are one print each
 (run.py + analyze.py); session rows are one klippy session each
-(session.py + session_check.py). The full suite runs both groups. Exit
-status is non-zero when any row fails (unless named in --expect-fail) or
-when an --expect-fail row passes.
+(session.py + session_check.py). The full suite runs both groups. The soak
+group (qualification's, never in the full suite) runs the generated
+soak print (soak_gcode.py) for over 20 minutes per print: a mesh session
+with a pause and a second print, and a throttled-host print the analyzer
+judges, both also judged by the run-wide checks (session_check.py). --row
+runs named rows of any group; --tree syncs DIR and analyzes with DIR's
+analyzer and engine. Exit status is non-zero when any row fails (unless
+named in --expect-fail) or when an --expect-fail row passes.
 """
 
 from __future__ import annotations
@@ -26,7 +31,8 @@ from pathlib import Path
 import lock
 import pi
 import session_check
-from session_scenarios import SCENARIOS, Scenario
+import soak_gcode
+from session_scenarios import SCENARIOS, SOAK_SCENARIOS, Scenario
 
 BENCH = Path(__file__).resolve().parent
 REPO = BENCH.parents[1]
@@ -37,10 +43,14 @@ REST_LADDER_CFG = BENCH / "configs" / "rest_ladder.cfg"
 CAPACITY_CFG = BENCH / "configs" / "capacity.cfg"
 SIM_GCODE = REPO / "tools" / "sim" / "gcode"
 RUN_TIMEOUT_S = 2400.0
+RUN_SETUP_S = 600.0
 ANALYZE_TIMEOUT_S = 1200.0
 ENGINE_BUILD_TIMEOUT_S = 3600
 ENGINE_BUILD = ["make", "-f", "Makefile.rust", "motion-engine-fast"]
 THROTTLE_ARGS = ["--host-cpus", "1", "--host-max-mhz", "1500"]
+SOAK_THROTTLE_ARGS = ["--host-cpus", "2", "--host-max-mhz", "1500"]
+SOAK_PRINT_TIMEOUT_S = 2 * soak_gcode.PLANNED_PRINT_S
+SOAK_ANALYZE_TIMEOUT_S = 3600.0
 SINGLE_MOTOR_CEILING_STEPS_PER_S = 172_000
 BENCHMARK_BAND = (0.85, 1.10)
 
@@ -84,6 +94,9 @@ class Row:
     quick: bool = False
     run_args: list[str] = field(default_factory=list)
     analyze_args: list[str] = field(default_factory=list)
+    run_wide_checks: bool = False
+    timeout_s: float = RUN_TIMEOUT_S
+    analyze_timeout_s: float = ANALYZE_TIMEOUT_S
 
 
 MATRIX = [
@@ -121,6 +134,17 @@ MATRIX = [
         run_args=["--events", "--step-tap"],
     ),
 ]
+SOAK_MATRIX = [
+    Row(
+        "soak_throttled",
+        soak_gcode.PATH,
+        throttle=SOAK_THROTTLE_ARGS,
+        run_args=["--timeout", str(SOAK_PRINT_TIMEOUT_S)],
+        run_wide_checks=True,
+        timeout_s=SOAK_PRINT_TIMEOUT_S + RUN_SETUP_S,
+        analyze_timeout_s=SOAK_ANALYZE_TIMEOUT_S,
+    ),
+]
 
 
 @dataclass(frozen=True)
@@ -131,23 +155,38 @@ class SessionRow:
     def name(self) -> str:
         return self.scenario.name
 
+    @property
+    def timeout_s(self) -> float:
+        return self.scenario.timeline_timeout_s + RUN_SETUP_S
+
 
 class Scope(enum.Enum):
     ALL = "all"
     QUICK = "quick"
     MATRIX = "matrix"
     SESSION = "session"
+    SOAK = "soak"
 
 
-GROUPS = (Scope.MATRIX, Scope.SESSION)
+GROUPS = (Scope.MATRIX, Scope.SESSION, Scope.SOAK)
 SESSION_ROWS = [SessionRow(scenario) for scenario in SCENARIOS]
+SOAK_ROWS = [
+    *(SessionRow(scenario) for scenario in SOAK_SCENARIOS),
+    *SOAK_MATRIX,
+]
 ROWS = [*MATRIX, *SESSION_ROWS]
+ROW_BY_NAME = {row.name: row for row in [*ROWS, *SOAK_ROWS]}
 
 
 def selected_rows(scope: Scope) -> list:
     if scope is Scope.QUICK:
         return [row for row in MATRIX if row.quick]
-    rows = {Scope.ALL: ROWS, Scope.MATRIX: MATRIX, Scope.SESSION: SESSION_ROWS}
+    rows = {
+        Scope.ALL: ROWS,
+        Scope.MATRIX: MATRIX,
+        Scope.SESSION: SESSION_ROWS,
+        Scope.SOAK: SOAK_ROWS,
+    }
     return rows[scope]
 
 
@@ -163,17 +202,17 @@ def python(
     )
 
 
-def build_local_engine() -> None:
+def build_local_engine(tree: Path) -> None:
     build = subprocess.run(
         ENGINE_BUILD,
-        cwd=REPO,
+        cwd=tree,
         capture_output=True,
         text=True,
         timeout=ENGINE_BUILD_TIMEOUT_S,
     )
     if build.returncode != 0:
         raise SuiteError(
-            f"`{' '.join(ENGINE_BUILD)}` in {REPO} exited "
+            f"`{' '.join(ENGINE_BUILD)}` in {tree} exited "
             f"{build.returncode}; analyzing with the stale engine would hold "
             f"every row against another planner:\n{build.stdout}{build.stderr}"
         )
@@ -224,7 +263,10 @@ def runner_args(
 
 
 def run_row(
-    row: Row | SessionRow, suite_dir: Path, lock_timeout_s: float
+    row: Row | SessionRow,
+    suite_dir: Path,
+    lock_timeout_s: float,
+    analyzer: Path = BENCH,
 ) -> dict:
     runs_dir = suite_dir / row.name
     result: dict = {
@@ -235,7 +277,7 @@ def run_row(
     }
     started = time.monotonic()
     runner = runner_args(row, runs_dir, lock_timeout_s)
-    run = python(*runner, timeout_s=RUN_TIMEOUT_S)
+    run = python(*runner, timeout_s=row.timeout_s)
     run_dirs = sorted(runs_dir.glob("*")) if runs_dir.exists() else []
     if run_dirs:
         result["run_dir"] = str(run_dirs[-1])
@@ -257,7 +299,9 @@ def run_row(
         if isinstance(row, SessionRow):
             judge_session(run_dir, result)
         else:
-            judge_capture(row, run_dir, result)
+            judge_capture(row, run_dir, result, analyzer)
+        if isinstance(row, Row) and row.run_wide_checks:
+            judge_run_wide(run_dir, result)
     result["wall_s"] = time.monotonic() - started
     result["passed"] = row_passed(row, result)
     return result
@@ -267,13 +311,15 @@ def add_error(result: dict, error: str) -> None:
     result["error"] = "; ".join(filter(None, [result["error"], error]))
 
 
-def judge_capture(row: Row, run_dir: Path, result: dict) -> None:
+def judge_capture(
+    row: Row, run_dir: Path, result: dict, analyzer: Path
+) -> None:
     if (run_dir / "capture.bin").exists() or (run_dir / "events.bin").exists():
         analysis = python(
-            "analyze.py",
+            str(analyzer / "analyze.py"),
             str(run_dir),
             *row.analyze_args,
-            timeout_s=ANALYZE_TIMEOUT_S,
+            timeout_s=row.analyze_timeout_s,
         )
         if analysis.returncode != 0:
             add_error(result, f"analyze.py: {last_lines(analysis.stderr)}")
@@ -311,6 +357,30 @@ def judge_session(run_dir: Path, result: dict) -> None:
     result["failed_checks"] = [
         f"{c['name']}: {c['detail']}" for c in verdict["checks"] if not c["ok"]
     ]
+    result["checks"] = verdict["checks"]
+
+
+def judge_run_wide(run_dir: Path, result: dict) -> None:
+    check = python(
+        "session_check.py",
+        "--run-wide",
+        str(run_dir),
+        timeout_s=ANALYZE_TIMEOUT_S,
+    )
+    verdict = read_json(run_dir / session_check.CHECKS_FILE)
+    if not verdict:
+        add_error(result, f"session_check.py: {last_lines(check.stderr)}")
+        return
+    result["run_wide_ok"] = verdict["ok"]
+    result["run_wide_checks"] = verdict["checks"]
+    result["failed_checks"] = [
+        *result.get("failed_checks", []),
+        *(
+            f"{c['name']}: {c['detail']}"
+            for c in verdict["checks"]
+            if not c["ok"]
+        ),
+    ]
 
 
 def row_passed(row: Row | SessionRow, result: dict) -> bool:
@@ -318,8 +388,11 @@ def row_passed(row: Row | SessionRow, result: dict) -> bool:
         return False
     if isinstance(row, SessionRow):
         return bool(result.get("session_ok"))
-    return result.get("print_state") == "complete" and bool(
-        result.get("analyzer_ok")
+    run_wide_ok = not row.run_wide_checks or bool(result.get("run_wide_ok"))
+    return (
+        result.get("print_state") == "complete"
+        and bool(result.get("analyzer_ok"))
+        and run_wide_ok
     )
 
 
@@ -366,31 +439,39 @@ def scope_of(args: argparse.Namespace) -> Scope:
 
 
 def main() -> None:
-    names = [row.name for row in ROWS]
+    names = list(ROW_BY_NAME)
     parser = argparse.ArgumentParser(description=__doc__)
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--quick", action="store_true")
     scope.add_argument("--group", choices=[group.value for group in GROUPS])
+    scope.add_argument("--row", action="append", choices=names)
     parser.add_argument(
         "--expect-fail", action="append", default=[], choices=names
     )
     parser.add_argument(
         "--tree",
         type=Path,
-        help="worktree to sync to the Pi instead of this one",
+        help="worktree to sync to the Pi and analyze with instead of this one",
     )
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
-    selected = selected_rows(scope_of(args))
+    selected = (
+        [ROW_BY_NAME[name] for name in args.row]
+        if args.row
+        else selected_rows(scope_of(args))
+    )
     unselected = sorted(set(args.expect_fail) - {row.name for row in selected})
     if unselected:
         parser.error(f"--expect-fail rows not in this suite: {unselected}")
+    tree = REPO if args.tree is None else args.tree.resolve()
+    analyzer = tree / BENCH.relative_to(REPO)
+    if any(row in SOAK_ROWS for row in selected):
+        soak_gcode.ensure()
     suite_dir = SUITES_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
-    build_local_engine()
+    build_local_engine(tree)
     suite_dir.mkdir(parents=True)
     with lock.bench_lock(args.lock_timeout, command=" ".join(sys.argv)):
-        tree = [] if args.tree is None else ["--tree", str(args.tree)]
-        sync = python("deploy.py", "sync", *tree, timeout_s=1800)
+        sync = python("deploy.py", "sync", "--tree", str(tree), timeout_s=1800)
         if sync.returncode != 0:
             sys.exit(f"sync failed: {last_lines(sync.stderr, 8)}")
         synced = pi.read_deployed()
@@ -402,7 +483,7 @@ def main() -> None:
             if aborted is not None:
                 break
             print(f"running {row.name} ...", flush=True)
-            result = run_row(row, suite_dir, args.lock_timeout)
+            result = run_row(row, suite_dir, args.lock_timeout, analyzer)
             result["expected_fail"] = row.name in args.expect_fail
             rows.append(result)
         aborted = aborted or pi.foreign_deploy(synced)

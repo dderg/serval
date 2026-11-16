@@ -8,6 +8,7 @@ import session_scenarios as scenarios
 from session_scenarios import (
     SCENARIO_BY_NAME,
     SCENARIOS,
+    SOAK_SCENARIOS,
     Act,
     Bound,
     Config,
@@ -18,8 +19,9 @@ ISSUE = re.compile(r"^#\d+$")
 
 
 def test_every_scenario_starts_a_print_first_and_has_a_unique_name():
-    assert len(SCENARIO_BY_NAME) == len(SCENARIOS)
-    for scenario in SCENARIOS:
+    every = (*SCENARIOS, *SOAK_SCENARIOS)
+    assert len(SCENARIO_BY_NAME) == len(every)
+    for scenario in every:
         assert scenario.timeline[0].act is Act.START_PRINT, scenario.name
 
 
@@ -106,3 +108,21 @@ def test_end_print_clears_the_mesh_with_motion_still_queued():
     assert "M400" not in body
     assert "BED_MESH_CLEAR" in body
     assert scenario.gcode.lines()[-1] == "END_PRINT"
+
+
+def test_the_soak_session_pauses_mid_print_then_prints_again_on_the_mesh():
+    soak = SCENARIO_BY_NAME["soak_mesh_session"]
+    assert [action.act for action in soak.timeline] == [
+        Act.START_PRINT,
+        Act.PAUSE,
+        Act.RESUME,
+        Act.START_PRINT,
+    ]
+    planned_s = scenarios.soak_gcode.PLANNED_PRINT_S
+    assert soak.timeline[1].delay_s == planned_s / 2
+    assert soak.timeline_timeout_s > 2 * planned_s
+    assert soak.config == scenarios.MESH_CONFIG
+    assert soak.gcode.setup == (scenarios.LOAD_WAVY_MESH,)
+    assert soak.gcode.describe() == "tools/bench/gcode/generated/soak.gcode"
+    assert set(scenarios.SOAK_CHECKS) <= set(soak.checks)
+    assert ISSUE.match(soak.guards)

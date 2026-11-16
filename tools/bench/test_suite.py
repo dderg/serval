@@ -56,17 +56,19 @@ def _completed(returncode, stdout="", stderr=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
-def test_the_engine_builds_with_make_in_the_suites_own_tree(monkeypatch):
+def test_the_engine_builds_with_make_in_the_tree_it_analyzes(
+    monkeypatch, tmp_path
+):
     calls = []
     monkeypatch.setattr(
         subprocess,
         "run",
         lambda cmd, **kw: calls.append((cmd, kw)) or _completed(0),
     )
-    suite.build_local_engine()
+    suite.build_local_engine(tmp_path)
     [(cmd, kw)] = calls
     assert cmd == ["make", "-f", "Makefile.rust", "motion-engine-fast"]
-    assert kw["cwd"] == suite.REPO
+    assert kw["cwd"] == tmp_path
 
 
 def test_a_failed_engine_build_is_fatal_with_its_output(monkeypatch):
@@ -78,15 +80,22 @@ def test_a_failed_engine_build_is_fatal_with_its_output(monkeypatch):
     with pytest.raises(
         suite.SuiteError, match=r"(?s)exited 2.*cargo build.*E0425\]: nope"
     ):
-        suite.build_local_engine()
+        suite.build_local_engine(suite.REPO)
+
+
+class Order(list):
+    analyzer: Path | None = None
 
 
 def _run_suite(monkeypatch, tmp_path, argv, foreign=lambda _row: None):
-    order = []
+    order = Order()
     monkeypatch.setattr(suite, "SUITES_DIR", tmp_path)
     monkeypatch.setattr(sys, "argv", ["suite.py", *argv])
     monkeypatch.setattr(
-        suite, "build_local_engine", lambda: order.append("build")
+        suite, "build_local_engine", lambda tree: order.append("build")
+    )
+    monkeypatch.setattr(
+        suite.soak_gcode, "ensure", lambda: order.append("soak gcode")
     )
     monkeypatch.setattr(
         suite.lock, "bench_lock", lambda *a, **k: contextlib.nullcontext()
@@ -106,8 +115,9 @@ def _run_suite(monkeypatch, tmp_path, argv, foreign=lambda _row: None):
         lambda: suite.step_benchmark_verdict(_status(301)),
     )
 
-    def run_row(row, suite_dir, lock_timeout_s):
+    def run_row(row, suite_dir, lock_timeout_s, analyzer):
         order.append(row.name)
+        order.analyzer = analyzer
         return {"name": row.name, "passed": True}
 
     monkeypatch.setattr(suite, "run_row", run_row)
@@ -155,11 +165,64 @@ def test_bench_tools_started_by_the_suite_inherit_the_lock(monkeypatch):
     assert spawned[0]["pass_fds"] == (7,)
 
 
-def test_the_full_suite_holds_both_groups():
-    assert suite.selected_rows(suite.Scope.ALL) == [
-        *suite.MATRIX,
-        *suite.SESSION_ROWS,
+def test_the_full_suite_holds_both_groups_and_no_soak_row():
+    full = suite.selected_rows(suite.Scope.ALL)
+    assert full == [*suite.MATRIX, *suite.SESSION_ROWS]
+    assert not any(row in suite.SOAK_ROWS for row in full)
+
+
+def test_the_soak_group_generates_its_print_then_runs_only_soak_rows(
+    monkeypatch, tmp_path
+):
+    order = _run_suite(monkeypatch, tmp_path, ["--group", "soak"])
+    soak = [row.name for row in suite.SOAK_ROWS]
+    assert soak == ["soak_mesh_session", "soak_throttled"]
+    assert order[:-1] == ["soak gcode", "build", "deploy.py", *soak]
+
+
+def test_named_rows_of_any_group_run_alone(monkeypatch, tmp_path):
+    order = _run_suite(
+        monkeypatch, tmp_path, ["--row", "soak_throttled", "--row", "epochs"]
+    )
+    assert order[:-1] == [
+        "soak gcode",
+        "build",
+        "deploy.py",
+        "soak_throttled",
+        "epochs",
     ]
+
+
+def test_a_tree_is_analyzed_by_its_own_analyzer(monkeypatch, tmp_path):
+    tree = tmp_path / "candidate"
+    order = _run_suite(
+        monkeypatch, tmp_path, ["--row", "epochs", "--tree", str(tree)]
+    )
+    assert order.analyzer == tree / "tools" / "bench"
+
+
+def test_a_soak_row_expected_to_fail_is_not_in_the_full_suite(
+    monkeypatch, tmp_path
+):
+    order = _run_suite(
+        monkeypatch, tmp_path, ["--expect-fail", "soak_throttled"]
+    )
+    assert order == [2]
+
+
+def test_a_throttled_soak_print_also_needs_its_run_wide_checks():
+    [row] = suite.SOAK_MATRIX
+    analyzed = {"error": None, "print_state": "complete", "analyzer_ok": True}
+    assert not suite.row_passed(row, {**analyzed, "run_wide_ok": False})
+    assert suite.row_passed(row, {**analyzed, "run_wide_ok": True})
+    assert suite.row_passed(suite.MATRIX[0], analyzed)
+
+
+def test_soak_rows_outlast_the_default_runner_timeout():
+    [session_row] = suite.SOAK_ROWS[:1]
+    assert session_row.timeout_s > 2 * suite.soak_gcode.PLANNED_PRINT_S
+    assert suite.SOAK_MATRIX[0].timeout_s > suite.soak_gcode.PLANNED_PRINT_S
+    assert suite.SESSION_ROWS[0].timeout_s == suite.RUN_TIMEOUT_S
 
 
 def test_the_session_group_runs_every_scenario_and_nothing_else(

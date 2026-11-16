@@ -248,3 +248,87 @@ def test_a_cancelled_tail_is_timed_to_the_rest_before_the_fresh_stream():
         "stop_after_cancel"
     ]
     assert "stopped after 6.393 s <= 12 s (#860)" in verdict.detail
+
+
+def _soak_evidence(fixture: str) -> dict:
+    evidence = copy.deepcopy(_evidence(fixture))
+    begin, end = evidence["window"]
+    evidence["stats"] = [
+        {"t": t, "session_id": "k-1", "memavail_kb": 3_500_000, "cputime_s": t}
+        for t in [begin + 0.5 + second for second in range(int(end - begin))]
+    ]
+    return evidence
+
+
+def _soak_verdicts(evidence: dict) -> dict[str, session_check.Verdict]:
+    view = session_check.Evidence(evidence)
+    verdicts = [
+        session_check.specific_check(view, check)
+        for check in session_check.SOAK_CHECKS
+    ]
+    return {verdict.name: verdict for verdict in verdicts}
+
+
+def _event(evidence: dict, after_s: float, name: str, **fields) -> None:
+    origin = session_check.Evidence(evidence).origin
+    evidence["events"].append({"t": origin + after_s, "event": name, **fields})
+
+
+def test_a_pause_brake_is_commanded_and_the_soak_checks_pass():
+    verdicts = _soak_verdicts(_soak_evidence("pacer_runway-pause_resume"))
+    assert all(v.ok for v in verdicts.values()), verdicts
+    assert verdicts["pacer_brakes"].detail.endswith("(1 at them)")
+
+
+def test_a_brake_outside_a_commanded_stop_fails_the_soak():
+    evidence = _soak_evidence("pacer_runway-pause_resume")
+    _event(evidence, 5.0, "pipe_drain", cause="BusyRunwayFalling")
+    verdict = _soak_verdicts(evidence)["pacer_brakes"]
+    assert not verdict.ok
+    assert "BusyRunwayFalling at +5.0 s" in verdict.detail
+    assert "#843" in verdict.detail
+
+
+def test_a_reserve_raised_outside_a_commanded_stop_fails_the_soak():
+    evidence = _soak_evidence("pacer_runway-pause_resume")
+    _event(evidence, 5.0, "pacer_reserve_raised", reserve_s=0.41)
+    verdict = _soak_verdicts(evidence)["pacer_reserve_growth"]
+    assert not verdict.ok
+    assert "to 0.410 s at +5.0 s" in verdict.detail
+
+
+def test_a_stats_gap_or_a_second_klippy_session_fails_the_soak():
+    evidence = _soak_evidence("pacer_runway-pause_resume")
+    del evidence["stats"][10:15]
+    gap = _soak_verdicts(evidence)["klippy_stats"]
+    assert not gap.ok
+    assert "longest gap 6.000 s > 2 s (#406)" in gap.detail
+    evidence = _soak_evidence("pacer_runway-pause_resume")
+    evidence["stats"][-1]["session_id"] = "k-2"
+    restarted = _soak_verdicts(evidence)["klippy_stats"]
+    assert not restarted.ok
+    assert "from 2 klippy session(s)" in restarted.detail
+
+
+def test_evidence_without_stats_fails_the_stats_check():
+    verdict = _soak_verdicts(_evidence("pacer_runway-pause_resume"))
+    assert not verdict["klippy_stats"].ok
+
+
+def test_a_plain_run_is_judged_by_the_run_wide_checks_only():
+    evidence = _soak_evidence("pacer_runway-pause_resume")
+    evidence.update(scenario=None, actions=[], states=[], post_check=None)
+    verdict = session_check.judge(evidence)
+    assert [check["name"] for check in verdict["checks"]] == [
+        "journal",
+        "shutdown",
+        "reactor",
+        "pacer_brakes",
+        "pacer_reserve_growth",
+        "klippy_stats",
+    ]
+    assert not verdict["ok"]
+    assert (
+        "1 pacer brakes outside commanded stops"
+        in verdict["checks"][3]["detail"]
+    )

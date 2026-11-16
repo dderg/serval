@@ -2,12 +2,15 @@
 
 uv run python tools/bench/session_check.py <run_dir>
 uv run python tools/bench/session_check.py --evidence <session_evidence.json>
+uv run python tools/bench/session_check.py --run-wide <run_dir>
 
 From a run dir it writes session_evidence.json (session_evidence.py) and
 session_checks.json next to run.json. Prints one line per check and exits
 1 when any fails. Every scenario gets the generic checks; the stop latency,
-engine account, second-print and pacer-reserve checks are declared per
-scenario.
+engine account, second-print, pacer-reserve and soak (SOAK_CHECKS: pacer
+brakes and reserve raises outside commanded stops, klippy Stats) checks are
+declared per scenario. --run-wide judges a plain run.py run, which has no
+timeline, by the generic checks that need none plus SOAK_CHECKS.
 """
 
 from __future__ import annotations
@@ -15,20 +18,26 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import session_evidence
 from session_scenarios import (
     MID_PRINT_GAP_S,
+    PACER_ISSUE,
     REACTOR_STALL_ISSUE,
     SCENARIO_BY_NAME,
+    SOAK_CHECKS,
     TERMINATING_ACTS,
     Act,
+    NoStrayBrakes,
+    NoStrayReserveRaises,
     ReserveBounded,
     Scenario,
     SecondPrintLikeFirst,
     SpecificCheck,
+    StatsSteady,
     StopsWithin,
     StopsWithinEngineAccount,
 )
@@ -40,6 +49,7 @@ PI_CLOCK_SKEW_S = 0.05
 FRESH_STREAM = "anchor_decision"
 IN_FLIGHT_SLACK_S = session_evidence.SPAN_JOIN_S
 TERMINATING = frozenset(act.value for act in TERMINATING_ACTS)
+STOPPING = frozenset({Act.PAUSE.value, *TERMINATING})
 PAUSE_ENDS = frozenset({Act.RESUME.value, Act.CANCEL.value})
 ESTOP_SHUTDOWN_REASONS = frozenset(
     {"Shutdown due to webhooks request", "Command request"}
@@ -47,6 +57,9 @@ ESTOP_SHUTDOWN_REASONS = frozenset(
 SHUTDOWN_EVENTS = frozenset({"klippy_shutdown", "mcu_shutdown"})
 JOURNAL_LINES_SHOWN = 3
 CLOSING_BRAKE_CAUSE = "RunwayExhausted"
+PACER_BRAKE = "pipe_drain"
+RESERVE_RAISED = "pacer_reserve_raised"
+RUN_WIDE = "run-wide"
 
 
 @dataclass(frozen=True)
@@ -69,11 +82,12 @@ class Evidence:
         self.actions = evidence["actions"]
         self.spans = evidence["spans"]
         self.events = evidence["events"]
+        self.stats = evidence.get("stats")
         self.journal = evidence["journal"]
         self.post_check = evidence["post_check"]
-        self.window_end = evidence["window"][1]
+        self.window_start, self.window_end = evidence["window"]
         starts = self.sent(Act.START_PRINT)
-        self.origin = starts[0] if starts else evidence["window"][0]
+        self.origin = starts[0] if starts else self.window_start
 
     def at(self, wall_s: float) -> str:
         return f"+{wall_s - self.origin:.1f} s"
@@ -96,6 +110,18 @@ class Evidence:
             if a["sent"] > after and a["act"] != Act.WAIT.value
         ]
         return min([*later, self.settled_at()])
+
+    def commanded(self, wall_s: float) -> bool:
+        marks = [a["sent"] for a in self.actions if a["act"] in STOPPING]
+        return any(
+            mark - PI_CLOCK_SKEW_S
+            <= wall_s
+            <= self.next_boundary(mark) + PI_CLOCK_SKEW_S
+            for mark in marks
+        )
+
+    def stray(self, event: str) -> list[dict]:
+        return [e for e in self.named(event) if not self.commanded(e["t"])]
 
     def prints(self) -> list[Print]:
         prints: list[Print] = []
@@ -382,6 +408,65 @@ def reserve_check(evidence: Evidence, check: ReserveBounded) -> Verdict:
     )
 
 
+def brakes_check(evidence: Evidence, check: NoStrayBrakes) -> Verdict:
+    strays = evidence.stray(PACER_BRAKE)
+    at_stops = len(evidence.named(PACER_BRAKE)) - len(strays)
+    if strays:
+        listed = ", ".join(
+            f"{e['cause']} at {evidence.at(e['t'])}" for e in strays
+        )
+        detail = (
+            f"{len(strays)} pacer brakes outside commanded stops "
+            f"({check.issue}): {listed}"
+        )
+        return Verdict("pacer_brakes", False, detail)
+    detail = f"no pacer brake outside commanded stops ({at_stops} at them)"
+    return Verdict("pacer_brakes", True, detail)
+
+
+def reserve_growth_check(
+    evidence: Evidence, check: NoStrayReserveRaises
+) -> Verdict:
+    strays = evidence.stray(RESERVE_RAISED)
+    if strays:
+        listed = ", ".join(
+            f"to {e['reserve_s']:.3f} s at {evidence.at(e['t'])}"
+            for e in strays
+        )
+        detail = (
+            f"{RESERVE_RAISED} {len(strays)} times outside commanded stops "
+            f"({check.issue}): {listed}"
+        )
+        return Verdict("pacer_reserve_growth", False, detail)
+    detail = f"no {RESERVE_RAISED} outside commanded stops"
+    return Verdict("pacer_reserve_growth", True, detail)
+
+
+def stats_check(evidence: Evidence, check: StatsSteady) -> Verdict:
+    stats = evidence.stats
+    if not stats:
+        return Verdict("klippy_stats", False, "no klippy Stats line in the run")
+    sessions = {row["session_id"] for row in stats}
+    times = [
+        evidence.window_start,
+        *(row["t"] for row in stats),
+        evidence.window_end,
+    ]
+    longest = max(later - earlier for earlier, later in zip(times, times[1:]))
+    first, last = stats[0], stats[-1]
+    detail = (
+        f"{len(stats)} Stats lines from {len(sessions)} klippy session(s); "
+        f"{check.bound.judge('longest gap', longest)}; memavail "
+        f"{first['memavail_kb']} -> {last['memavail_kb']} kB; klippy cputime "
+        f"+{last['cputime_s'] - first['cputime_s']:.1f} s"
+    )
+    return Verdict(
+        "klippy_stats",
+        len(sessions) == 1 and check.bound.holds(longest),
+        detail,
+    )
+
+
 def specific_check(evidence: Evidence, check: SpecificCheck) -> Verdict:
     if isinstance(check, StopsWithin):
         return stop_check(evidence, check)
@@ -389,6 +474,12 @@ def specific_check(evidence: Evidence, check: SpecificCheck) -> Verdict:
         return account_check(evidence, check)
     if isinstance(check, SecondPrintLikeFirst):
         return second_print_check(evidence, check)
+    if isinstance(check, NoStrayBrakes):
+        return brakes_check(evidence, check)
+    if isinstance(check, NoStrayReserveRaises):
+        return reserve_growth_check(evidence, check)
+    if isinstance(check, StatsSteady):
+        return stats_check(evidence, check)
     return reserve_check(evidence, check)
 
 
@@ -406,7 +497,26 @@ def evaluate(scenario: Scenario, evidence: dict) -> list[Verdict]:
     ]
 
 
+def evaluate_run(evidence: dict) -> list[Verdict]:
+    view = Evidence(evidence)
+    return [
+        journal_check(view),
+        shutdown_check(view),
+        reactor_check(view),
+        *(specific_check(view, check) for check in SOAK_CHECKS),
+    ]
+
+
 def judge(evidence: dict) -> dict:
+    if evidence["scenario"] is None:
+        verdicts = evaluate_run(evidence)
+        return {
+            "scenario": None,
+            "guards": f"{REACTOR_STALL_ISSUE} {PACER_ISSUE}",
+            "not_analyzed": None,
+            "ok": all(v.ok for v in verdicts),
+            "checks": [asdict(v) for v in verdicts],
+        }
     scenario = SCENARIO_BY_NAME[evidence["scenario"]]
     verdicts = evaluate(scenario, evidence)
     return {
@@ -418,8 +528,11 @@ def judge(evidence: dict) -> dict:
     }
 
 
-def judge_run_dir(run_dir: Path) -> dict:
-    evidence = session_evidence.collect(run_dir)
+def judge_run_dir(
+    run_dir: Path,
+    collect: Callable[[Path], dict] = session_evidence.collect,
+) -> dict:
+    evidence = collect(run_dir)
     (run_dir / EVIDENCE_FILE).write_text(json.dumps(evidence, indent=1))
     verdict = judge(evidence)
     (run_dir / CHECKS_FILE).write_text(json.dumps(verdict, indent=2))
@@ -431,8 +544,11 @@ def main() -> None:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("run_dir", nargs="?", type=Path)
     source.add_argument("--evidence", type=Path)
+    source.add_argument("--run-wide", type=Path, metavar="RUN_DIR")
     args = parser.parse_args()
-    if args.evidence is None:
+    if args.run_wide is not None:
+        verdict = judge_run_dir(args.run_wide, session_evidence.collect_run)
+    elif args.evidence is None:
         verdict = judge_run_dir(args.run_dir)
     else:
         verdict = judge(json.loads(args.evidence.read_text()))
@@ -440,7 +556,8 @@ def main() -> None:
         result = "PASS" if check["ok"] else "FAIL"
         print(f"{result} {check['name']}: {check['detail']}")
     result = "PASS" if verdict["ok"] else "FAIL"
-    print(f"{verdict['scenario']} (guards {verdict['guards']}): {result}")
+    scenario = verdict["scenario"] or RUN_WIDE
+    print(f"{scenario} (guards {verdict['guards']}): {result}")
     sys.exit(0 if verdict["ok"] else 1)
 
 

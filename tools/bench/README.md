@@ -42,10 +42,13 @@ Run from the repo root.
 uv run python tools/bench/deploy.py sync [--tree DIR]  # rsync a worktree (default: this one) to Pi ~/klipper, delete stale, build-native.sh if rust/ changed, restart klipper, write ~/klipper/.bench-deploy.json
 uv run python tools/bench/deploy.py reset-target   # SWD-reset the F401 (for an MCU that no longer answers; a latched shutdown is already cleared by the FIRMWARE_RESTART that restart_klipper/prepare_printer send when klippy settles in shutdown), restart klipper, then `mco` (MCO1 on, DBGMCU_CR back to 0)
 uv run python tools/bench/lock.py hold -- <cmd...> # run a multi-step session under the bench lock
-uv run python tools/bench/suite.py [--quick | --group matrix|session] [--expect-fail NAME] [--tree DIR]  # regression: sync (DIR, default this tree) + 11 matrix rows (4 with --quick) + 12 session rows, table, ~/bench/suites/<ts>/summary.json
+uv run python tools/bench/suite.py [--quick | --group matrix|session|soak | --row NAME ...] [--expect-fail NAME] [--tree DIR]  # regression: sync (DIR, default this tree; matrix rows analyzed by DIR's analyzer and engine) + 11 matrix rows (4 with --quick) + 12 session rows, table, ~/bench/suites/<ts>/summary.json; soak rows only with --group soak or --row
 uv run python tools/bench/session.py <scenario> [--runs-dir DIR]   # one session scenario (session_scenarios.py) in one capture; prints the run dir
-uv run python tools/bench/session_check.py <run_dir> | --evidence FILE   # judge a session run: session_evidence.json + session_checks.json, exit 1 on any failed check
+uv run python tools/bench/session_check.py <run_dir> | --evidence FILE | --run-wide RUN_DIR   # judge a session run (or, --run-wide, a run.py run by the checks that need no timeline): session_evidence.json + session_checks.json, exit 1 on any failed check
+uv run python tools/bench/soak_gcode.py           # write the generated soak print, tools/bench/gcode/generated/soak.gcode (gitignored)
 uv run python tools/bench/deploy.py flash-target   # build F401 fw (f401.config) in out/bench-f401, flash via Pi SWD, restart klippy, check the reported build id, then `mco` (MCO1 on, DBGMCU_CR back to 0)
+uv run python tools/bench/deploy.py ensure-target  # flash-target only when the F401 reports another build than this tree's
+uv run python scripts/qualify.py run [REV] | status | bisect --row NAME   # the qualification tier ("Qualification")
 uv run python tools/bench/deploy.py flash-capture  # build capture-fw in its own target/, flash F407 via ST-Link, check the reported build id
 uv run python tools/bench/deploy.py config         # validate + push printer.cfg, FIRMWARE_RESTART
 uv run python tools/bench/deploy.py mco            # MCO1 = HSE/4 on PA8; halts the F401 core for a few ms and leaves DBGMCU_CR (sleep-debug bits) at 0 (capture-fw/PHASE2.md §3)
@@ -137,6 +140,23 @@ The e-stop recovery lands 5.5 s after the e-stop because the stepcompress barrie
 No session row is analyzed: the analyzer plans its reference from the gcode alone, without a bed mesh, as one uninterrupted print, and every session row has a mesh, an interruption or several prints. `scripts/preflight.py --mesh` (branch `preflight`) replays a meshed print through the planner but yields no step reference. `session_checks.json` names the reason (`not_analyzed`).
 
 `test_session_check.py` judges evidence cut from the 2026-11-15/16 interrupt runs (`fixtures/session/`: `main-*` from origin/main 0b90eeaf3, `pacer_runway-*` and `reactor_drain-*` from the fix branches): each bad run fails its check with its reason, each good run passes.
+
+## Soak rows (`suite.py --group soak`)
+
+Qualification's long rows, never in `--quick` or the default run. `soak_gcode.py` stacks `voron_first_layers.gcode`, then 8 times its layers above the first and `voron_dense_top_layers.gcode`, each block's Z shifted to continue 0.2 mm above the last: 93 k lines, Z 0.2–82.2 mm, 1283 s of stream on printer.cfg (`gcode_replay_bench`), generated on demand and never committed.
+
+| row | kind | config | timeline | judged by |
+|---|---|---|---|---|
+| soak_mesh_session | session | printer.cfg + macros, mesh | print, pause at 641 s (half the print), resume +12 s, the same print again 5 s after it ends | session checks, `second_print` and `pacer_reserve` (#843), and the run-wide checks |
+| soak_throttled | matrix | printer.cfg, `--host-cpus 2 --host-max-mhz 1500` | print | analyzer, and the run-wide checks (`session_check.py --run-wide`) |
+
+Run-wide checks (`SOAK_CHECKS`, evidence over the whole run window): `pacer_brakes` fails on any `pipe_drain` outside a commanded stop (from a pause, cancel, FIRMWARE_RESTART or e-stop to the next action), `pacer_reserve_growth` on any `pacer_reserve_raised` outside one (#843), `klippy_stats` when klippy's once-a-second Stats lines (host-py mirror) leave a gap > 2 s or come from more than one klippy session (#406); its detail carries memavail and klippy cputime over the run. A plain run also gets the journal, shutdown and reactor checks.
+
+## Qualification (`scripts/qualify.py`)
+
+PRs land on CI alone; a qualification gates a tag. `qualify.py run [REV]` checks REV (default origin/main) out clean in `~/.cache/pending-baselines/qualify/run` (cargo target `targets/run-*-qualify`), builds its engine, then holds the bench once for: deploy (`deploy.py sync`, `ensure-target`; the F401 must report REV's firmware build id), the full suite, the soak group, `throughput_pi.py` judged by `throughput_gate.py --qualify pi-window` (every unpinned config's 2-core window and every pinned one's on `PINNED_CORES` at or above 2.0×), and the calibration (`--qualify calibration`; past 10 days `throughput_recheck.py` refits it and qualify commits the baseline on a local `qualify-calibration-<rev>` branch to ship as a normal PR). It stops at the first failed stage. `--expect-fail ROW=ISSUE` is the only tolerance.
+
+A pass pushes the annotated tag `qualified-<UTC date>` (`-2`, `-3`… when that day already has one) whose message is the JSON summary: rev, firmware ids, suite summary path and tallies, expect-fail rows and issues, soak rows with their checks, Pi windows and the throughput stage's timing (sync, Pi build, each replay's stream and wall seconds), per-stage seconds. `~/bench/qualifications/<tag>/` keeps the summary, every stage's log and `pi_window.json`. A failure tags nothing and prints `qualify.py bisect --row NAME --bad REV` per failed row; `bisect` runs that row through `suite.py --row NAME --tree CANDIDATE` on the first-parent merges since the last tag, one hold, and prints the first bad merge and its PR. `qualify.py status` prints the debt (merges since the last tag, how many touch `rust/`, `src/`, `klippy/`, `tools/bench/`); `land-pr.sh` prints it in one line after each landing.
 
 ## Run dir (`~/bench/runs/<YYYYmmdd-HHMMSS>/`)
 

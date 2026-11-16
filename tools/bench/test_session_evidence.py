@@ -214,3 +214,58 @@ def test_a_run_dir_without_a_session_record_is_refused(tmp_path):
     (tmp_path / "run.json").write_text(json.dumps({"print_state": "complete"}))
     with pytest.raises(session_evidence.EvidenceError, match="no session"):
         session_evidence.collect(tmp_path)
+
+
+def _stats(t: float, memavail: int = 3_500_000, session: str = "k-1") -> str:
+    return _record(
+        t,
+        _msg=f"Stats {t:.1f}: gcodein=0 sysload=0.20 cputime=12.500 "
+        f"memavail={memavail} print_time=4.9 buffer_time=0.000",
+        session_id=session,
+    )
+
+
+def test_klippy_stats_come_from_every_host_py_file_in_the_window(tmp_path):
+    (tmp_path / "host-py.jsonl.1").write_text(_stats(START - 5) + _stats(START))
+    (tmp_path / "host-py.jsonl").write_text(
+        _stats(START + 1, memavail=3_400_000)
+        + _record(START + 1.5, _msg="print started", event="print.start")
+        + _stats(START + 60)
+    )
+    rows = session_evidence.klippy_stats(tmp_path, START, START + 10)
+    assert rows == [
+        {
+            "t": START,
+            "session_id": "k-1",
+            "memavail_kb": 3_500_000,
+            "cputime_s": 12.5,
+        },
+        {
+            "t": START + 1,
+            "session_id": "k-1",
+            "memavail_kb": 3_400_000,
+            "cputime_s": 12.5,
+        },
+    ]
+
+
+def test_a_plain_run_reduces_to_its_window_events_and_stats(tmp_path):
+    (tmp_path / "events").mkdir()
+    (tmp_path / "events" / "host-py.jsonl").write_text(
+        _stats(START + 1) + _stats(START + 2)
+    )
+    (tmp_path / "journal.txt").write_text("")
+    begin = datetime.fromtimestamp(START).isoformat()
+    end = datetime.fromtimestamp(START + 3).isoformat()
+    (tmp_path / "run.json").write_text(
+        json.dumps(
+            {"deployed": {"head": "abc"}, "host_start": begin, "host_end": end}
+        )
+    )
+    evidence = session_evidence.collect_run(tmp_path)
+    assert evidence["scenario"] is None
+    assert evidence["window"] == [START, START + 3]
+    assert [row["t"] for row in evidence["stats"]] == [START + 1, START + 2]
+    assert evidence["actions"] == evidence["spans"] == []
+    verdict = session_check.judge(evidence)
+    assert verdict["ok"], verdict

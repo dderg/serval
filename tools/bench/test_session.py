@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 import run
 import session
+import session_scenarios
 from session_scenarios import NEXT_PRINT_AFTER_S, SCENARIO_BY_NAME, Act
 
 START = 1_794_775_690.0
@@ -251,7 +252,7 @@ def test_a_failed_request_is_recorded_not_raised(bench):
 
 def test_a_print_that_never_ends_times_out_with_its_record_kept(bench):
     with pytest.raises(run.BenchError, match="start_print timed out"):
-        bench("print_twice", print_s=2 * session.TIMELINE_TIMEOUT_S)
+        bench("print_twice", print_s=2 * session_scenarios.TIMELINE_TIMEOUT_S)
     assert [a["act"] for a in bench.record["actions"]] == ["start_print"]
     assert bench.record["samples"][-1]["print"] == "printing"
 

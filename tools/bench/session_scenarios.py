@@ -2,7 +2,8 @@
 timeline (pause, resume, cancel, another print, firmware restart, e-stop,
 gcode), each judged by the checks session_check.py evaluates.
 
-session.py runs a scenario; suite.py --group session runs them all.
+session.py runs a scenario; suite.py --group session runs SCENARIOS,
+suite.py --group soak SOAK_SCENARIOS (long prints, run-wide checks).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import run
+import soak_gcode
 
 BENCH = Path(__file__).resolve().parent
 REPO = BENCH.parents[1]
@@ -36,6 +38,9 @@ PAUSE_THEN_CANCEL_S = 8.0
 DWELL_PENDING_S = 2.0
 ESTOP_RECOVERY_AFTER_S = 5.5
 RESTART_WATCH_S = 10.0
+TIMELINE_TIMEOUT_S = 1800.0
+SOAK_PAUSE_AFTER_S = soak_gcode.PLANNED_PRINT_S / 2
+SOAK_TIMELINE_TIMEOUT_S = 3 * soak_gcode.PLANNED_PRINT_S
 
 
 class Unit(enum.Enum):
@@ -68,6 +73,8 @@ PAUSE_CANCEL_STOP_S_UNTIL_860 = Bound(12.0, "#860")
 PAUSE_CANCEL_STOP_S_AFTER_860 = Bound(6.0, "#860")
 FIRMWARE_RESTART_STOP_S = Bound(6.0, "#844")
 EMERGENCY_STOP_S = Bound(0.1, "#406")
+STATS_GAP_S = Bound(2.0, "#406")
+PACER_ISSUE = "#843"
 REACTOR_STALL_ISSUE = "#406"
 
 
@@ -136,12 +143,31 @@ class ReserveBounded:
     bound: Bound = PACER_RESERVE_S
 
 
+@dataclass(frozen=True)
+class NoStrayBrakes:
+    issue: str = PACER_ISSUE
+
+
+@dataclass(frozen=True)
+class NoStrayReserveRaises:
+    issue: str = PACER_ISSUE
+
+
+@dataclass(frozen=True)
+class StatsSteady:
+    bound: Bound = STATS_GAP_S
+
+
 SpecificCheck = (
     StopsWithin
     | StopsWithinEngineAccount
     | SecondPrintLikeFirst
     | ReserveBounded
+    | NoStrayBrakes
+    | NoStrayReserveRaises
+    | StatsSteady
 )
+SOAK_CHECKS = (NoStrayBrakes(), NoStrayReserveRaises(), StatsSteady())
 
 
 @dataclass(frozen=True)
@@ -203,6 +229,7 @@ class Scenario:
     not_analyzed: NotAnalyzed
     config: Config = Config()
     checks: tuple[SpecificCheck, ...] = ()
+    timeline_timeout_s: float = TIMELINE_TIMEOUT_S
 
 
 def zigzag_moves() -> tuple[str, ...]:
@@ -387,4 +414,24 @@ SCENARIOS = (
         checks=(StopsWithin(Act.EMERGENCY_STOP, EMERGENCY_STOP_S),),
     ),
 )
-SCENARIO_BY_NAME = {scenario.name: scenario for scenario in SCENARIOS}
+SOAK_SCENARIOS = (
+    Scenario(
+        "soak_mesh_session",
+        PACER_ISSUE,
+        Gcode(source=soak_gcode.PATH, setup=(LOAD_WAVY_MESH,)),
+        (
+            START,
+            Action(Act.PAUSE, SOAK_PAUSE_AFTER_S),
+            Action(Act.RESUME, PARKED_PAUSE_HELD_S),
+            NEXT_PRINT,
+        ),
+        (Outcome.COMPLETE, Outcome.COMPLETE),
+        NotAnalyzed.MESH,
+        MESH_CONFIG,
+        checks=(SecondPrintLikeFirst(), ReserveBounded(), *SOAK_CHECKS),
+        timeline_timeout_s=SOAK_TIMELINE_TIMEOUT_S,
+    ),
+)
+SCENARIO_BY_NAME = {
+    scenario.name: scenario for scenario in (*SCENARIOS, *SOAK_SCENARIOS)
+}

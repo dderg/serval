@@ -25,9 +25,13 @@ A Pi 5 runs klippy against an STM32F401 printer MCU; an F407 board on this box r
 uv run python tools/bench/suite.py --quick      # first_layers, speed_ladder, epochs (~6 min)
 uv run python tools/bench/suite.py              # full matrix incl. dense_top and a throttled-host row, then the session rows
 uv run python tools/bench/suite.py --group session [--tree DIR]   # 12 one-klippy-session rows: bed mesh, print twice, pause/cancel/restart/e-stop latency, reactor stalls, e-stop recovery
+uv run python tools/bench/suite.py --group soak [--tree DIR]      # qualification's soak (~75 min): 21-min generated print twice in one mesh session with a pause, and once on a throttled host
+uv run python tools/bench/suite.py --row NAME [--row NAME] --tree DIR   # named rows of any group against a clean tree (bisect)
 ```
 
-Takes the lock once, syncs (`--tree DIR`: that worktree), runs + judges each row, prints a table, writes `~/bench/suites/<ts>/summary.json` (per row: print state/error, analyzer ok + failed checks, stalls, abs_max per motor, deployed identity, run dir) and exits non-zero if any row fails. `--expect-fail <row>` is the only way to tolerate a known failure; there is no built-in allowlist.
+Takes the lock once, syncs (`--tree DIR`: that worktree, also analyzed by its own analyzer and engine), runs + judges each row, prints a table, writes `~/bench/suites/<ts>/summary.json` (per row: print state/error, analyzer ok + failed checks, stalls, abs_max per motor, deployed identity, run dir) and exits non-zero if any row fails. `--expect-fail <row>` is the only way to tolerate a known failure; there is no built-in allowlist. The soak group is never part of the default run or `--quick`.
+
+**Qualification** (`scripts/qualify.py`, CLAUDE.md "Qualification"): `run [REV]` takes one hold for deploy + F401 identity, the full suite, the soak group, `throughput_pi.py` and the calibration, and tags `qualified-<UTC date>[-n]` on a pass; `status` prints the debt; `bisect --row NAME` finds the first bad merge. Print from the latest `qualified-*` tag, not from main.
 
 Session rows (`session_scenarios.py`, README "Session rows") keep one klippy session through a timeline of actions; `session.py <scenario>` runs one, `session_check.py <run_dir>` judges it (actions, print outcomes, journal aborts, shutdowns, `reactor_poller_late`, mid-print gaps, post-check moves, plus per-row stop latency, second-print duration and pacer reserve, each bound naming its issue). Failed checks carry their reason in `failed_checks`. Session rows are never analyzed (mesh, interruptions or several prints).
 
