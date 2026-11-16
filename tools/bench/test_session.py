@@ -300,3 +300,23 @@ def test_an_http_error_is_described_by_moonrakers_message():
         "HTTP 503: Klippy Disconnected"
     )
     assert session.describe_error(_http_error(b"<html>")) == "HTTP 503: <html>"
+
+
+def test_a_sample_is_stamped_when_its_reply_arrives(monkeypatch):
+    clock = Clock()
+    stalled_s = 88.5
+
+    def http(method, path, *args, **kwargs):
+        if path != session.STATUS_QUERY:
+            return {"state": "ready", "state_message": "Printer is ready"}
+        clock.sleep(stalled_s)
+        return {
+            "status": {
+                "print_stats": {"state": "printing", "message": ""},
+                "virtual_sdcard": {"file_position": 7},
+            }
+        }
+
+    monkeypatch.setattr(session, "time", clock)
+    monkeypatch.setattr(session.pi, "http", http)
+    assert session.sample()["t"] == START + stalled_s

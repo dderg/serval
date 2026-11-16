@@ -68,7 +68,6 @@ def describe_error(exc: BaseException) -> str:
 
 
 def sample() -> dict:
-    taken = time.time()
     unknown_print = {
         "print": None,
         "print_message": None,
@@ -78,22 +77,22 @@ def sample() -> dict:
         info = pi.http("GET", "/printer/info")
     except (OSError, ValueError) as exc:
         return {
-            "t": taken,
+            "t": time.time(),
             "klippy": UNREACHABLE,
             "klippy_message": describe_error(exc),
             **unknown_print,
         }
     state = {
-        "t": taken,
         "klippy": info["state"],
         "klippy_message": info.get("state_message", "").split("\n")[0],
     }
     try:
         status = pi.http("GET", STATUS_QUERY)["status"]
     except (OSError, ValueError):
-        return {**state, **unknown_print}
+        return {"t": time.time(), **state, **unknown_print}
     stats = status["print_stats"]
     return {
+        "t": time.time(),
         **state,
         "print": stats["state"],
         "print_message": stats.get("message"),

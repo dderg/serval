@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import session_check
+from session_scenarios import DWELL_PENDING_S
 
 FIXTURES = Path(__file__).with_name("fixtures") / "session"
 
@@ -172,3 +173,17 @@ def test_a_failed_action_request_fails_the_actions_check():
     verdict = _verdicts(evidence)["actions"]
     assert not verdict.ok
     assert "cancel at +20.1 s: HTTP 503" in verdict.detail
+
+
+def test_an_estop_timed_from_a_stalled_reactors_reply_finds_no_motion():
+    evidence = _evidence("main-estop_g4_stalled")
+    verdicts = _verdicts(evidence)
+    assert "late_s 88.509" in verdicts["reactor"].detail
+    [stall] = [
+        e for e in evidence["events"] if e["event"] == "reactor_poller_late"
+    ]
+    stop = next(a for a in evidence["actions"] if a["act"] == "emergency_stop")
+    stop["sent"] = stall["t"] + DWELL_PENDING_S
+    verdict = _verdicts(evidence)["stop_after_emergency_stop"]
+    assert not verdict.ok
+    assert "no motion in flight" in verdict.detail

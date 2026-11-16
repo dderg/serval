@@ -306,7 +306,7 @@ SCENARIOS = (
     ),
     Scenario(
         "end_print_mesh",
-        REACTOR_STALL_ISSUE,
+        "#362",
         Gcode(
             limit=SHORT_PRINT_LINES,
             setup=(LOAD_WAVY_MESH,),

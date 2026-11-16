@@ -90,3 +90,13 @@ def test_a_gcode_describes_its_source_and_cut():
     assert Gcode(limit=200).describe() == (
         "tools/sim/gcode/voron_first_layers.gcode[:200]"
     )
+
+
+def test_end_print_clears_the_mesh_with_motion_still_queued():
+    scenario = SCENARIO_BY_NAME["end_print_mesh"]
+    text = scenario.config.text()
+    end_print = text.split("[gcode_macro END_PRINT]")[1].split("\n[")[0]
+    body = [line.strip() for line in end_print.splitlines()[2:] if line]
+    assert "M400" not in body
+    assert "BED_MESH_CLEAR" in body
+    assert scenario.gcode.lines()[-1] == "END_PRINT"
