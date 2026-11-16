@@ -49,6 +49,8 @@ On hardware (lock-taking, re-entrant under `lock.py hold`): `gcode.py "G1 X10" .
 
 Planner-side tools for changes the analyzer's reference depends on (it plans with the same engine): `scripts/review_baselines.py --pr N` (physical review of moved snapshot cases), `scripts/accept_reviewed.py N` (accept + commit baselines after review), `scripts/bench_compare.py A B` (interleaved replay A/B; trust its CPU row on a busy box), `scripts/corpus.sh` (59-case planner corpus), `scripts/integrate_stack.py 443 444 --run CMD` (try a PR stack on a throwaway worktree before `deploy.py sync --tree`). `scripts/land-pr.sh` runs from the branch's own worktree and re-updates the PR branch when main moves.
 
+Before a real print: `uv run python scripts/preflight.py PRINT.gcode --config printer.cfg` plans the exact file offline under the printer's config, macros and bed mesh: PASS/FAIL with the failing line, the realtime factor and the Pi 5 worst-window estimate (`docs/rewrite/preflight.md`).
+
 ## Reading analysis.json
 
 `ok` = all five `checks`:

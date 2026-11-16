@@ -23,6 +23,8 @@ SIM_JITTER=3 tools/sim/run.sh test # pin the container + 3 bursty burners to one
 
 Branch comparison: run the same mode with and without `--branch <base>`; each branch gets its own image tag (`kalico-sim-<branch>`) and its own BuildKit compile caches, so parallel builds don't clobber each other.
 
+Planner-only check of a print without Docker: `uv run python scripts/preflight.py PRINT.gcode --config printer.cfg` (`docs/rewrite/preflight.md`); it does not cover what the sim does (MCU, homing, heaters, host runtime).
+
 ## Writing a new scenario test
 
 Tests live in `tools/sim/tests/` and use the `sim_world` fixture from `tools/sim/conftest.py` (marker `needs_elf`). A test boots a printer from generated config text and drives it over klippy's API socket:

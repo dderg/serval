@@ -25,6 +25,8 @@ SIM_JITTER=3 tools/sim/run.sh test # pin the container + 3 bursty burners to one
 
 Every build is tagged `kalico-sim-<branch>` (the worktree's branch, or `--branch`'s argument), so agents/sessions on different worktrees build and test in parallel without clobbering each other's images.
 
+Planner-only check of a print without Docker: `uv run python scripts/preflight.py PRINT.gcode --config printer.cfg` (`docs/rewrite/preflight.md`); it does not cover what the sim does (MCU, homing, heaters, host runtime).
+
 ## Getting at a run's logs
 
 The container is `--rm`, so each world's `tmp_path` — `klippy.log`,

@@ -1094,7 +1094,8 @@ impl MotorGroup {
                         reason: "analytic motor group requires terms",
                     });
                 }
-                if matches!(&span.surface, SurfaceMode::Variable(_)) {
+                let reads_z = terms.iter().any(|term| term.source_axis == 2);
+                if reads_z && matches!(&span.surface, SurfaceMode::Variable(_)) {
                     return Err(ContinuousError::VariableSurfaceBeforeDispatch);
                 }
                 checked_clamped_time(t_start, span.t_start, span.t_end)?;
@@ -1153,11 +1154,6 @@ impl MotorGroup {
                         reason: "motor scale must be finite",
                     });
                 }
-                if let ContinuousAxis::Analytic { span, .. } = &term.axis {
-                    if matches!(&span.surface, SurfaceMode::Variable(_)) {
-                        return Err(ContinuousError::VariableSurfaceBeforeDispatch);
-                    }
-                }
                 validate_axis_for_dispatch(&term.axis)?;
                 let (start, end) = term.axis.domain();
                 checked_clamped_time(t_start, start, end)?;
@@ -1169,8 +1165,8 @@ impl MotorGroup {
 }
 fn validate_axis_for_dispatch(axis: &ContinuousAxis) -> Result<(), ContinuousError> {
     match axis {
-        ContinuousAxis::Analytic { span, .. } => {
-            if matches!(&span.surface, SurfaceMode::Variable(_)) {
+        ContinuousAxis::Analytic { span, axis } => {
+            if *axis == 2 && matches!(&span.surface, SurfaceMode::Variable(_)) {
                 return Err(ContinuousError::VariableSurfaceBeforeDispatch);
             }
         }
@@ -2389,9 +2385,6 @@ fn analytic_group_bounds<I>(
 where
     I: Iterator<Item = (usize, f64)> + Clone,
 {
-    if matches!(&span.surface, SurfaceMode::Variable(_)) {
-        return Err(ContinuousError::VariableSurfaceBeforeDispatch);
-    }
     let local0 = span.phase_time_within(checked_clamped_time(t0, span.t_start, span.t_end)?);
     let local1 = span.phase_time_within(checked_clamped_time(t1, span.t_start, span.t_end)?);
     if local1 < local0 {
@@ -2433,6 +2426,9 @@ where
         } else if axis >= span.axis_start_positions.len() {
             return Err(ContinuousError::AxisOutsideMove { axis });
         }
+    }
+    if spatial[2] != 0.0 && matches!(&span.surface, SurfaceMode::Variable(_)) {
+        return Err(ContinuousError::VariableSurfaceBeforeDispatch);
     }
     let (q_min, q_max, q_prime_abs) = projection_bounds(
         span.source.segment.spatial.as_ref(),
