@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use geometry::GcodePos;
 use planner_config::{CartesianLimits, RuntimeLimits};
 
 mod refused;
@@ -116,6 +117,23 @@ pub enum WaypointError {
     InchUnits { line: u32 },
     #[error("line {line}: Unknown g-code state: {name}")]
     UnknownGcodeState { line: u32, name: Box<str> },
+}
+
+impl WaypointError {
+    /// klippy raises this error itself, so a print stops at the line; the
+    /// others are G-code the snapshot cannot plan.
+    #[must_use]
+    pub fn stops_the_live_print(&self) -> bool {
+        matches!(
+            self,
+            Self::InvalidSpeed { .. }
+                | Self::InvalidParam { .. }
+                | Self::CornerBudgetAliases { .. }
+                | Self::Unhomed { .. }
+                | Self::InchUnits { .. }
+                | Self::UnknownGcodeState { .. }
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -646,10 +664,18 @@ fn g4_dwell_s(params: &gcode::Params, line: u32) -> Result<f64, WaypointError> {
 struct Interpreter<'a> {
     toolhead: Toolhead<'a>,
     gcode_move: GCodeMove,
-    waypoints: Vec<Waypoint>,
+    trace: GcodeTrace,
 }
 
 impl Interpreter<'_> {
+    fn record(&mut self, waypoint: Option<Waypoint>, line: u32) {
+        let Some(waypoint) = waypoint else {
+            return;
+        };
+        self.trace.waypoints.push(waypoint);
+        self.trace.lines.push(line);
+    }
+
     fn submit(&mut self, speed: f64, names_position: bool, line: u32) -> Result<(), WaypointError> {
         let waypoint = self.toolhead.move_to(
             self.gcode_move.state.last_position,
@@ -657,7 +683,7 @@ impl Interpreter<'_> {
             names_position,
             line,
         )?;
-        self.waypoints.extend(waypoint);
+        self.record(waypoint, line);
         Ok(())
     }
 
@@ -736,7 +762,7 @@ impl Interpreter<'_> {
                 let anchor = self
                     .toolhead
                     .set_kinematic_position(&args, self.gcode_move.state.speed)?;
-                self.waypoints.extend(anchor);
+                self.record(anchor, line_no);
                 self.gcode_move.state.last_position = self.toolhead.commanded;
                 None
             }
@@ -764,18 +790,41 @@ const MIRRORED_EXTENDED: [&str; 6] = [
     "RESTORE_GCODE_STATE",
 ];
 
+/// The waypoints a G-code file yields, each with the 1-based source line
+/// that submitted it: `lines[i]` is the line of `waypoints[i]`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GcodeTrace {
+    pub waypoints: Vec<Waypoint>,
+    pub lines: Vec<u32>,
+}
+
 pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>, WaypointError> {
+    trace_gcode(text, config, GcodePos([0.0; 3])).map(|trace| trace.waypoints)
+}
+
+/// [`parse_gcode`] from a toolhead standing at `start` before the first
+/// line, as klippy's toolhead and `GCodeMove` both hold it after a bed mesh
+/// activation renamed its Z (`Motion.rebase_gcode_z`), with each waypoint's
+/// source line.
+pub fn trace_gcode(
+    text: &str,
+    config: &CartesianLimits,
+    start: GcodePos,
+) -> Result<GcodeTrace, WaypointError> {
+    let [x, y, z] = start.0;
+    let mut gcode_move = GCodeMove::new();
+    gcode_move.state.last_position = [x, y, z, 0.0];
     let mut interpreter = Interpreter {
         toolhead: Toolhead {
             config,
             runtime: RuntimeLimits::default(),
-            commanded: [0.0; 4],
+            commanded: gcode_move.state.last_position,
             anchored: false,
             homed: [true; 3],
             rest_s: None,
         },
-        gcode_move: GCodeMove::new(),
-        waypoints: Vec::new(),
+        gcode_move,
+        trace: GcodeTrace::default(),
     };
     for line in gcode::lines(text) {
         let line = line?;
@@ -788,7 +837,7 @@ pub fn parse_gcode(text: &str, config: &CartesianLimits) -> Result<Vec<Waypoint>
             gcode::Head::Extended(name) => interpreter.extended(&line, name)?,
         }
     }
-    Ok(interpreter.waypoints)
+    Ok(interpreter.trace)
 }
 
 #[cfg(test)]
