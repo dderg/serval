@@ -648,6 +648,7 @@ class Motion:
         )
 
     def register_lookahead_callback(self, callback):
+        self._sync_print_time()
         fence_id = self.engine.fence_start(False)
         self._lookahead_fences.append([fence_id, callback])
         if len(self._lookahead_fences) == 1:
