@@ -159,6 +159,7 @@ def python(
         capture_output=True,
         text=True,
         timeout=timeout_s,
+        pass_fds=lock.inherited_fds(),
     )
 
 
@@ -387,18 +388,23 @@ def main() -> None:
     build_local_engine()
     suite_dir.mkdir(parents=True)
     with lock.bench_lock(args.lock_timeout, command=" ".join(sys.argv)):
-        lock.export_holder_token()
         tree = [] if args.tree is None else ["--tree", str(args.tree)]
         sync = python("deploy.py", "sync", *tree, timeout_s=1800)
         if sync.returncode != 0:
             sys.exit(f"sync failed: {last_lines(sync.stderr, 8)}")
+        synced = pi.read_deployed()
         benchmark = query_step_benchmark()
         rows = []
+        aborted = None
         for row in selected:
+            aborted = pi.foreign_deploy(synced)
+            if aborted is not None:
+                break
             print(f"running {row.name} ...", flush=True)
             result = run_row(row, suite_dir, args.lock_timeout)
             result["expected_fail"] = row.name in args.expect_fail
             rows.append(result)
+        aborted = aborted or pi.foreign_deploy(synced)
     summary = {
         "quick": args.quick,
         "group": args.group,
@@ -406,6 +412,7 @@ def main() -> None:
         "suite_dir": str(suite_dir),
         "rows": rows,
         "step_benchmark": benchmark,
+        "aborted": aborted,
     }
     (suite_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print_table(rows)
@@ -416,6 +423,8 @@ def main() -> None:
         + ("ok" if benchmark["within_band"] else "OUT OF BAND")
     )
     print(f"summary: {suite_dir / 'summary.json'}")
+    if aborted is not None:
+        sys.exit(f"suite aborted, its rows are void: {aborted}")
     sys.exit(exit_status(rows) or int(not benchmark["within_band"]))
 
 

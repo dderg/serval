@@ -81,7 +81,7 @@ def test_a_failed_engine_build_is_fatal_with_its_output(monkeypatch):
         suite.build_local_engine()
 
 
-def _run_suite(monkeypatch, tmp_path, argv):
+def _run_suite(monkeypatch, tmp_path, argv, foreign=lambda _row: None):
     order = []
     monkeypatch.setattr(suite, "SUITES_DIR", tmp_path)
     monkeypatch.setattr(sys, "argv", ["suite.py", *argv])
@@ -91,7 +91,10 @@ def _run_suite(monkeypatch, tmp_path, argv):
     monkeypatch.setattr(
         suite.lock, "bench_lock", lambda *a, **k: contextlib.nullcontext()
     )
-    monkeypatch.setattr(suite.lock, "export_holder_token", lambda: None)
+    monkeypatch.setattr(suite.pi, "read_deployed", lambda: {"head": "abc"})
+    monkeypatch.setattr(
+        suite.pi, "foreign_deploy", lambda _synced: foreign(len(order))
+    )
     monkeypatch.setattr(
         suite,
         "python",
@@ -109,8 +112,9 @@ def _run_suite(monkeypatch, tmp_path, argv):
 
     monkeypatch.setattr(suite, "run_row", run_row)
     monkeypatch.setattr(suite, "print_table", lambda rows: None)
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exited:
         suite.main()
+    order.append(exited.value.code)
     return order
 
 
@@ -118,7 +122,37 @@ def test_the_suite_builds_the_engine_once_before_any_row(monkeypatch, tmp_path):
     order = _run_suite(monkeypatch, tmp_path, [])
     assert order[0] == "build"
     assert order.count("build") == 1
-    assert order[1:] == ["deploy.py", *(row.name for row in suite.ROWS)]
+    assert order[1:-1] == ["deploy.py", *(row.name for row in suite.ROWS)]
+
+
+def test_a_bench_another_session_redeployed_aborts_the_suite_loudly(
+    monkeypatch, tmp_path
+):
+    taken = "the Pi runs /wt/b: another session took the bench"
+    rows_before_theft = 3
+    order = _run_suite(
+        monkeypatch,
+        tmp_path,
+        ["--group", "session"],
+        lambda done: taken if done > rows_before_theft else None,
+    )
+    assert order[1:-1] == [
+        "deploy.py",
+        *(scenario.name for scenario in suite.SCENARIOS[:2]),
+    ]
+    assert order[-1] == f"suite aborted, its rows are void: {taken}"
+    [summary] = tmp_path.glob("*/summary.json")
+    assert json.loads(summary.read_text())["aborted"] == taken
+
+
+def test_bench_tools_started_by_the_suite_inherit_the_lock(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(suite.lock, "inherited_fds", lambda: (7,))
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **kw: spawned.append(kw) or None
+    )
+    suite.python("run.py", timeout_s=1.0)
+    assert spawned[0]["pass_fds"] == (7,)
 
 
 def test_the_full_suite_holds_both_groups():
@@ -133,7 +167,7 @@ def test_the_session_group_runs_every_scenario_and_nothing_else(
 ):
     order = _run_suite(monkeypatch, tmp_path, ["--group", "session"])
     names = [scenario.name for scenario in suite.SCENARIOS]
-    assert order[1:] == ["deploy.py", *names]
+    assert order[1:-1] == ["deploy.py", *names]
 
 
 def test_quick_stays_the_quick_matrix_rows():

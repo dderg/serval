@@ -15,7 +15,7 @@ A Pi 5 runs klippy against an STM32F401 printer MCU; an F407 board on this box r
   uv run python tools/bench/lock.py hold -- bash my_session.sh
   ```
 
-  Children inherit `BENCH_LOCK_TOKEN` and re-enter the lock; anything else waits. Never kill another holder.
+  Children inherit `BENCH_LOCK_TOKEN` and re-enter the lock; anything else waits. They also inherit the locked file description, so the lock outlives a killed holder until its last child exits. `~/bench/.lock` names the holder (pid, command, cwd, worktree, start). A run whose deploy record changed under it fails, and the suite aborts when the Pi no longer runs the tree it synced. Never kill another holder.
 - **Always `sync` first.** The Pi runs whatever was last synced; `run.json` → `deployed` (HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree) says which code a run tested. Another agent's uncommitted edits in your worktree ship with `sync`. To test a clean ref: `git worktree add /tmp/x <ref>` then `deploy.py sync --tree /tmp/x`.
 - Offline-only work needs no lock. Fail loudly: don't patch production code from the bench to make a run pass.
 

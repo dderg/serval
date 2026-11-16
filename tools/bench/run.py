@@ -28,6 +28,7 @@ from pi import (
     REPO_CFG,
     BenchError,
     enable_mco,
+    foreign_deploy,
     http,
     klipper_journal,
     prepare_printer,
@@ -319,6 +320,11 @@ def execute(
         except Exception as exc:
             failure.add_note(f"cancelling the print also failed: {exc!r}")
     ended = time.time()
+    foreign = foreign_deploy(summary["deployed"])
+    if foreign is not None and failure is not None:
+        failure.add_note(foreign)
+    elif foreign is not None:
+        failure = BenchError(foreign)
 
     scp_from_pi(f"{PI_LOGS}/klippy.log", run_dir / "klippy.log")
     scp_from_pi(f"{PI_LOGS}/events", run_dir / "events", recursive=True)

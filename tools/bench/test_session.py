@@ -155,12 +155,13 @@ def test_a_scenario_run_keeps_its_session_in_run_json(
     def start_run(lines, runs_dir, config_text, source):
         run_dir.mkdir()
         assert "[bed_mesh]" not in config_text
-        return run_dir, "bench.gcode", dict(source)
+        return run_dir, "bench.gcode", {**source, "deployed": {"head": "a"}}
 
     monkeypatch.setattr(run, "start_run", start_run)
     monkeypatch.setattr(run, "Capture", RecordingCapture)
     monkeypatch.setattr(run.time, "sleep", lambda _s: None)
     monkeypatch.setattr(run, "scp_from_pi", lambda *_a, **_k: None)
+    monkeypatch.setattr(run, "foreign_deploy", lambda _expected: None)
     monkeypatch.setattr(run, "klipper_journal", lambda _since: "")
     assert session.run_scenario(scenario, tmp_path) == run_dir
     info = json.loads((run_dir / "run.json").read_text())

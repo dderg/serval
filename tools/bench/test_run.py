@@ -30,7 +30,11 @@ def bench(monkeypatch):
     monkeypatch.setattr(
         run, "klipper_journal", lambda since: fetched.append("journal") or ""
     )
+    monkeypatch.setattr(run, "foreign_deploy", lambda _expected: None)
     return fetched
+
+
+DEPLOYED = {"worktree": "/wt/a", "head": "abc", "timestamp": "t0"}
 
 
 def test_a_failing_cancel_does_not_hide_why_the_print_failed(
@@ -47,7 +51,7 @@ def test_a_failing_cancel_does_not_hide_why_the_print_failed(
     with pytest.raises(run.BenchError, match="capture stalled") as raised:
         run.execute(
             tmp_path,
-            {},
+            {"deployed": DEPLOYED},
             False,
             False,
             False,
@@ -105,9 +109,37 @@ def test_a_completed_run_fetches_the_dispatch_record_it_asked_for(
 ):
     monkeypatch.setattr(run, "poll_print", lambda *_a: {"state": "complete"})
     run.execute(
-        tmp_path, {}, False, False, True, None, run.print_file("x.gcode", 1.0)
+        tmp_path,
+        {"deployed": DEPLOYED},
+        False,
+        False,
+        True,
+        None,
+        run.print_file("x.gcode", 1.0),
     )
     assert f"{run.PI_DISPATCH_RECORD_DIR}/dispatch_record_*.bin" in bench
+
+
+def test_a_run_another_session_redeployed_under_fails_without_cancelling(
+    tmp_path, monkeypatch, bench
+):
+    cancelled = []
+    foreign = "the Pi runs /wt/b head def: another session took the bench"
+    monkeypatch.setattr(run, "poll_print", lambda *_a: {"state": "complete"})
+    monkeypatch.setattr(run, "foreign_deploy", lambda _expected: foreign)
+    monkeypatch.setattr(run, "cancel_active_print", lambda: cancelled.append(1))
+    with pytest.raises(run.BenchError, match="another session took"):
+        run.execute(
+            tmp_path,
+            {"deployed": DEPLOYED},
+            False,
+            False,
+            False,
+            None,
+            run.print_file("x.gcode", 1.0),
+        )
+    assert cancelled == []
+    assert "journal" in bench
 
 
 def test_each_requested_recording_gets_its_own_pi_directory():

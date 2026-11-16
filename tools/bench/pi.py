@@ -132,6 +132,13 @@ def firmware_restart() -> None:
 
 
 DEPLOY_RECORD = "klipper/.bench-deploy.json"
+DEPLOY_IDENTITY = (
+    "worktree",
+    "head",
+    "diff_sha256",
+    "rust_build_id",
+    "timestamp",
+)
 
 
 def write_deployed(identity: dict) -> None:
@@ -147,6 +154,18 @@ def write_deployed(identity: dict) -> None:
 
 def read_deployed() -> dict:
     return json.loads(ssh(f"cat {DEPLOY_RECORD}"))
+
+
+def foreign_deploy(expected: dict) -> str | None:
+    current = read_deployed()
+    if all(current.get(key) == expected.get(key) for key in DEPLOY_IDENTITY):
+        return None
+    return (
+        f"the Pi runs {current.get('worktree')} head "
+        f"{str(current.get('head'))[:9]} synced {current.get('timestamp')}, "
+        f"not {expected.get('worktree')} head {str(expected.get('head'))[:9]} "
+        f"synced {expected.get('timestamp')}: another session took the bench"
+    )
 
 
 def flashed_firmware() -> dict:
