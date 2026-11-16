@@ -436,6 +436,11 @@ class Session:
             )
 
     def _finish_print(self, index: int, start_ns: int) -> None:
+        """The body ended (done pin): END_PRINT, if any, runs to the end of
+        the file with no M400 after it, so the stream ends in the pacer's
+        closing brake, as test_print_stats_completes_with_the_motion
+        requires of a print without a trailing M400."""
+        body_end_ns = self._now_ns()
         self._settle_recheck()
         self.watching = False
         if self.next_probe != len(self.probes):
@@ -448,6 +453,11 @@ class Session:
         except SimError as error:
             raise Violation(Check.PRINT_OUTCOME, str(error)) from error
         self._gcode("M400", Check.PRINT_OUTCOME)
+        self._allow_brakes(body_end_ns)
+        self.notes.append(
+            f"print {index}: start {start_ns / NS_PER_S:.3f} s, body end "
+            f"{body_end_ns / NS_PER_S:.3f} s, complete {self._now_ns() / NS_PER_S:.3f} s"
+        )
         self._check_final_position()
         self._check_rest(
             self._still_steps("print end"), self.final_position, "print end"
