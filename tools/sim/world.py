@@ -200,6 +200,17 @@ class SimError(Exception):
     pass
 
 
+SHUTDOWN_MARKERS = ("shutdown:", "transition to shutdown state:")
+
+
+def is_shutdown_line(line: str) -> bool:
+    """An MCU shutdown (`MCU 'mcu' shutdown: Timer too close`) or klippy's
+    own transition (`Transition to shutdown state: Internal error ...`),
+    which names no MCU and has no `shutdown:` in it."""
+    lowered = line.lower()
+    return any(marker in lowered for marker in SHUTDOWN_MARKERS)
+
+
 def vtime_shm_name_alloc() -> str:
     return f"/vtime-{os.getpid()}-{next(_vtime_shm_counter)}"
 
@@ -1303,7 +1314,7 @@ class SimWorld:
                     else ""
                 )
                 for line in lines:
-                    if "shutdown:" in line.lower():
+                    if is_shutdown_line(line):
                         raise SimError(f"printer shutdown: {line.strip()}")
             ps = self.status({"print_stats": None}).get("print_stats", {})
             state = ps.get("state", "")
@@ -1439,7 +1450,7 @@ class SimWorld:
 
     def shutdown_line(self) -> Optional[str]:
         for line in self.klippy_log_text().splitlines():
-            if "shutdown:" in line.lower():
+            if is_shutdown_line(line):
                 return line.strip()
         return None
 
