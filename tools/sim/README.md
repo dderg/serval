@@ -180,7 +180,7 @@ SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
   X=18/Y=7/Z=15.
 - Each SimWorld allocates its own virtual-clock segment
   (`/dev/shm/vtime-<pid>-<n>`, passed to the shims via `VTIME_SHM_NAME`),
-  so worlds never share state. Local `run.sh test` runs 4 pytest-xdist
+  so worlds never share state. Local `run.sh test` runs 8 pytest-xdist
   workers by default and CI shards run sequentially; `SIM_TEST_JOBS=N`
   overrides (0 = sequential), and `SIM_TEST_TARGETS` narrows the run to
   specific test files (how the CI shards split the suite across runners).
