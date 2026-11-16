@@ -83,7 +83,9 @@ Two frequencies exist per MCU and they are not interchangeable:
   toolhead to rest.
 - `engine.dwell_until(print_time, mcu_handle)` — hold the next segment until
   an absolute print_time. A parked stream re-anchors forward to it with no
-  drain; a stream in motion is drained first. Anything scheduled at a
+  drain; a stream in motion is drained first. The wrapper stages it with
+  `dwell_until_start` and waits on `pipeline_request_poll` between reactor
+  turns, as `submit_dwell` and the mesh swaps do. Anything scheduled at a
   floored `get_last_move_time()` that later motion must not precede (enable
   switches and their settle) holds the stream with
   `toolhead.dwell_until(print_time)`.

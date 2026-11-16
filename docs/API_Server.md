@@ -265,8 +265,10 @@ This is similar to the "gcode/restart" endpoint - it implements the
 G-Code "FIRMWARE_RESTART" command. For example:
 `{"id": 123, "method": "gcode/firmware_restart"}`
 
-As with the "gcode/script" endpoint, this endpoint only completes
-after any pending G-Code commands complete.
+Unlike "gcode/restart", this endpoint does not wait behind pending G-Code
+commands, and the restart does not wait for queued moves: every
+micro-controller is reset at once and motion still buffered is
+discarded, as after an emergency stop.
 
 ### gcode/subscribe_output
 

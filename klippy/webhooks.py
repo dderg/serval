@@ -530,7 +530,7 @@ class GCodeHelper:
         self.gcode.run_script("restart")
 
     def _handle_firmware_restart(self, web_request):
-        self.gcode.run_script("firmware_restart")
+        self.gcode.request_restart("firmware_restart")
 
     def _output_callback(self, msg):
         for cconn, template in list(self.clients.items()):
