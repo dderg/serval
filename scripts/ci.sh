@@ -95,12 +95,19 @@ docker_image() {
 
 # Runs the container as the invoking user with every uv/python write target
 # outside the bind-mounted checkout, so a job never leaves root-owned files
-# (.venv, __pycache__) in the worktree.
+# (.venv, __pycache__) in the worktree. uv's wheel cache and its interpreters
+# persist on the host (content-addressed, locked for concurrent runs): in the
+# tmpfs, every run downloaded cpython and ~30 wheels again (24 s of `ci.sh
+# sim`'s 38). The venv stays per run.
+CI_UV_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/serval-ci-uv"
+mkdir -p "$CI_UV_CACHE" && touch "$CI_UV_CACHE"
 DOCKER_RUN_AS_USER=(
     --user "$(id -u):$(id -g)"
     --tmpfs /tmp:exec,mode=1777,size=4g
+    -v "$CI_UV_CACHE:/uv-cache"
     -e HOME=/tmp/ci-home
-    -e UV_CACHE_DIR=/tmp/ci-home/uv-cache
+    -e UV_CACHE_DIR=/uv-cache/cache
+    -e UV_PYTHON_INSTALL_DIR=/uv-cache/python
     -e UV_PROJECT_ENVIRONMENT=/tmp/ci-home/venv
     -e UV_LINK_MODE=copy
     -e PYTHONDONTWRITEBYTECODE=1

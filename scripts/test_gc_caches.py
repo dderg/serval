@@ -28,6 +28,15 @@ def test_under_the_cap_nothing_is_dropped(tmp_path):
     assert gc.over_scratch_cap(dirs) == []
 
 
+def test_the_uv_cache_goes_only_past_its_size_cap(tmp_path):
+    cache = tmp_path / "serval-ci-uv"
+    cache.mkdir()
+    (cache / "wheel").write_bytes(b"\0" * 8192)
+    assert gc.over_size_cap(cache, 1 / gc.GIB) == [cache]
+    assert gc.over_size_cap(cache, 1.0) == []
+    assert gc.over_size_cap(tmp_path / "missing", 1.0) == []
+
+
 def image_listing(*rows):
     return [f"{name}\t{created}" for name, created in rows]
 
