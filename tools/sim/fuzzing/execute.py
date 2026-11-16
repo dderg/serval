@@ -22,6 +22,10 @@ STEP_TAP_DIR_ENV = "SERVAL_STEP_TAP_DIR"
 STEP_TAP_SUBDIR = "step_tap"
 
 
+class Stuck(Exception):
+    """The parent's wall budget ran out: the traceback names the wait."""
+
+
 def _boot(spec, world) -> str:
     config = printer.render_config(
         spec, world.h7_pty, world.f4_pty, str(world.gcode_dir)
@@ -45,6 +49,9 @@ def _run_session(chosen: Scenario, world, notes: list) -> tuple:
         return session, None
     except Violation as violation:
         return session, violation
+    except Stuck:
+        trace = traceback.format_exc()[-EVIDENCE_TAIL:]
+        return session, Violation(Check.STUCK, trace)
     except SimError as error:
         check = Check.WEDGE if "wedged" in str(error) else Check.HARNESS
         return session, Violation(check, str(error))

@@ -63,6 +63,7 @@ class Check(enum.Enum):
     IDLE_TIMEOUT = "idle_timeout"
     WEDGE = "wedge"
     HARNESS = "harness"
+    STUCK = "stuck"
 
 
 ROOT_CAUSES = (Check.PANIC, Check.FATAL_EVENT, Check.UNCOMMANDED_SHUTDOWN)

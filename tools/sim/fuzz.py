@@ -38,6 +38,7 @@ from tools.sim.fuzzing.execute import FAIL, PASS  # noqa: E402
 
 DEFAULT_JOBS = 8
 WORKER_TIMEOUT_S = 900
+STUCK_GRACE_S = 120
 RESULT_FILE = "result.json"
 REPRO_FILE = "repro.txt"
 MINIMIZED_DIR = "minimized"
@@ -83,7 +84,12 @@ def _parse(argv) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _stuck(signum, frame) -> None:
+    raise execute.Stuck(f"worker over its {WORKER_TIMEOUT_S} s wall budget")
+
+
 def run_worker(directory: pathlib.Path) -> dict:
+    signal.signal(signal.SIGTERM, _stuck)
     chosen = scenario.load(directory)
     with tempfile.TemporaryDirectory(prefix=f"fz{chosen.seed}-") as tmp:
         return execute.run_scenario(chosen, pathlib.Path(tmp), directory)
@@ -106,8 +112,12 @@ def _spawn(directory: pathlib.Path) -> dict:
     try:
         process.wait(timeout=WORKER_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+        process.terminate()
+        try:
+            process.wait(timeout=STUCK_GRACE_S)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
     log.close()
     result_path = directory / RESULT_FILE
     if result_path.exists():
