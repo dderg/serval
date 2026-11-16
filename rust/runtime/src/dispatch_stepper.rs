@@ -24,8 +24,6 @@ unsafe extern "C" {
     fn phase_stepping_write_xdirect(motor_idx: u8, coil_a: i16, coil_b: i16);
 }
 
-pub const DISPLACEMENT_THRESHOLD_MM: f32 = 1e-4;
-
 #[cfg(feature = "motion-module-stepper")]
 pub(crate) fn ramp_phase_offset(stepper: &crate::stepping_state::StepperRef, max_per_sample: i32) {
     if max_per_sample == 0 {

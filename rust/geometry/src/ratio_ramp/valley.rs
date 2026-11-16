@@ -52,14 +52,6 @@ pub fn valley_reach(speed: f64, rate: f64) -> f64 {
     leader_reach(speed, rate, VALLEY_RAMP_TIME_S)
 }
 
-/// The widest a crawl valley's side is where the leaders' path
-/// acceleration at their slowest point is at most `rate`: a crawl is laid
-/// under [`ADVANCE_VALLEY_SPEED_MM_S`].
-#[must_use]
-pub fn widest_crawl_reach(rate: f64) -> f64 {
-    valley_reach(ADVANCE_VALLEY_SPEED_MM_S, rate)
-}
-
 /// The share of a crawl's leaders' reach ([`valley_reach`]) a ratio step
 /// at the crawl, or inside its valley's sides, ramps within either side of
 /// it. The reach at a crawl of speed `v` is at least `v·τ/2`, `τ` the

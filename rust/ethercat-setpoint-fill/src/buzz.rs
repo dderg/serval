@@ -1,6 +1,5 @@
 use trajectory::BuzzProfile;
 
-pub const ERR_BUZZ_NOT_ENABLED: i32 = -828;
 pub const ERR_BUZZ_STREAMING: i32 = -829;
 pub const ERR_BUZZ_BUSY: i32 = -830;
 pub const ERR_BUZZ_AXIS_MASK: i32 = -2;

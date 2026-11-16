@@ -34,7 +34,7 @@ pub mod phase_lut;
 #[cfg(feature = "sample-stepping")]
 pub mod sample_exec;
 pub mod state;
-pub use state::{SetStepModeError, StepMode, set_step_mode};
+pub use state::{SetStepModeError, StepMode};
 pub mod stepping_state;
 pub mod test_xdirect_capture;
 pub mod tick;
