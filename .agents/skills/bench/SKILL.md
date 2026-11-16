@@ -9,25 +9,28 @@ A Pi 5 runs klippy against an STM32F401 printer MCU; an F407 board on this box r
 
 ## Rules
 
-- **One bench, many agents.** Every hardware step takes `~/bench/.lock` (exclusive flock; waits `--lock-timeout` s, default 1800, then fails loudly). For a multi-step session wrap the whole thing so nobody syncs other code between your sync and your run:
+- **One bench, many agents; one hold is at most 30 minutes.** Every hardware step takes `~/bench/.lock` (exclusive flock; waits `--lock-timeout` s, default 1800, then fails loudly). A hold lasts at most `lock.MAX_HOLD_S` = 1800 s from acquisition, no flag raises it: at the cap its whole process tree is killed and it exits 124 naming the command and its elapsed time. One hold = one self-contained unit that starts by restoring its deploy (sync, firmware, `deploy.py settle`). Wrap a short multi-step unit so nobody syncs other code between your sync and your run:
 
   ```bash
-  uv run python tools/bench/lock.py hold -- bash my_session.sh
+  uv run python tools/bench/lock.py hold -- bash my_unit.sh   # sync + run, < 30 min
   ```
 
-  Children inherit `BENCH_LOCK_TOKEN` and re-enter the lock; anything else waits. They also inherit the locked file description, so the lock outlives a killed holder until its last child exits. `~/bench/.lock` names the holder (pid, command, cwd, worktree, start). A run whose deploy record changed under it fails, and the suite aborts when the Pi no longer runs the tree it synced. Never kill another holder.
+  Builds, `analyze.py`, checkers and reports go before or after the hold, never inside. `suite.py`, `qualify.py`, `ab.py`, `throughput_pi.py`, `throughput_recheck.py` take and release the lock per hold themselves: never wrap them (suite.py refuses). Children inherit `BENCH_LOCK_TOKEN`, re-enter the lock and share the outer hold's deadline; they also inherit the locked file description, so the lock outlives a killed holder until its last child exits (each re-entrant bench tool still dies at the deadline). `~/bench/.lock` names the holder (pid, command, cwd, worktree, start, deadline). A run whose deploy record changed under it fails. Never kill another holder.
+- **A killed hold leaves the bench like a crashed driver.** `deploy.py settle` (every suite/throughput hold starts with it; every `run.py`/`session.py` row runs its host part, `throttle.settle_host`, then `prepare_printer`) removes bench systemd drop-ins (throttle, recordings) and cpufreq caps, kills orphaned Pi `cargo`/`rustc`/`build-native.sh`/replays, pushes printer.cfg and FIRMWARE_RESTARTs a klippy left printing, shut down or on another config. The capture board is stopped and drained by the next capture's start.
 - **Always `sync` first.** The Pi runs whatever was last synced; `run.json` → `deployed` (HEAD, branch, `git diff HEAD` sha256, dirty paths, worktree) says which code a run tested. Another agent's uncommitted edits in your worktree ship with `sync`. To test a clean ref: `git worktree add /tmp/x <ref>` then `deploy.py sync --tree /tmp/x`.
 - Offline-only work needs no lock. Fail loudly: don't patch production code from the bench to make a run pass.
 
 ## One-command regression
 
 ```bash
-uv run python tools/bench/suite.py --quick      # first_layers, speed_ladder, epochs (~6 min)
-uv run python tools/bench/suite.py              # full matrix incl. dense_top and a throttled-host row, then the session rows
-uv run python tools/bench/suite.py --group session [--tree DIR]   # 12 one-klippy-session rows: bed mesh, print twice, pause/cancel/restart/e-stop latency, reactor stalls, e-stop recovery
+uv run python tools/bench/suite.py --quick      # first_layers, speed_ladder, epochs, single_motor_cap: one hold, ~10 min
+uv run python tools/bench/suite.py              # full matrix incl. dense_top and a throttled-host row, then the session rows: 4 holds of <= 20 min planned
+uv run python tools/bench/suite.py --group session [--tree DIR]   # 13 one-klippy-session rows: bed mesh, print twice, pause/cancel/restart/e-stop latency, reactor stalls, e-stop recovery
+uv run python tools/bench/suite.py --group soak [--tree DIR]      # qualification's soak, one hold per row: 7-min generated print twice in one mesh session with a pause; a 17-min print on a throttled host
+uv run python tools/bench/suite.py --row NAME [--row NAME] --tree DIR   # named rows of any group against a clean tree (bisect)
 ```
 
-Takes the lock once, syncs (`--tree DIR`: that worktree), runs + judges each row, prints a table, writes `~/bench/suites/<ts>/summary.json` (per row: print state/error, analyzer ok + failed checks, stalls, abs_max per motor, deployed identity, run dir) and exits non-zero if any row fails. `--expect-fail <row>` is the only way to tolerate a known failure; there is no built-in allowlist.
+Plans the rows into holds from `hold_plan.EXPECTED_ROW_S` and runs each hold as a child that takes the lock, re-syncs the tree or reflashes the F401 another holder changed (recorded under the hold's `restored`), settles the bench, runs the rows that still fit and releases the lock; rows are judged between holds. Writes `~/bench/suites/<ts>/summary.json` (rows, and per hold: rows, `wait_s`, `held_s`, `restored`, exit) and exits non-zero if any row fails. `--expect-fail <row>` is the only way to tolerate a known failure; there is no built-in allowlist. Qualification (`scripts/qualify.py`, CLAUDE.md "Qualification") runs resumable units of one or more such holds.
 
 Session rows (`session_scenarios.py`, README "Session rows") keep one klippy session through a timeline of actions; `session.py <scenario>` runs one, `session_check.py <run_dir>` judges it (actions, print outcomes, journal aborts, shutdowns, `reactor_poller_late`, mid-print gaps, post-check moves, plus per-row stop latency, second-print duration and pacer reserve, each bound naming its issue). Failed checks carry their reason in `failed_checks`. Session rows are never analyzed (mesh, interruptions or several prints).
 
@@ -48,7 +51,7 @@ Run dirs: `~/bench/runs/<YYYYmmdd-HHMMSS>/` — `print.gcode`, `printer.cfg` (th
 
 Offline, on run dirs under `~/bench/runs`: `uv run python tools/bench/summarize.py '<run_dir|glob>'... [--json]` (one diffable line per run: verdict, failed checks, stalls, abs_max/p99 per motor, epochs, mcu lateness, deployed head) and `uv run python tools/bench/events.py <run_dir> [--around T] [--names a,b]` (event counts in the run's time window, errors verbatim, klippy Stats trend for crashes). Use these instead of ad-hoc /tmp scripts.
 
-On hardware (lock-taking, re-entrant under `lock.py hold`): `gcode.py "G1 X10" ...` sends lines and fails on error; `state.py` reports printer state, deployed identity, klipper pid, MCU serial and capture board (read-only); `ab.py --ref A --ref B --gcode G [--runs 3] [--config C] [--host-cpus N --host-max-mhz M] [--dry-run]` runs the same gcode on clean worktrees of each ref in one lock hold and prints a side-by-side table. Landing a PR: `scripts/land-pr.sh <branch>`.
+On hardware (lock-taking, re-entrant under `lock.py hold`): `gcode.py "G1 X10" ...` sends lines and fails on error; `state.py` reports printer state, deployed identity, klipper pid, MCU serial and capture board (read-only); `ab.py --ref A --ref B --gcode G [--runs 3] [--config C] [--host-cpus N --host-max-mhz M] [--dry-run]` runs the same gcode on clean worktrees of each ref, one hold per (ref, run) that syncs the ref and runs it, analyzes after the holds and prints a side-by-side table with each hold's wait and held seconds. Landing a PR: `scripts/land-pr.sh <branch>`.
 
 Planner-side tools for changes the analyzer's reference depends on (it plans with the same engine): `scripts/review_baselines.py --pr N` (physical review of moved snapshot cases), `scripts/accept_reviewed.py N` (accept + commit baselines after review), `scripts/bench_compare.py A B` (interleaved replay A/B; trust its CPU row on a busy box), `scripts/corpus.sh` (59-case planner corpus), `scripts/integrate_stack.py 443 444 --run CMD` (try a PR stack on a throwaway worktree before `deploy.py sync --tree`). `scripts/land-pr.sh` runs from the branch's own worktree and re-updates the PR branch when main moves.
 
