@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import shlex
 import subprocess
 
@@ -76,7 +77,7 @@ def test_the_target_firmware_builds_in_its_own_tree_and_carries_its_id(
     monkeypatch, tmp_path
 ):
     calls = _flash_target_bench(monkeypatch, tmp_path)
-    deploy.cmd_flash_target(tmp_path)
+    deploy.cmd_flash_target(tmp_path, deploy.build_target(tmp_path))
 
     out = tmp_path / "out/bench-f401"
     for command, cwd in calls["make"]:
@@ -99,7 +100,7 @@ def test_a_target_reporting_another_build_is_refused_and_not_recorded(
 ):
     calls = _flash_target_bench(monkeypatch, tmp_path, reported_suffix="beef")
     with pytest.raises(deploy.pi.BenchError, match="not the build f00d"):
-        deploy.cmd_flash_target(tmp_path)
+        deploy.cmd_flash_target(tmp_path, deploy.build_target(tmp_path))
     assert calls["recorded"] == []
 
 
@@ -171,12 +172,76 @@ def test_the_target_is_flashed_only_off_this_trees_build(
     monkeypatch, tmp_path, reported, flashed
 ):
     calls = []
-    monkeypatch.setattr(
-        deploy.firmware_build_id, "target_build_id", lambda tree, cfg: "abc123"
-    )
     monkeypatch.setattr(deploy.pi, "mcu_version", lambda: reported)
     monkeypatch.setattr(
-        deploy, "cmd_flash_target", lambda tree: calls.append("tree")
+        deploy, "cmd_flash_target", lambda tree, built: calls.append("tree")
     )
-    deploy.cmd_ensure_target(tmp_path)
+    built = deploy.Built("abc123", tmp_path / "klipper.elf")
+    deploy.cmd_ensure_target(tmp_path, built)
     assert calls == flashed
+
+
+@pytest.mark.parametrize("command", ["flash-target", "ensure-target"])
+def test_the_target_firmware_builds_before_the_lock_is_taken(
+    monkeypatch, tmp_path, command
+):
+    order = []
+    built = deploy.Built("abc123", tmp_path / "klipper.elf")
+
+    @contextlib.contextmanager
+    def bench_lock(timeout_s):
+        order.append("lock")
+        yield
+        order.append("unlock")
+
+    def build(tree):
+        order.append("build")
+        return built
+
+    def flash(tree, firmware):
+        order.append(("flash", firmware))
+
+    monkeypatch.setattr(deploy.lock, "bench_lock", bench_lock)
+    monkeypatch.setitem(deploy.TREE_COMMANDS, command, (build, flash))
+    monkeypatch.setattr(
+        deploy.sys, "argv", ["deploy.py", command, "--tree", str(tmp_path)]
+    )
+    deploy.main()
+    assert order == ["build", "lock", ("flash", built), "unlock"]
+
+
+def _settle_bench(monkeypatch, pushed, klippy, job):
+    restarts = []
+    monkeypatch.setattr(deploy.throttle, "settle_host", lambda: [])
+    monkeypatch.setattr(deploy.pi, "push_config", lambda config: pushed)
+    monkeypatch.setattr(deploy.pi, "wait_settled", lambda: klippy)
+    monkeypatch.setattr(deploy.run, "print_stats", lambda: {"state": job})
+    monkeypatch.setattr(
+        deploy.pi, "firmware_restart", lambda: restarts.append(True)
+    )
+    return restarts
+
+
+def test_a_bench_at_rest_settles_without_a_restart(monkeypatch):
+    restarts = _settle_bench(monkeypatch, False, "ready", "standby")
+    assert deploy.settle(deploy.pi.REPO_CFG) == []
+    assert restarts == []
+
+
+@pytest.mark.parametrize(
+    "pushed, klippy, job, reason",
+    [
+        (True, "ready", "complete", "the Pi ran another printer config"),
+        (False, "shutdown", "standby", "klippy was shutdown"),
+        (False, "ready", "printing", "a print was printing"),
+        (False, "ready", "paused", "a print was paused"),
+    ],
+)
+def test_a_bench_left_mid_print_or_on_another_config_is_restarted(
+    monkeypatch, pushed, klippy, job, reason
+):
+    restarts = _settle_bench(monkeypatch, pushed, klippy, job)
+    [action] = deploy.settle(deploy.pi.REPO_CFG)
+    assert action.startswith("FIRMWARE_RESTART: ")
+    assert reason in action
+    assert restarts == [True]
