@@ -95,4 +95,5 @@ markers = [
   "sim_unit: in-process sim unit/contract test (CI-able, no ELF/hardware)",
   "needs_elf: requires the built MACH_LINUX sim ELFs (tools/sim)",
   "needs_hardware: requires real H723/F446/Trident bench hardware",
+  "expected_seconds(s): sim e2e test that runs ~s seconds; run first under xdist",
 ]

@@ -98,6 +98,7 @@ def test_probe_homing_and_probing(sim_world, variant):
     assert world.shutdown_line() is None
 
 
+@pytest.mark.expected_seconds(10)
 def test_probe_multi_point_tools(sim_world):
     world = sim_world(_cfg("points"), dual_mcu=False)
     _assert_probe_flow(world, "points")

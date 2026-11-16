@@ -26,6 +26,7 @@ GCODE = (
 PRESSURE = float(os.environ.get("SIM_PRESSURE_VTIME", "1.5"))
 
 
+@pytest.mark.expected_seconds(65)
 def test_dense_top_layers_survive_pi_pressure(sim_world):
     world = sim_world(
         lambda w: configs.neptune_print_config(w.h7_pty, str(w.gcode_dir)),
