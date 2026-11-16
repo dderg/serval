@@ -1,12 +1,17 @@
-"""tools/sim/cli.py prints real slicer output on real firmware faster than
-real time, like the suite's prints, and fails loudly on a print error."""
+"""tools/sim/cli.py prints real slicer output on real firmware to completion
+in the free-running mode like the suite's prints, and fails loudly on a
+print error. The measured speedup is printed, never asserted: a wall-clock
+ratio depends on the load of the box."""
 
+import os
 import pathlib
 import re
 import subprocess
 import sys
 
 import pytest
+
+from tools.sim.world import UNBOUNDED_VTIME_SPEED
 
 pytestmark = pytest.mark.needs_elf
 
@@ -18,15 +23,17 @@ CLI_TIMEOUT_S = 600
 
 
 def _run_cli(gcode: pathlib.Path) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k != "VTIME_SPEED"}
     return subprocess.run(
         [sys.executable, str(CLI), "--gcode", str(gcode)],
         capture_output=True,
         text=True,
         timeout=CLI_TIMEOUT_S,
+        env=env,
     )
 
 
-def test_cli_prints_slicer_output_faster_than_real_time(tmp_path):
+def test_cli_prints_slicer_output_to_completion_free_running(tmp_path):
     gcode = tmp_path / "voron_head.gcode"
     lines = VORON.read_text().splitlines(keepends=True)
     gcode.write_text("".join(lines[:VORON_HEAD_LINES]))
@@ -34,9 +41,14 @@ def test_cli_prints_slicer_output_faster_than_real_time(tmp_path):
     result = _run_cli(gcode)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    speedup = re.search(r"speedup:\s+([0-9.]+)x", result.stdout)
-    assert speedup, result.stdout
-    assert float(speedup.group(1)) > 1.0, result.stdout
+    assert "FAIL" not in result.stdout, result.stdout
+    print_time = re.search(r"print time:\s+([0-9.]+)s", result.stdout)
+    assert print_time, result.stdout
+    assert float(print_time.group(1)) > 0, result.stdout
+    mode = re.search(r"vtime speed:\s+([0-9.]+)x", result.stdout)
+    assert mode, result.stdout
+    assert float(mode.group(1)) == UNBOUNDED_VTIME_SPEED, result.stdout
+    print(result.stdout)
 
 
 def test_cli_fails_on_a_print_error(tmp_path):
