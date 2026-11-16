@@ -97,6 +97,14 @@ impl Pacer {
         self.one_brake_secs() * DRAIN_RESERVE_SAFETY > RESERVE_CAP_S
     }
 
+    /// How long after its first move a stream setting off from rest starts
+    /// playing at the earliest: its prime, then the reserve, so a producer
+    /// still filling its planning front can lose a planning step's runway
+    /// and brake.
+    pub(in crate::worker) fn primed_start_secs(&self) -> f64 {
+        STARTUP_PRIME_S + self.reserve_secs()
+    }
+
     /// The runway one brake to rest consumes, measured from the last
     /// moment the pacer could decide on it: the most runway it lost while
     /// planning between two decisions, the costliest drain, and the

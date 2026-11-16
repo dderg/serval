@@ -331,6 +331,7 @@ impl Ingress {
 
     fn drain_and_fence_as(&mut self, cause: DrainCause) -> BarrierAck {
         let runway_before_s = self.watch_runway();
+        self.timeline.anchor.lock_ok().release_prime();
         self.send(StreamInput::Drain);
         self.pacer.note_reset();
         let ack = self.barrier();
@@ -377,8 +378,22 @@ impl Ingress {
         }
         advance_odometer(&mut self.odometer, &m);
         self.last_line = m.source.start_line;
+        if !self.pacer.undrained() {
+            self.prime_start();
+        }
         self.send(m.into());
         self.pacer.note_move(Instant::now());
+    }
+
+    /// The first move of a stream setting off from rest: it starts playing
+    /// no sooner than [`Pacer::primed_start_secs`] from now.
+    fn prime_start(&self) {
+        let host_now = self.timeline.router.lock_ok().host_now_secs();
+        self.timeline.anchor.lock_ok().prime_start(
+            host_now,
+            self.pacer.primed_start_secs(),
+            self.pacer.reserve_secs(),
+        );
     }
 
     /// The pacer's decision while moves keep arriving. A saturated inbox

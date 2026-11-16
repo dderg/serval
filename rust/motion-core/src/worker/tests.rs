@@ -1776,6 +1776,99 @@ fn startup_prime_drains_after_timeout_for_sparse_input() {
     h.shutdown();
 }
 
+/// A sink whose clock, as the second segment lands, jumps to
+/// `jump_past_second_start_s` past that segment's stream start: a producer
+/// blind for that long right after it committed the first piece of a
+/// stream that set off from rest.
+struct StallAfterFirstSink {
+    inner: AnchoredSink,
+    clock: Arc<host_rt::clock::MockClock>,
+    jump_past_second_start_s: f64,
+    dispatched: usize,
+}
+
+impl SegmentSink for StallAfterFirstSink {
+    fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
+        if self.dispatched == 1 {
+            self.clock.advance(Duration::from_secs_f64(
+                seg.t_start + self.jump_past_second_start_s,
+            ));
+        }
+        self.dispatched += 1;
+        self.inner.dispatch(seg)
+    }
+    fn dispatch_nudge(
+        &mut self,
+        mcu_id: u32,
+        axis: u8,
+        motor_mask: u8,
+        profile: &NudgeProfile,
+    ) -> Result<(), DispatchError> {
+        self.inner.dispatch_nudge(mcu_id, axis, motor_mask, profile)
+    }
+    fn mark_parked(&mut self) {
+        self.inner.mark_parked();
+    }
+    fn follow_stream_to(&mut self, stream_t: f64) {
+        self.inner.follow_stream_to(stream_t);
+    }
+}
+
+/// Pi bench, #856: a print committed its first 0.13 s at once, anchored it
+/// the default 0.25 s ahead, then planned for 0.5 s before committing more,
+/// and the playhead overran the committed end mid-motion. On two slow
+/// cores the same start braked to rest instead (the planning step cost
+/// more than the runway the default lead leaves above one brake).
+#[test]
+fn a_producer_blind_right_after_its_first_commit_keeps_ahead_of_the_playhead() {
+    const STALL_PAST_THE_DEFAULT_LEAD_S: f64 = 0.1;
+    const STROKE_MM: f64 = 40.0;
+    const MAX_STROKES: u32 = 32;
+    let clock = host_rt::clock::MockClock::new();
+    let timeline = ExecutionTimeline {
+        frontier: Arc::default(),
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(
+            host_rt::passthrough_queue::PassthroughRouter::with_clock(
+                Arc::clone(&clock) as Arc<dyn host_rt::clock::Clock + Send + Sync>
+            ),
+        )),
+    };
+    let inner = AnchoredSink::on(&timeline);
+    let starts_host = Arc::clone(&inner.starts_host);
+    let first_move_host = timeline.router.lock_ok().host_now_secs();
+    let sink = StallAfterFirstSink {
+        inner,
+        clock,
+        jump_past_second_start_s: crate::anchor::DEFAULT_LEAD_SECS + STALL_PAST_THE_DEFAULT_LEAD_S,
+        dispatched: 0,
+    };
+    let mut h = spawn_on_timeline(cfg(), AxisChainSet::default(), vec![0.0; 3], sink, timeline);
+
+    let mut at = [0.0; 3];
+    for line_no in 1..=MAX_STROKES {
+        if starts_host.lock_ok().len() >= 2 {
+            break;
+        }
+        let end = [if at[0] > 0.0 { 0.0 } else { STROKE_MM }, 0.0, 0.0];
+        submit_move_retrying(&h, line_no, at, end);
+        at = end;
+    }
+    let opened_with = starts_host.lock_ok().clone();
+    h.flush().unwrap();
+    h.shutdown();
+
+    assert!(
+        opened_with.len() >= 2,
+        "{MAX_STROKES} strokes committed only {opened_with:?} before the flush"
+    );
+    assert!(
+        opened_with[0] - first_move_host >= ingress::Pacer::default().primed_start_secs() - 1e-9,
+        "the stream started {}s after its first move",
+        opened_with[0] - first_move_host
+    );
+}
+
 #[test]
 fn worker_join_reports_an_existing_thread_panic_without_repanicking() {
     let handle = std::thread::spawn(|| panic!("expected worker panic"));

@@ -110,6 +110,16 @@ pub struct Anchor {
     stream_end: f64,
     claimed_start_host: f64,
     held_start_host: f64,
+    prime: Option<Prime>,
+}
+
+/// When a stream that set off from rest while its producer still feeds it
+/// starts playing: no sooner than `start_host`, and `lead_s` ahead of its
+/// first segment's dispatch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Prime {
+    start_host: f64,
+    lead_s: f64,
 }
 
 impl Anchor {
@@ -122,6 +132,7 @@ impl Anchor {
             stream_end: 0.0,
             claimed_start_host: f64::NEG_INFINITY,
             held_start_host: f64::NEG_INFINITY,
+            prime: None,
         }
     }
 
@@ -140,11 +151,14 @@ impl Anchor {
     pub fn planned_start(&self, seg_t_start: f64, host_now: f64) -> Option<(f64, StreamEpoch)> {
         let epoch = Self::epoch_of(self.classify(seg_t_start, host_now))?;
         let natural_t0 = if epoch.retimed() {
-            host_now + self.start_lead_s() - seg_t_start
+            host_now + self.fresh_lead_s() - seg_t_start
         } else {
             self.t0.expect("a continuing stream is anchored")
         };
-        if natural_t0 + seg_t_start >= self.held_start_host {
+        let start_floor = self.prime.map_or(self.held_start_host, |prime| {
+            self.held_start_host.max(prime.start_host)
+        });
+        if natural_t0 + seg_t_start >= start_floor {
             return Some((natural_t0, epoch));
         }
         let held_epoch = if epoch.position_redefined() {
@@ -152,7 +166,7 @@ impl Anchor {
         } else {
             StreamEpoch::Reanchor
         };
-        Some((self.held_start_host - seg_t_start, held_epoch))
+        Some((start_floor - seg_t_start, held_epoch))
     }
 
     pub fn start_verdict(&self, start_host: f64) -> Result<(), StartBeforeClaim> {
@@ -236,7 +250,7 @@ impl Anchor {
                     event = "anchor_idle_resume",
                     margin_s,
                     seg_t_start,
-                    lead_secs = self.start_lead_s(),
+                    lead_secs = self.fresh_lead_s(),
                     "[anchor] resuming from rest across an idle gap — re-anchoring forward"
                 );
             }
@@ -320,7 +334,7 @@ impl Anchor {
                 t0,
                 seg_t_start,
                 seg_t_end,
-                lead_secs = self.start_lead_s(),
+                lead_secs = self.fresh_lead_s(),
                 held_start_host = self.held_start_host,
                 last_t_end = self.last_t_end,
                 condition,
@@ -353,6 +367,7 @@ impl Anchor {
         self.parked = false;
         self.resume_lead_s = None;
         self.held_start_host = f64::NEG_INFINITY;
+        self.prime = None;
         (t0, epoch)
     }
 
@@ -386,6 +401,31 @@ impl Anchor {
         self.held_start_host = self.held_start_host.max(host_s);
         self.claimed_start_host = self.claimed_start_host.max(host_s);
         Ok(())
+    }
+
+    /// A stream sets off from rest while its producer still feeds it: the
+    /// producer may plan for a while before it commits more than the first
+    /// piece, so the playhead starts no sooner than `start_in_s` from now,
+    /// and `lead_s` ahead of the first segment's dispatch. A stream still
+    /// playing out a drained tail continues it unprimed.
+    pub(crate) fn prime_start(&mut self, host_now: f64, start_in_s: f64, lead_s: f64) {
+        let retimes = matches!(
+            self.classify(self.stream_end, host_now),
+            AnchorClass::Reposition | AnchorClass::IdleResume { .. }
+        );
+        if !retimes {
+            return;
+        }
+        self.prime = Some(Prime {
+            start_host: host_now + start_in_s,
+            lead_s,
+        });
+    }
+
+    /// The stream was drained to rest before it started playing: nothing it
+    /// plays waits on its producer any more.
+    pub(crate) fn release_prime(&mut self) {
+        self.prime = None;
     }
 
     pub fn follow_stream_to(&mut self, stream_t: f64) {
@@ -429,8 +469,16 @@ impl Anchor {
         Ok(())
     }
 
+    /// The lead a claim may count on: a prime released by a drain falls
+    /// back to it, so a claim on the primed lead would follow the start.
     fn start_lead_s(&self) -> f64 {
         DEFAULT_LEAD_SECS.max(self.resume_lead_s.unwrap_or(0.0))
+    }
+
+    fn fresh_lead_s(&self) -> f64 {
+        self.prime.map_or(self.start_lead_s(), |prime| {
+            self.start_lead_s().max(prime.lead_s)
+        })
     }
 
     pub fn t0(&self) -> Option<f64> {
