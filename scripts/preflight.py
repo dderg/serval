@@ -315,13 +315,14 @@ def unreplayed_mesh_changes(
     ]
 
 
-def lost_motion(replay: Replay, outcome: Outcome) -> None:
-    for name, tally in replay.by_treatment(Treatment.LOST_ON_PRINTER).items():
-        outcome.worsen(
-            Verdict.FAIL,
-            f"{name} x{tally.count} (first {tally.first.describe()}): "
-            f"{Treatment.LOST_ON_PRINTER.value}",
-        )
+def unrunnable_motion(replay: Replay, outcome: Outcome) -> None:
+    for kind in (Treatment.STOPS_PRINT, Treatment.CURVE):
+        for name, tally in replay.by_treatment(kind).items():
+            outcome.worsen(
+                Verdict.FAIL,
+                f"{name} x{tally.count} (first {tally.first.describe()}): "
+                f"{kind.value}",
+            )
 
 
 def bench_arguments(
@@ -455,7 +456,7 @@ def coverage_lines(
         for s in front.skipped
     ]
     for kind in Treatment:
-        if kind in (Treatment.PLANNED, Treatment.LOST_ON_PRINTER):
+        if kind in (Treatment.PLANNED, Treatment.STOPS_PRINT, Treatment.CURVE):
             continue
         tallies = tally_lines(replay, kind)
         if tallies:
@@ -590,7 +591,7 @@ def main(
     expand_print(front, args.gcode, outcome)
     mesh = mesh_for(front, args.mesh, outcome)
     replay = Replay.of(front.commands)
-    lost_motion(replay, outcome)
+    unrunnable_motion(replay, outcome)
     bench = bench_factory()
     bench.build()
     with tempfile.TemporaryDirectory(prefix="preflight-") as scratch:

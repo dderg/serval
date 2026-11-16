@@ -251,6 +251,7 @@ naming the axis they belong to.
 | legacy `[servo_x]`, `[servo_y]`, `[servo_z]` | **No direct section alias.** Declare a `[motor <name>]` with `drive: servo` and bind it in `[kinematics]`. |
 | `[firmware_retraction]` | **No equivalent in the motion model;** the section is rejected. |
 | `[gcode_arcs]` | **Rejected.** The motion engine has no native G2/G3 ingestion yet; slice with arcs disabled so the slicer emits G1 segments. |
+| `G2`, `G3`, `G10`, `G11` in a print file | **Stops the print** with an error naming the line (they used to be skipped as unknown commands). Disable arc fitting and firmware retraction in the slicer. |
 | `[resonance_tester] sweeping_period`, `sweeping_accel` | **No equivalent.** Kalico's sweeping vibration test is not here; the rest of the section (`accel_per_hz`, `hz_per_sec`, `min_freq`, `max_freq`, `max_smoothing`, `probe_points`, `accel_chip*`) is unchanged. |
 
 Unknown options normally fail validation: with the default `error_on_unused_config_options: True`, an option not consumed by a registered object errors as an invalid option. The explicitly rejected motion sections/options above fail earlier with a specific error.

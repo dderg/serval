@@ -19,7 +19,7 @@ from pathlib import Path
 
 from klippy import configfile
 from klippy import gcode as gcode_module
-from klippy.extras import bed_mesh, danger_options, gcode_macro
+from klippy.extras import bed_mesh, danger_options, gcode_macro, gcode_move
 
 BED_MESH_SECTION = "bed_mesh"
 DEFAULT_MESH_PROFILE = "default"
@@ -37,7 +37,8 @@ class Treatment(enum.Enum):
     )
     MESH = "dropped: bed mesh command without a [bed_mesh] section"
     PRINT_FLOW = "dropped: pause, resume, cancel or object exclusion"
-    LOST_ON_PRINTER = "the live host drops it as an unknown command: the printer skips this motion"
+    STOPS_PRINT = "the live host stops the print on it: the printer never runs this motion"
+    CURVE = "the live host runs it, but preflight cannot plan curves"
 
 
 PLANNED = (
@@ -127,7 +128,8 @@ PLANNER_SETUP = (
 )
 MESH_COMMANDS = ("BED_MESH_PROFILE", "BED_MESH_CLEAR", "BED_MESH_OFFSET")
 PRINT_FLOW = ("PAUSE", "RESUME", "CANCEL_PRINT", "EXCLUDE_OBJECT")
-LOST_ON_PRINTER = ("G2", "G3", "G5", "G10", "G11")
+STOPS_PRINT = tuple(gcode_move.UNSUPPORTED_MOTION)
+CURVES = ("G5",)
 
 TREATMENTS = {
     **dict.fromkeys(PLANNED, Treatment.PLANNED),
@@ -137,7 +139,8 @@ TREATMENTS = {
     **dict.fromkeys(PLANNER_SETUP, Treatment.PLANNER_SETUP),
     **dict.fromkeys(MESH_COMMANDS, Treatment.MESH),
     **dict.fromkeys(PRINT_FLOW, Treatment.PRINT_FLOW),
-    **dict.fromkeys(LOST_ON_PRINTER, Treatment.LOST_ON_PRINTER),
+    **dict.fromkeys(STOPS_PRINT, Treatment.STOPS_PRINT),
+    **dict.fromkeys(CURVES, Treatment.CURVE),
 }
 HEATER_WAIT_REST = "M400"
 KEPT_HANDLERS = frozenset({*MESH_COMMANDS, "BED_MESH_CHECK"})

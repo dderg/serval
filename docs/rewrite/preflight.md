@@ -41,7 +41,8 @@ Each command klippy would execute is treated by class
 | motors outside the toolhead path: `FORCE_MOVE SET_STEPPER_ENABLE ...` | dropped |
 | planner setup: `SET_PRESSURE_ADVANCE SET_INPUT_SHAPER ...` | dropped; the plan keeps the config's values |
 | `PAUSE RESUME CANCEL_PRINT EXCLUDE_OBJECT` | dropped (a macro's own moves are planned) |
-| arcs and firmware retraction: `G2 G3 G5 G10 G11` | `FAIL`: the live host drops them as unknown commands |
+| arcs and firmware retraction: `G2 G3 G10 G11` | `FAIL`: the live host stops the print on them |
+| curves: `G5` | `FAIL`: the live host runs it, preflight cannot plan it |
 | anything else (`M104 M106 M73 ...`) | no motion, not planned |
 
 Every dropped or unplanned command is counted with its first line.
