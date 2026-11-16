@@ -147,10 +147,10 @@ Qualification's long rows, never in `--quick` or the default run. `soak_gcode.py
 
 | row | kind | config | timeline | judged by |
 |---|---|---|---|---|
-| soak_mesh_session | session | printer.cfg + macros, mesh | print, pause at 641 s (half the print), resume +12 s, the same print again 5 s after it ends | session checks, `second_print` and `pacer_reserve` (#843), and the run-wide checks |
+| soak_mesh_session | session | printer.cfg + macros, mesh | print, pause at 641 s (half the print), resume +12 s, the same print again 5 s after it ends | session checks, `second_print` and `pacer_reserve_ratchet` (#843), and the run-wide checks |
 | soak_throttled | matrix | printer.cfg, `--host-cpus 2 --host-max-mhz 1500` | print | analyzer, and the run-wide checks (`session_check.py --run-wide`) |
 
-Run-wide checks (`SOAK_CHECKS`, evidence over the whole run window): `pacer_brakes` fails on any `pipe_drain` outside a commanded stop (from a pause, cancel, FIRMWARE_RESTART or e-stop to the next action), `pacer_reserve_growth` on any `pacer_reserve_raised` outside one (#843), `klippy_stats` when klippy's once-a-second Stats lines (host-py mirror) leave a gap > 2 s or come from more than one klippy session (#406); its detail carries memavail and klippy cputime over the run. A plain run also gets the journal, shutdown and reactor checks.
+Run-wide checks (`SOAK_CHECKS`, evidence over the whole run window): `pacer_brakes` fails on any `pipe_drain` outside a commanded stop (from a pause, cancel, FIRMWARE_RESTART or e-stop to the next action), `pacer_reserve` on any reserve above 2 s (#843) and lists every raise (time, reserve, cost kind), `klippy_stats` when klippy's Stats lines (host-py mirror; klippy writes them only while active) leave a gap > 2 s inside a print outside a commanded pause, or come from more than one klippy session (#406); its detail carries memavail and klippy cputime over the run. A plain run also gets the journal, shutdown and reactor checks. `pacer_reserve_ratchet` (session rows with two prints) fails when the last print's highest reserve exceeds the first's by more than 1.5×: #843's ratchet multiplied it 3.6× (`main-print_twice`) and 137× (`main-cancel_then_print`) print over print, while a measured raise within a print moved it 1.06× (0.419 → 0.444 s, soak run 11-16). A single raise from a measured planning step is the pacer working (#876), not a failure.
 
 ## Qualification (`scripts/qualify.py`)
 

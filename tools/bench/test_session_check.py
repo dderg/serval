@@ -289,12 +289,38 @@ def test_a_brake_outside_a_commanded_stop_fails_the_soak():
     assert "#843" in verdict.detail
 
 
-def test_a_reserve_raised_outside_a_commanded_stop_fails_the_soak():
-    evidence = _soak_evidence("pacer_runway-pause_resume")
-    _event(evidence, 5.0, "pacer_reserve_raised", reserve_s=0.41)
-    verdict = _soak_verdicts(evidence)["pacer_reserve_growth"]
+def test_the_first_soak_run_on_main_passes_every_check():
+    verdicts = _verdicts(_evidence("soak-soak_mesh_session"))
+    assert [v for v in verdicts.values() if not v.ok] == []
+    assert verdicts["pacer_reserve"].detail.endswith(
+        "raises: +214.3 s 0.419 s PlanningStep, +644.0 s 0.444 s Drain"
+    )
+    assert (
+        "first print 0.444 s, last print none"
+        in verdicts["pacer_reserve_ratchet"].detail
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture, ratio",
+    [("main-print_twice", "3.604"), ("main-cancel_then_print", "136.775")],
+)
+def test_a_reserve_multiplied_print_over_print_is_a_ratchet(fixture, ratio):
+    view = session_check.Evidence(_evidence(fixture))
+    check = session_check.ReserveNotRatcheted()
+    verdict = session_check.specific_check(view, check)
     assert not verdict.ok
-    assert "to 0.410 s at +5.0 s" in verdict.detail
+    assert f"{ratio} > 1.5 (#843)" in verdict.detail
+
+
+def test_a_reserve_held_across_prints_is_no_ratchet():
+    evidence = copy.deepcopy(_evidence("main-print_twice"))
+    for event in evidence["events"]:
+        if event["event"] == "pacer_reserve_raised":
+            event["reserve_s"] = min(event["reserve_s"], 0.6)
+    view = session_check.Evidence(evidence)
+    check = session_check.ReserveNotRatcheted()
+    assert session_check.specific_check(view, check).ok
 
 
 def test_a_stats_gap_or_a_second_klippy_session_fails_the_soak():
@@ -338,7 +364,7 @@ def test_a_plain_run_is_judged_by_the_run_wide_checks_only():
         "shutdown",
         "reactor",
         "pacer_brakes",
-        "pacer_reserve_growth",
+        "pacer_reserve",
         "klippy_stats",
     ]
     assert not verdict["ok"]

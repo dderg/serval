@@ -7,10 +7,11 @@ uv run python tools/bench/session_check.py --run-wide <run_dir>
 From a run dir it writes session_evidence.json (session_evidence.py) and
 session_checks.json next to run.json. Prints one line per check and exits
 1 when any fails. Every scenario gets the generic checks; the stop latency,
-engine account, second-print, pacer-reserve and soak (SOAK_CHECKS: pacer
-brakes and reserve raises outside commanded stops, klippy Stats) checks are
-declared per scenario. --run-wide judges a plain run.py run, which has no
-timeline, by the generic checks that need none plus SOAK_CHECKS.
+engine account, second-print, pacer-reserve, reserve-ratchet and soak
+(SOAK_CHECKS: pacer brakes outside commanded stops, the pacer-reserve bound,
+klippy Stats) checks are declared per scenario. --run-wide judges a plain
+run.py run, which has no timeline, by the generic checks that need none plus
+SOAK_CHECKS.
 """
 
 from __future__ import annotations
@@ -32,8 +33,8 @@ from session_scenarios import (
     TERMINATING_ACTS,
     Act,
     NoStrayBrakes,
-    NoStrayReserveRaises,
     ReserveBounded,
+    ReserveNotRatcheted,
     Scenario,
     SecondPrintLikeFirst,
     SpecificCheck,
@@ -396,16 +397,62 @@ def second_print_check(
     return Verdict("second_print", check.bound.holds(change), detail)
 
 
+def raises(evidence: Evidence) -> str:
+    return ", ".join(
+        f"{evidence.at(e['t'])} {e['reserve_s']:.3f} s {e.get('cost', 'cost?')}"
+        for e in evidence.named(RESERVE_RAISED)
+    )
+
+
 def reserve_check(evidence: Evidence, check: ReserveBounded) -> Verdict:
-    raised = evidence.named("pacer_reserve_raised")
+    raised = evidence.named(RESERVE_RAISED)
     if not raised:
-        return Verdict("pacer_reserve", True, "no pacer_reserve_raised")
+        return Verdict("pacer_reserve", True, f"no {RESERVE_RAISED}")
     worst = max(raised, key=lambda e: e["reserve_s"])
     judged = check.bound.judge("pacer reserve", worst["reserve_s"])
-    detail = f"{judged} at {evidence.at(worst['t'])}"
+    detail = (
+        f"{judged} at {evidence.at(worst['t'])}; raises: {raises(evidence)}"
+    )
     return Verdict(
         "pacer_reserve", check.bound.holds(worst["reserve_s"]), detail
     )
+
+
+def highest_reserve(evidence: Evidence, printed: Print) -> float | None:
+    return max(
+        (
+            e["reserve_s"]
+            for e in evidence.named(RESERVE_RAISED)
+            if printed.start <= e["t"] <= printed.end
+        ),
+        default=None,
+    )
+
+
+def seconds_or_none(value: float | None) -> str:
+    return "none" if value is None else f"{value:.3f} s"
+
+
+def ratchet_check(evidence: Evidence, check: ReserveNotRatcheted) -> Verdict:
+    ended = [p for p in evidence.prints() if p.end is not None]
+    if len(ended) < 2:
+        detail = f"needs two ended prints, got {len(ended)}"
+        return Verdict("pacer_reserve_ratchet", False, detail)
+    first = highest_reserve(evidence, ended[0])
+    last = highest_reserve(evidence, ended[-1])
+    if last is None or first is None:
+        detail = (
+            f"highest reserve: first print {seconds_or_none(first)}, last "
+            f"print {seconds_or_none(last)}; with a print raising none there "
+            "is no ratio, pacer_reserve bounds it"
+        )
+        return Verdict("pacer_reserve_ratchet", True, detail)
+    ratio = last / first
+    judged = check.bound.judge(
+        "last print's highest reserve over the first's", ratio
+    )
+    detail = f"{last:.3f} s vs {first:.3f} s, {judged}"
+    return Verdict("pacer_reserve_ratchet", check.bound.holds(ratio), detail)
 
 
 def brakes_check(evidence: Evidence, check: NoStrayBrakes) -> Verdict:
@@ -423,23 +470,6 @@ def brakes_check(evidence: Evidence, check: NoStrayBrakes) -> Verdict:
     detail = f"no pacer brake outside commanded stops ({at_stops} at them)"
     return Verdict("pacer_brakes", True, detail)
 
-
-def reserve_growth_check(
-    evidence: Evidence, check: NoStrayReserveRaises
-) -> Verdict:
-    strays = evidence.stray(RESERVE_RAISED)
-    if strays:
-        listed = ", ".join(
-            f"to {e['reserve_s']:.3f} s at {evidence.at(e['t'])}"
-            for e in strays
-        )
-        detail = (
-            f"{RESERVE_RAISED} {len(strays)} times outside commanded stops "
-            f"({check.issue}): {listed}"
-        )
-        return Verdict("pacer_reserve_growth", False, detail)
-    detail = f"no {RESERVE_RAISED} outside commanded stops"
-    return Verdict("pacer_reserve_growth", True, detail)
 
 
 def stats_gaps(evidence: Evidence) -> list[tuple[float, float]]:
@@ -489,8 +519,8 @@ def specific_check(evidence: Evidence, check: SpecificCheck) -> Verdict:
         return second_print_check(evidence, check)
     if isinstance(check, NoStrayBrakes):
         return brakes_check(evidence, check)
-    if isinstance(check, NoStrayReserveRaises):
-        return reserve_growth_check(evidence, check)
+    if isinstance(check, ReserveNotRatcheted):
+        return ratchet_check(evidence, check)
     if isinstance(check, StatsSteady):
         return stats_check(evidence, check)
     return reserve_check(evidence, check)

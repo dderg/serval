@@ -69,6 +69,7 @@ class Bound:
 MID_PRINT_GAP_S = Bound(1.0, "#843")
 SECOND_PRINT_SLOWDOWN = Bound(0.10, "#843", Unit.RATIO)
 PACER_RESERVE_S = Bound(2.0, "#843")
+RESERVE_RATCHET = Bound(1.5, "#843", Unit.RATIO)
 PAUSE_CANCEL_STOP_S_UNTIL_860 = Bound(12.0, "#860")
 PAUSE_CANCEL_STOP_S_AFTER_860 = Bound(6.0, "#860")
 FIRMWARE_RESTART_STOP_S = Bound(6.0, "#844")
@@ -149,8 +150,8 @@ class NoStrayBrakes:
 
 
 @dataclass(frozen=True)
-class NoStrayReserveRaises:
-    issue: str = PACER_ISSUE
+class ReserveNotRatcheted:
+    bound: Bound = RESERVE_RATCHET
 
 
 @dataclass(frozen=True)
@@ -163,11 +164,11 @@ SpecificCheck = (
     | StopsWithinEngineAccount
     | SecondPrintLikeFirst
     | ReserveBounded
+    | ReserveNotRatcheted
     | NoStrayBrakes
-    | NoStrayReserveRaises
     | StatsSteady
 )
-SOAK_CHECKS = (NoStrayBrakes(), NoStrayReserveRaises(), StatsSteady())
+SOAK_CHECKS = (NoStrayBrakes(), ReserveBounded(), StatsSteady())
 
 
 @dataclass(frozen=True)
@@ -428,7 +429,7 @@ SOAK_SCENARIOS = (
         (Outcome.COMPLETE, Outcome.COMPLETE),
         NotAnalyzed.MESH,
         MESH_CONFIG,
-        checks=(SecondPrintLikeFirst(), ReserveBounded(), *SOAK_CHECKS),
+        checks=(SecondPrintLikeFirst(), ReserveNotRatcheted(), *SOAK_CHECKS),
         timeline_timeout_s=SOAK_TIMELINE_TIMEOUT_S,
     ),
 )
