@@ -162,10 +162,10 @@ run_quiet() {
 }
 
 build_image() {
-    # One retry absorbs transient registry/network failures (e.g. a cargo
-    # crate download aborting mid-unpack on a CI runner). Deterministic
-    # build errors replay from the layer cache and fail fast the second
-    # time, so real breakage stays loud.
+    # One retry absorbs transient network failures (apt, rustup, cargo
+    # fetch, plugin clones on a CI runner). Deterministic build errors
+    # replay from the layer cache and fail fast the second time, so real
+    # breakage stays loud.
     local ctx="$1" dockerfile="$2"
     if ! run_quiet docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
             -t "$IMAGE_TAG" -f "$dockerfile" "$ctx"; then
