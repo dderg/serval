@@ -10,6 +10,12 @@ from tools.sim import configs
 
 pytestmark = pytest.mark.needs_elf
 
+ENDPOINT_DEATH = '"event":"endpoint_death"'
+ENDPOINT_DEATH_WATCHDOG_ABORT = '"event":"endpoint_death_watchdog_abort"'
+ENDPOINT_DEATH_GRACE_S = 5.0
+SIM_BARRIER_ACK_DEADLINE_S = 60.0
+X_STEP_LINE = 18
+
 
 def _kalico_native(sim_world):
     return sim_world(
@@ -36,6 +42,11 @@ def _moves_after_restart(world):
     assert "shutdown" not in world.log_tail().lower(), world.log_tail()
 
 
+def _host_rust_events(world):
+    path = world.log_dir / "events" / "host-rust.jsonl"
+    return path.read_text(errors="replace") if path.exists() else ""
+
+
 @pytest.mark.parametrize("boot", [_kalico_native, _classic_stepcompress])
 def test_firmware_restart_from_ready(sim_world, boot):
     world = boot(sim_world)
@@ -52,4 +63,34 @@ def test_firmware_restart_recovers_mcus_latched_across_a_host_restart(
     settled = world.restart_klippy()
     assert settled in ("shutdown", "error"), (settled, world.log_tail())
     world.firmware_restart()
+    _moves_after_restart(world)
+
+
+def test_firmware_restart_right_after_estop_latched_endpoint_death(sim_world):
+    world = _classic_stepcompress(sim_world)
+    control = world.sim_control("f4")
+    world.gcode_ok("SET_KINEMATIC_POSITION X=125 Y=125 Z=125")
+    before = control.step_position(X_STEP_LINE)["steps"]
+    world.gcode_ok("G1 X200 F600")
+    world.wait_until(
+        lambda: control.step_position(X_STEP_LINE)["steps"] != before,
+        timeout=10.0,
+        what="the move reaching the MCU",
+    )
+    world.emergency_stop()
+    world.wait_until(
+        lambda: ENDPOINT_DEATH in _host_rust_events(world),
+        timeout=SIM_BARRIER_ACK_DEADLINE_S + ENDPOINT_DEATH_GRACE_S,
+        what="the endpoint death the shut-down MCU's silence latches",
+        poll=0.01,
+    )
+    grace_end_ns = world.vclock.now_ns() + int(ENDPOINT_DEATH_GRACE_S * 1e9)
+    world.firmware_restart()
+    world.wait_until(
+        lambda: world.vclock.now_ns() > grace_end_ns,
+        timeout=2 * ENDPOINT_DEATH_GRACE_S,
+        what="the endpoint-death grace to pass",
+    )
+    assert ENDPOINT_DEATH_WATCHDOG_ABORT not in _host_rust_events(world)
+    assert world.klippy_proc.poll() is None
     _moves_after_restart(world)

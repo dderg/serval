@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex};
@@ -307,7 +308,52 @@ impl Default for PositionPoll {
 #[derive(Default)]
 pub(crate) struct LatchedFaults {
     pub(crate) drive: Arc<Mutex<HashMap<u32, u16>>>,
-    pub(crate) endpoint_death: Arc<Mutex<HashMap<u32, String>>>,
+    pub(crate) endpoint_death: Arc<EndpointDeathLatch>,
+}
+
+pub(crate) enum DeathReport {
+    Latched,
+    AlreadyLatched,
+    EngineShutDown,
+}
+
+#[derive(Default)]
+struct EndpointDeaths {
+    causes: HashMap<u32, String>,
+    engine_shut_down: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct EndpointDeathLatch(Mutex<EndpointDeaths>);
+
+impl EndpointDeathLatch {
+    pub(crate) fn report(&self, mcu_id: u32, cause: String) -> DeathReport {
+        let mut deaths = self.0.lock_ok();
+        if deaths.engine_shut_down {
+            return DeathReport::EngineShutDown;
+        }
+        match deaths.causes.entry(mcu_id) {
+            Entry::Occupied(_) => DeathReport::AlreadyLatched,
+            Entry::Vacant(slot) => {
+                slot.insert(cause);
+                DeathReport::Latched
+            }
+        }
+    }
+
+    pub(crate) fn take(&self, mcu_id: u32) -> Option<String> {
+        self.0.lock_ok().causes.remove(&mcu_id)
+    }
+
+    pub(crate) fn is_pending(&self, mcu_id: u32) -> bool {
+        self.0.lock_ok().causes.contains_key(&mcu_id)
+    }
+
+    pub(crate) fn settle_on_shutdown(&self) -> HashMap<u32, String> {
+        let mut deaths = self.0.lock_ok();
+        deaths.engine_shut_down = true;
+        std::mem::take(&mut deaths.causes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -55,8 +55,9 @@ use runtime_caps::{
     collect_motor_positions_inner, query_ethercat_runtime_caps, query_runtime_caps, slots_for_axis,
 };
 use state::{
-    EthercatDrive, EthercatNodeClaim, EthercatRegistration, FlushState, HomingRun, HomingState,
-    LatchedFaults, McuConnection, PositionPoll, PumpHandles, RemoteFreeze, TripMember,
+    EndpointDeathLatch, EthercatDrive, EthercatNodeClaim, EthercatRegistration, FlushState,
+    HomingRun, HomingState, LatchedFaults, McuConnection, PositionPoll, PumpHandles, RemoteFreeze,
+    TripMember,
 };
 
 fn abort_after_tracing_appender_drains() {
@@ -447,6 +448,17 @@ impl PyMotionEngine {
                 "engine.shutdown() called twice (idempotent no-op)"
             );
             return;
+        }
+
+        for (mcu_id, cause) in self.latched.endpoint_death.settle_on_shutdown() {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "endpoint_death_settled_by_shutdown",
+                mcu_id,
+                cause = %cause,
+                "engine shut down before klippy took the latched endpoint death — the shutdown \
+                 stops its motion"
+            );
         }
 
         let mut planner = self.planner.lock_ok().take();

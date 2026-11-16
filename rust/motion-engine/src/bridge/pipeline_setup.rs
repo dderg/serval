@@ -1,13 +1,14 @@
 use super::{
-    Arc, Duration, ETHERCAT_CLOCK_FREQ_HZ, HashMap, HashSet, HomingRun, HomingState, Instant,
-    McuAxisConfig, McuConnection, McuHandle, McuHostIo, McuSerialConn, McuTopologyInput, Mutex,
-    PyMotionEngine, PyResult, PyRuntimeError, PyValueError, abort_after_tracing_appender_drains,
-    arm_endpoint_death_watchdog, build_mcu_configs, collect_motor_positions_inner,
-    dispatch_endstop_trip, query_ethercat_runtime_caps, report_endpoint_death,
+    Arc, Duration, ETHERCAT_CLOCK_FREQ_HZ, EndpointDeathLatch, HashMap, HashSet, HomingRun,
+    HomingState, Instant, McuAxisConfig, McuConnection, McuHandle, McuHostIo, McuSerialConn,
+    McuTopologyInput, Mutex, PyMotionEngine, PyResult, PyRuntimeError, PyValueError,
+    abort_after_tracing_appender_drains, arm_endpoint_death_watchdog, build_mcu_configs,
+    collect_motor_positions_inner, dispatch_endstop_trip, query_ethercat_runtime_caps,
+    report_endpoint_death,
 };
 use motion_core::lock_ext::LockExt;
 use motion_pipeline::live_config::step_capacity::StepCapacityInput;
-fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32, reason: &str) {
+fn escalate_endpoint_death(latch: &Arc<EndpointDeathLatch>, mcu_id: u32, reason: &str) {
     if report_endpoint_death(latch, mcu_id, reason) {
         arm_endpoint_death_watchdog(Arc::clone(latch), mcu_id);
     }
@@ -837,7 +838,7 @@ fn spawn_endpoint_liveness_poll(
     mcu_id: u32,
     conn: &Arc<McuSerialConn>,
     mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
-    endpoint_death_latch: Arc<Mutex<HashMap<u32, String>>>,
+    endpoint_death_latch: Arc<EndpointDeathLatch>,
 ) {
     let conn_for_poll = Arc::downgrade(conn);
     let _ = std::thread::Builder::new()
