@@ -82,13 +82,11 @@ fn toolhead_speed(trajectory: &pipeline_snapshot::ExactTrajectory, t: f64) -> f6
 
 #[test]
 fn a_retract_while_a_travel_settles_is_held_to_the_extrude_only_caps() {
-    let config = std::env::temp_dir().join(format!(
-        "retract_while_settling_{}.cfg",
-        std::process::id()
-    ));
+    let config =
+        std::env::temp_dir().join(format!("retract_while_settling_{}.cfg", std::process::id()));
     std::fs::write(&config, PRINTER).expect("temp config");
-    let snapshot = corpus::plan("retract while settling", TRAVEL_THEN_HOP, &config)
-        .expect("the hop plans");
+    let snapshot =
+        corpus::plan("retract while settling", TRAVEL_THEN_HOP, &config).expect("the hop plans");
     let trajectory = &snapshot.trajectory;
     let probes = ((trajectory.t_end() - trajectory.t_start()) / PROBE_STEP_S).ceil() as usize;
     let retract_starts = (0..probes)

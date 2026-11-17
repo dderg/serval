@@ -43,8 +43,10 @@ fn hybrid_cases() -> Vec<(String, String, PathBuf)> {
     let mut cases = corpus::print_cases("voron_first_layers", &[HYBRID_TEST_CONFIG]);
     cases.push((
         format!("neptune_cube/discontinuity/{HYBRID_TEST_CONFIG}"),
-        std::fs::read_to_string(corpus::repo().join("snapshots/cases/neptune_cube/discontinuity.gcode"))
-            .expect("the neptune cube's discontinuity case"),
+        std::fs::read_to_string(
+            corpus::repo().join("snapshots/cases/neptune_cube/discontinuity.gcode"),
+        )
+        .expect("the neptune cube's discontinuity case"),
         corpus::repo().join(HYBRID_TEST_CONFIG),
     ));
     cases

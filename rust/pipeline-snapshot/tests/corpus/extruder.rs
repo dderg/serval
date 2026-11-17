@@ -551,13 +551,15 @@ impl CommandMap {
         )
         .expect("the config's limits build a move base");
         let steps = pipeline_snapshot::plan_steps(waypoints, base).expect("the gcode plans");
-        let extrude_only_moves: HashMap<u32, &geometry::Move> = pipeline_snapshot::plan_moves(&steps)
-            .filter(|m| m.segment.spatial.is_none())
-            .map(|m| (m.source.start_line, m))
-            .collect();
+        let extrude_only_moves: HashMap<u32, &geometry::Move> =
+            pipeline_snapshot::plan_moves(&steps)
+                .filter(|m| m.segment.spatial.is_none())
+                .map(|m| (m.source.start_line, m))
+                .collect();
         let drives_e = |command: &&SegmentCommand| {
             command.followers.iter().any(|follower| {
-                follower.axis_index == E_AXIS && (follower.ratio != 0.0 || follower.ratio_end != 0.0)
+                follower.axis_index == E_AXIS
+                    && (follower.ratio != 0.0 || follower.ratio_end != 0.0)
             })
         };
         let mut extrude_only = Vec::new();
