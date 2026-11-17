@@ -140,8 +140,7 @@ G1 X169.53 Y95.84 F44520
 
 #[test]
 fn an_unshaped_travel_into_a_reversal_plans() {
-    let config =
-        std::env::temp_dir().join(format!("unshaped_printer_{}.cfg", std::process::id()));
+    let config = std::env::temp_dir().join(format!("unshaped_printer_{}.cfg", std::process::id()));
     std::fs::write(&config, UNSHAPED_PRINTER).expect("temp config");
     plans_within_the_extruder_limits("travel into a reversal", TRAVEL_INTO_A_REVERSAL, &config);
 }

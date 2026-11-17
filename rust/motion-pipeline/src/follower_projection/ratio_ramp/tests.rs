@@ -459,7 +459,11 @@ fn a_rest_an_ulp_past_a_resting_node_closes_the_window_on_its_own_place() {
 #[test]
 fn a_window_short_of_a_pending_rest_reads_no_ratio_past_it() {
     let rest = 12.0;
-    let table = vec![(11.0, 0.0, 0.0), (rest - 11.0, 0.02, 0.02), (5.0, 0.03, 0.03)];
+    let table = vec![
+        (11.0, 0.0, 0.0),
+        (rest - 11.0, 0.02, 0.02),
+        (5.0, 0.03, 0.03),
+    ];
     let mut field = WidthField::default();
     field.push_rest(0.0);
     let mut s = 0.5;
