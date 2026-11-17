@@ -23,6 +23,8 @@
 //! budget: the configuration whose crawl valleys the turning guard and the
 //! follower projection lay. Planning must not fail.
 
+mod corpus;
+
 use std::fmt::Write as _;
 
 use motion_pipeline::live_config;
@@ -423,7 +425,7 @@ proptest! {
     #![proptest_config(fresh_seed_config())]
 
     #[test]
-    #[ignore = "#897 #936 #903: crawl valleys owning steps without bound, a ratio read changing across a join, and the turning guard's valley sides fail on draws of this space"]
+    #[ignore = "#936 #903: a ratio read changing across a join, and the turning guard's valley sides fail on draws of this space"]
     fn an_advanced_extruder_plans_print_like_streams(
         printer in advanced_printer_strategy(),
         ratio in 0.02..0.06_f64,
@@ -434,8 +436,37 @@ proptest! {
         let waypoints = pipeline_snapshot::waypoints::parse_gcode(&gcode, &planner.cartesian)
             .expect("the strategy draws valid G-code");
         let snapshot = pipeline_snapshot_for_config(&waypoints, &planner, None);
-        prop_assert!(snapshot.is_ok(), "{gcode}\n{printer}\n{:?}", snapshot.err());
+        prop_assert!(snapshot.is_ok(), "{gcode}\n{printer}\n{:?}", snapshot.as_ref().err());
+        let config = std::env::temp_dir().join(format!("print_like_{}.cfg", std::process::id()));
+        std::fs::write(&config, &printer).expect("temp config");
+        let audit = corpus::extruder::extruder_audit(&snapshot.expect("planned"), &gcode, &config)
+            .expect("the strategy limits the extruder");
+        let counted: Vec<String> = audit
+            .excesses
+            .iter()
+            .filter(|excess| counts_against_the_plan(excess))
+            .map(ToString::to_string)
+            .collect();
+        prop_assert!(counted.is_empty(), "{gcode}\n{printer}\n{}: {counted:?}", audit.summary());
     }
+}
+
+/// Whether an excess counts against the plan as the corpus pins them
+/// (`corpus::known_extruder_excesses`): an acceleration excess while the
+/// toolhead rests or settles is an extrude-only move's, planned under its
+/// own caps.
+fn counts_against_the_plan(excess: &corpus::extruder::ExtruderExcess) -> bool {
+    use corpus::extruder::{ExtruderExcess, ToolheadPhase};
+    !matches!(
+        excess,
+        ExtruderExcess::Acceleration {
+            phase: ToolheadPhase::RestTransition | ToolheadPhase::Resting,
+            ..
+        } | ExtruderExcess::Velocity {
+            phase: ToolheadPhase::Resting,
+            ..
+        }
+    )
 }
 
 /// Found by `hard_invariants_hold`: under a tiny square-corner velocity
