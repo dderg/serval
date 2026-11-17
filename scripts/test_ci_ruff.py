@@ -30,16 +30,18 @@ def link_path_without(hidden: set[str], into: Path) -> None:
             link.symlink_to(entry.path)
 
 
-def run_ci(tmp_path: Path, job: str, *, uvx: bool) -> tuple[int, list[str]]:
+def run_ci(
+    tmp_path: Path, job: str, *, uvx: bool
+) -> tuple[int, list[str], str]:
     root = tmp_path.resolve()
     (root / "scripts").mkdir(parents=True)
     shutil.copy(SCRIPTS / "ci.sh", root / "scripts" / "ci.sh")
     fakes = root / "bin"
     fakes.mkdir()
-    calls = root / "calls"
+    call_log = root / "calls"
     for tool in ["ruff", "uvx"] if uvx else ["ruff"]:
         fake = fakes / tool
-        fake.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{calls}"\n')
+        fake.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{call_log}"\n')
         fake.chmod(0o755)
     system = root / "system"
     link_path_without({"ruff", "uv", "uvx"}, system)
@@ -49,34 +51,34 @@ def run_ci(tmp_path: Path, job: str, *, uvx: bool) -> tuple[int, list[str]]:
             "PATH": f"{fakes}{os.pathsep}{system}",
             "HOME": str(root),
             "CI_NO_SLOT": "1",
+            "CI_MIN_FREE_GB": "0",
         },
         capture_output=True,
         text=True,
     )
-    logged = calls.read_text().splitlines() if calls.exists() else []
-    return result.returncode, [
-        line.replace(str(root), "ROOT") for line in logged
-    ]
+    logged = call_log.read_text().splitlines() if call_log.exists() else []
+    calls = [line.replace(str(root), "ROOT") for line in logged]
+    return result.returncode, calls, result.stdout + result.stderr
 
 
 def test_the_formatter_and_the_gate_run_the_pinned_ruff(tmp_path):
-    assert run_ci(tmp_path / "format", "ruff-format", uvx=True) == (
-        0,
-        [f"uvx ruff@{PINNED} format ROOT"],
-    )
-    assert run_ci(tmp_path / "check", "ruff", uvx=True) == (
+    rc, calls, output = run_ci(tmp_path / "format", "ruff-format", uvx=True)
+    assert (rc, calls) == (0, [f"uvx ruff@{PINNED} format ROOT"]), output
+    rc, calls, output = run_ci(tmp_path / "check", "ruff", uvx=True)
+    assert (rc, calls) == (
         0,
         [
             f"uvx ruff@{PINNED} check ROOT",
             f"uvx ruff@{PINNED} format --check ROOT",
         ],
-    )
+    ), output
 
 
 def test_without_uvx_neither_job_falls_back_to_an_unpinned_ruff(tmp_path):
     for job in ("ruff", "ruff-format"):
-        rc, calls = run_ci(tmp_path / job, job, uvx=False)
-        assert rc != 0 and calls == [], (job, calls)
+        rc, calls, output = run_ci(tmp_path / job, job, uvx=False)
+        assert rc != 0 and calls == [], (job, calls, output)
+        assert "uvx not found" in output, output
 
 
 def test_every_other_ruff_pin_is_the_gates():
