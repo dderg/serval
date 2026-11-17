@@ -596,6 +596,10 @@ impl StreamWorkerHandle {
         Ok(done)
     }
 
+    pub fn declare_wait(&self) -> Result<(), StreamWorkerError> {
+        Ok(())
+    }
+
     pub fn discard_pending(&self) {
         self.links.discard.store(true, Ordering::Release);
     }
