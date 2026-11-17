@@ -140,6 +140,22 @@ impl<S: SpanSink> Pump<S> {
         (self.callbacks.on_fatal_transport)(key, reason);
     }
 
+    /// A shut-down mcu drops every command and acks no barrier, so nothing
+    /// sent to it can execute or retire. Its endpoints stand down and
+    /// execution stops without the fatal-transport action: the mcu is alive,
+    /// and its silence is not an endpoint death.
+    fn stop_for_mcu_shutdown(&mut self, mcu_id: u32) {
+        tracing::warn!(
+            subsystem = "motion",
+            event = "mcu_shutdown_stops_execution",
+            mcu = mcu_id,
+            "mcu reported shutdown — its endpoints stand down and execution stops"
+        );
+        self.sink.on_mcu_shutdown(mcu_id);
+        self.fatal_reason
+            .get_or_insert_with(|| format!("mcu {mcu_id} reported shutdown"));
+    }
+
     /// This key's staged work is void: drop it, tell the host what it lost,
     /// and forget the junction so the next view is not held contiguous with
     /// motion that never ran.
@@ -228,6 +244,10 @@ impl<S: SpanSink> Pump<S> {
     }
 
     pub(super) fn handle_control_msg(&mut self, msg: PumpMsg) -> bool {
+        if let PumpMsg::McuShutdown { mcu_id } = msg {
+            self.stop_for_mcu_shutdown(mcu_id);
+            return true;
+        }
         if !matches!(&msg, PumpMsg::Heartbeat(_)) {
             if let Some(reason) = &self.fatal_reason {
                 match msg {
@@ -389,6 +409,7 @@ impl<S: SpanSink> Pump<S> {
                 );
                 self.fail_transport(AxisKey { mcu_id, axis: 0 }, &error);
             }
+            PumpMsg::McuShutdown { .. } => unreachable!("handled ahead of the fatal gate"),
             PumpMsg::Endpoint { command, reply } => {
                 let _ = reply.send(self.sink.endpoint_control(command));
             }
