@@ -72,8 +72,7 @@ fn a_step_planning_a_stream_yet_to_set_off_costs_its_whole_length() {
     let took = Duration::from_millis(650);
     assert_eq!(pacer.note_step(0.0, 0.0, took), Some(took.as_secs_f64()));
     assert!(
-        (pacer.reserve_secs() - DRAIN_RESERVE_SAFETY * (0.65 + LOW_MARGIN_WARN_SECS)).abs()
-            < 1e-12
+        (pacer.reserve_secs() - DRAIN_RESERVE_SAFETY * (0.65 + LOW_MARGIN_WARN_SECS)).abs() < 1e-12
     );
 }
 
