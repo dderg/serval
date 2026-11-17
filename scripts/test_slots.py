@@ -130,7 +130,7 @@ def test_waiting_past_the_timeout_fails_loudly(tmp_path):
         ],
         env=env(tmp_path, 1),
     )
-    time.sleep(0.5)
+    wait_for(lambda: holder.pid in slots.holders(tmp_path / "slots", 1))
     result = subprocess.run(
         [
             sys.executable,
