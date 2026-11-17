@@ -25,9 +25,11 @@ replay checks every segment, a second, pinned to two cores, is timed.
   skipped and reported with its line; nothing it would emit is planned.
 - **Mesh**: `--mesh NAME`, else the first profile the print loads
   (`BED_MESH_PROFILE LOAD`, or `bed_mesh_default` at startup), else the saved
-  `default` profile, else none. The replay activates it before the first
-  move with the toolhead at the origin, through the engine's own activation
-  (`SurfaceTransform::activate`). Later loads and clears are listed, not
+  `default` profile, else none. The replay activates it with the toolhead at
+  the origin, through the engine's own activation
+  (`SurfaceTransform::activate`), and starts the plan at the first position
+  the print names with the mesh active there, as the live host stands after
+  loading the mesh and moving to it. Later loads and clears are listed, not
   replayed.
 
 Each command klippy would execute is treated by class

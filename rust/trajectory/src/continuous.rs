@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use geometry::path::lowering::PositionProfile;
 use geometry::path::Segment;
-use geometry::{FollowerDemand, LawSegment, Move, ScalarLaw, SurfaceTransform};
+use geometry::{FollowerDemand, LawSegment, MeshPatch, Move, ScalarLaw, SurfaceTransform};
 use nurbs::ScalarNurbs;
 use thiserror::Error;
 
@@ -394,7 +394,8 @@ impl AnalyticMoveSpan {
     }
 
     /// Absolute times at which a variable bed surface changes its piecewise
-    /// definition along the path; empty without a variable surface or a
+    /// definition along the path, each the first instant the evaluator reads
+    /// the piece the path enters; empty without a variable surface or a
     /// spatial body, `None` when a transition cannot be located in the phases.
     pub fn surface_seam_times(&self) -> Option<Vec<f64>> {
         let SurfaceMode::Variable(surface) = &self.surface else {
@@ -403,15 +404,48 @@ impl AnalyticMoveSpan {
         let Some(spatial) = self.source.segment.spatial.as_ref() else {
             return Some(Vec::new());
         };
-        surface
+        let estimates = surface
             .path_transition_distances(spatial)
             .ok()?
             .into_iter()
             .map(|transition| {
-                let phase = self.phases.iter().find(|phase| {
-                    transition.s >= phase.s0 && transition.s <= phase.end_distance()
-                })?;
-                Some(self.stream_time(phase.time_at_distance(transition.s)?))
+                let distance = self.source_distance_origin + transition.s;
+                let phase = self
+                    .phases
+                    .iter()
+                    .find(|phase| distance <= phase.end_distance())?;
+                Some(self.stream_time(phase.time_at_distance(distance)?))
+            })
+            .collect::<Option<Vec<f64>>>()?;
+        Some(self.surface_switches(surface, spatial, &estimates))
+    }
+
+    /// Each estimate moved onto the first instant the evaluator reads another
+    /// surface piece than at the midpoint before it, searched up to the
+    /// midpoint after it — midpoints to the neighbouring estimates or to the
+    /// span's ends, where a path starting or ending on a mesh line switches
+    /// patch without crossing it; kept where the piece does not change there.
+    fn surface_switches(
+        &self,
+        surface: &SurfaceTransform,
+        spatial: &Segment,
+        estimates: &[f64],
+    ) -> Vec<f64> {
+        let piece_at =
+            |t: f64| SurfacePiece::at(surface, spatial.point_at(self.tangential_state(t).0));
+        let bounds: Vec<f64> = std::iter::once(self.t_start)
+            .chain(estimates.iter().copied())
+            .chain(std::iter::once(self.t_end))
+            .collect();
+        let brackets: Vec<f64> = bounds
+            .windows(2)
+            .map(|pair| 0.5 * (pair[0] + pair[1]))
+            .collect();
+        estimates
+            .iter()
+            .zip(brackets.windows(2))
+            .map(|(&estimate, bracket)| {
+                first_switch(&piece_at, bracket[0], bracket[1]).unwrap_or(estimate)
             })
             .collect()
     }
@@ -1400,6 +1434,51 @@ pub fn next_toward(value: f64, toward: f64) -> f64 {
         f64::from_bits(bits + 1)
     } else {
         f64::from_bits(bits - 1)
+    }
+}
+
+/// The surface piece `eval_warped_z` reads at a G-code point: the mesh patch
+/// and which side of each fade band edge the height lies on.
+#[derive(PartialEq)]
+struct SurfacePiece {
+    patch: MeshPatch,
+    past_fade_start: bool,
+    past_fade_end: bool,
+}
+
+impl SurfacePiece {
+    fn at(surface: &SurfaceTransform, [x, y, z]: [f64; 3]) -> Self {
+        let (fade_start, fade_end) = surface.fade().band();
+        Self {
+            patch: surface.mesh().patch_at(x, y),
+            past_fade_start: z >= fade_start,
+            past_fade_end: z >= fade_end,
+        }
+    }
+}
+
+/// The first time in `(before, after]` whose piece differs from the one at
+/// `before`, bisected to adjacent floats; `None` where `after` reads the
+/// same piece.
+fn first_switch<P: PartialEq>(
+    piece_at: impl Fn(f64) -> P,
+    mut before: f64,
+    mut after: f64,
+) -> Option<f64> {
+    let entered = piece_at(before);
+    if piece_at(after) == entered {
+        return None;
+    }
+    loop {
+        let middle = 0.5 * (before + after);
+        if middle <= before || middle >= after {
+            return Some(after);
+        }
+        if piece_at(middle) == entered {
+            before = middle;
+        } else {
+            after = middle;
+        }
     }
 }
 
