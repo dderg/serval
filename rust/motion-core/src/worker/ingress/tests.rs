@@ -5,11 +5,8 @@ fn ingress(output_tx: crossbeam_channel::Sender<motion_pipeline::TrajectoryItem>
     let frontier: Arc<crate::worker::CommittedFrontier> = Arc::default();
     let links: Arc<WorkerLinks> = Arc::default();
     let pacer = Pacer::default();
-    let intake = Arc::new(IntakeGate::new(
-        Arc::clone(&frontier),
-        Arc::clone(&links),
-        pacer.reserve_secs(),
-    ));
+    links.publish_reserve(pacer.reserve_secs());
+    let intake = Arc::new(IntakeGate::new(Arc::clone(&frontier), Arc::clone(&links)));
     Ingress {
         config: crate::worker::tests::cfg(),
         odometer: vec![0.0; 4],

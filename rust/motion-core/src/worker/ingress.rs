@@ -54,6 +54,12 @@ enum Handoff {
     Drain,
 }
 
+/// A planning step under way: the runway when it began, and when.
+struct PlanningStep {
+    runway_s: f64,
+    began: Instant,
+}
+
 pub(super) struct Ingress {
     pub(super) config: StreamConfig,
     /// Expected toolhead position after every move ingested so far; the
@@ -132,11 +138,11 @@ impl Ingress {
                 match rx.try_recv() {
                     Ok(msg) => Some(msg),
                     Err(crossbeam_channel::TryRecvError::Empty) => {
-                        let runway_before_s = self.watch_runway();
+                        let step = self.watch_step();
                         let planned_from_s = self.pipeline.planned_through_s();
                         let planned = self.pipeline.idle();
                         self.note_planned(planned_from_s, Handoff::Step);
-                        self.note_planning_step(runway_before_s);
+                        self.note_planning_step(step);
                         if !planned {
                             if self.links.shutting_down.load(Ordering::Acquire) {
                                 return;
@@ -169,9 +175,9 @@ impl Ingress {
             }
             match msg {
                 StreamMsg::Move(m) => {
-                    let runway_before_s = self.watch_runway();
+                    let step = self.watch_step();
                     self.handle_move(m);
-                    self.note_planning_step(runway_before_s);
+                    self.note_planning_step(step);
                     self.brake_if_busy_runway_falls();
                 }
                 other => {
@@ -223,21 +229,32 @@ impl Ingress {
         self.timeline.frontier.runway_secs()
     }
 
-    fn note_planning_step(&mut self, runway_before_s: f64) {
-        let Some(lowest_s) = self.timeline.frontier.lowest_lead_secs() else {
-            return;
-        };
-        if self.pacer.note_step(runway_before_s, lowest_s) {
-            self.report_reserve_raised(ReserveCost::PlanningStep, runway_before_s - lowest_s);
+    fn watch_step(&self) -> PlanningStep {
+        PlanningStep {
+            runway_s: self.watch_runway(),
+            began: Instant::now(),
         }
     }
 
-    /// The pacer measured a costlier brake: the intake's cap follows the
-    /// wider reserve. One that would need more than the reserve cap holds
-    /// warns: a brake costing more than the cap underruns.
+    fn note_planning_step(&mut self, step: PlanningStep) {
+        let Some(lowest_s) = self.timeline.frontier.lowest_lead_secs() else {
+            return;
+        };
+        if let Some(cost_s) = self
+            .pacer
+            .note_step(step.runway_s, lowest_s, step.began.elapsed())
+        {
+            self.report_reserve_raised(ReserveCost::PlanningStep, cost_s);
+        }
+    }
+
+    /// The pacer measured a costlier brake: the intake's cap and the
+    /// dispatcher's set-off follow the wider reserve. One that would need
+    /// more than the reserve cap holds warns: a brake costing more than the
+    /// cap underruns.
     fn report_reserve_raised(&self, cost: ReserveCost, consumed_s: f64) {
         let reserve_s = self.pacer.reserve_secs();
-        self.intake.set_reserve(reserve_s);
+        self.links.publish_reserve(reserve_s);
         tracing::info!(
             subsystem = "motion",
             event = "pacer_reserve_raised",

@@ -41,7 +41,6 @@ pub(crate) struct IntakeGate {
     links: Arc<WorkerLinks>,
     planned_through_bits: AtomicU64,
     inbox_ns: AtomicU64,
-    reserve_bits: AtomicU64,
     peak_ahead_bits: AtomicU64,
 }
 
@@ -51,17 +50,12 @@ pub(crate) fn shortest_ns(m: &geometry::Move) -> u64 {
 }
 
 impl IntakeGate {
-    pub(crate) fn new(
-        frontier: Arc<CommittedFrontier>,
-        links: Arc<WorkerLinks>,
-        reserve_s: f64,
-    ) -> Self {
+    pub(crate) fn new(frontier: Arc<CommittedFrontier>, links: Arc<WorkerLinks>) -> Self {
         Self {
             frontier,
             links,
             planned_through_bits: AtomicU64::new(0.0_f64.to_bits()),
             inbox_ns: AtomicU64::new(0),
-            reserve_bits: AtomicU64::new(reserve_s.to_bits()),
             peak_ahead_bits: AtomicU64::new(0.0_f64.to_bits()),
         }
     }
@@ -72,14 +66,9 @@ impl IntakeGate {
             .store(stream_s.to_bits(), Ordering::Release);
     }
 
-    pub(crate) fn set_reserve(&self, reserve_s: f64) {
-        self.reserve_bits
-            .store(reserve_s.to_bits(), Ordering::Release);
-    }
-
     /// The most runway the intake lets queue ahead of the playhead.
     pub(crate) fn cap_secs(&self) -> f64 {
-        f64::from_bits(self.reserve_bits.load(Ordering::Acquire)) + STALL_HEADROOM_S
+        self.links.reserve_secs() + STALL_HEADROOM_S
     }
 
     pub(crate) fn enter(&self, ns: u64) {

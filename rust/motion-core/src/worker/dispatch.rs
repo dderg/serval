@@ -58,6 +58,11 @@ pub(crate) trait SegmentSink {
     /// across the idle gap that follows may re-anchor the timeline forward.
     fn mark_parked(&mut self) {}
     fn follow_stream_to(&mut self, stream_t: f64);
+    /// Whether `seg` would set the stream off from rest instead of
+    /// continuing it in motion. A sink that anchors nothing sets nothing off.
+    fn sets_off(&self, _seg: &ContinuousSegment) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -69,6 +74,10 @@ pub(crate) struct WorkerLinks {
     pub(crate) finite_homing_admission: AtomicBool,
     pub(crate) shutting_down: AtomicBool,
     pub(crate) last_move_time_bits: AtomicU64,
+    /// The runway the pacer keeps for braking to rest: the intake caps the
+    /// motion queued ahead on it, and a stream sets off only with that much
+    /// committed.
+    reserve_bits: AtomicU64,
     #[cfg(test)]
     pub(crate) pacer_drains: PacerDrains,
     pub(crate) fences: crate::fence::FenceRegistry,
@@ -100,6 +109,15 @@ impl WorkerLinks {
                     | TrajectoryItem::Control(Control::Dispatch(DispatchCommand::Nudge { .. }))
             )
     }
+
+    pub(crate) fn reserve_secs(&self) -> f64 {
+        f64::from_bits(self.reserve_bits.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn publish_reserve(&self, reserve_s: f64) {
+        self.reserve_bits
+            .store(reserve_s.to_bits(), Ordering::Release);
+    }
 }
 
 /// Final pipeline stage: dispatches shaped segments into the sink and
@@ -107,6 +125,12 @@ impl WorkerLinks {
 /// is acknowledged here — everything ahead of it has been dispatched or
 /// discarded. Segments behind a captured error are dropped until the error
 /// is reported at the next `Barrier`.
+///
+/// A stream at rest sets off only once the pacer's reserve is committed past
+/// its start, or it ends at rest: the planning front releases the first
+/// segments of a stream while it still holds the motion behind them (#983:
+/// the lowerer's 8.4 ms rest hold, then 0.3-0.8 s of planning on the Pi), and
+/// a stream started on less could not be braked before its playhead overran.
 pub(crate) struct Dispatcher {
     links: Arc<WorkerLinks>,
     frontier: Arc<CommittedFrontier>,
@@ -114,6 +138,7 @@ pub(crate) struct Dispatcher {
     stream_time: f64,
     pending_error: Option<String>,
     terminal_halt: Option<String>,
+    setting_off: Vec<ContinuousSegment>,
 }
 
 impl Dispatcher {
@@ -125,6 +150,7 @@ impl Dispatcher {
             stream_time: 0.0,
             pending_error: None,
             terminal_halt: None,
+            setting_off: Vec::new(),
         }
     }
 
@@ -132,6 +158,7 @@ impl Dispatcher {
         if self.terminal_halt.is_none() {
             self.terminal_halt = Some(reason.to_string());
             self.dispatched_through = None;
+            self.setting_off.clear();
             self.frontier.clear();
             self.links.fences.on_reset();
             self.links.wakeup.notify_fence_resolved();
@@ -140,20 +167,59 @@ impl Dispatcher {
 
     pub(crate) fn feed(&mut self, item: TrajectoryItem, sink: &mut impl SegmentSink) {
         match item {
-            TrajectoryItem::Seg(seg) => self.handle_segment(&seg, sink),
-            TrajectoryItem::Parked => sink.mark_parked(),
-            TrajectoryItem::Control(ctrl) => self.handle_control(ctrl, sink),
+            TrajectoryItem::Seg(seg) => self.handle_segment(seg, sink),
+            TrajectoryItem::Parked => {
+                self.set_off(sink);
+                sink.mark_parked();
+            }
+            TrajectoryItem::Control(ctrl) => {
+                self.set_off(sink);
+                self.handle_control(ctrl, sink);
+            }
         }
     }
 
-    fn handle_segment(&mut self, seg: &ContinuousSegment, sink: &mut impl SegmentSink) {
-        if self.links.discard.load(Ordering::Acquire)
+    fn drops_segments(&self) -> bool {
+        self.links.discard.load(Ordering::Acquire)
             || self.links.shutting_down.load(Ordering::Acquire)
             || self.pending_error.is_some()
             || self.terminal_halt.is_some()
-        {
+    }
+
+    fn handle_segment(&mut self, seg: ContinuousSegment, sink: &mut impl SegmentSink) {
+        if self.drops_segments() {
+            self.setting_off.clear();
             return;
         }
+        if self.setting_off.is_empty() && !sink.sets_off(&seg) {
+            self.dispatch(&seg, sink);
+            return;
+        }
+        self.setting_off.push(seg);
+        if self.held_off_secs() >= self.links.reserve_secs() {
+            self.set_off(sink);
+        }
+    }
+
+    /// Stream time held back for the set-off, from its first segment on.
+    fn held_off_secs(&self) -> f64 {
+        match (self.setting_off.first(), self.setting_off.last()) {
+            (Some(first), Some(last)) => last.t_end - first.t_start,
+            _ => 0.0,
+        }
+    }
+
+    /// Dispatches the segments held back for the set-off, in order.
+    fn set_off(&mut self, sink: &mut impl SegmentSink) {
+        for seg in std::mem::take(&mut self.setting_off) {
+            if self.drops_segments() {
+                return;
+            }
+            self.dispatch(&seg, sink);
+        }
+    }
+
+    fn dispatch(&mut self, seg: &ContinuousSegment, sink: &mut impl SegmentSink) {
         log_dispatch(seg);
         match sink.dispatch(seg) {
             Ok(()) => {

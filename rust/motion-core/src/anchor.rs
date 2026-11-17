@@ -441,8 +441,9 @@ impl Anchor {
         });
     }
 
-    /// The stream was drained to rest before it started playing: nothing it
-    /// plays waits on its producer any more.
+    /// The stream was drained to rest before it started playing: the drain
+    /// commits all of it, so it sets off on the reserve or its rest, without
+    /// the prime.
     pub(crate) fn release_prime(&mut self) {
         self.prime = None;
     }
@@ -466,6 +467,13 @@ impl Anchor {
     #[must_use]
     pub fn is_parked(&self) -> bool {
         self.parked
+    }
+
+    /// Whether a segment starting at `seg_t_start` sets the stream off from
+    /// rest: the stream is parked, or the segment restarts its timeline.
+    #[must_use]
+    pub(crate) fn sets_off(&self, seg_t_start: f64, host_now: f64) -> bool {
+        self.parked || self.classify(seg_t_start, host_now) == AnchorClass::Reposition
     }
 
     /// The pacer braked motion in flight to rest because the producer fell

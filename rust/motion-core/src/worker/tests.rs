@@ -266,6 +266,10 @@ impl SegmentSink for AnchoredSink {
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.anchor.lock_ok().follow_stream_to(stream_t);
     }
+    fn sets_off(&self, seg: &ContinuousSegment) -> bool {
+        let host_now = self.router.lock_ok().host_now_secs();
+        self.anchor.lock_ok().sets_off(seg.t_start, host_now)
+    }
 }
 
 #[test]
@@ -374,6 +378,9 @@ impl SegmentSink for PacedSink {
     }
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.inner.follow_stream_to(stream_t);
+    }
+    fn sets_off(&self, seg: &ContinuousSegment) -> bool {
+        self.inner.sets_off(seg)
     }
 }
 
@@ -1549,7 +1556,6 @@ fn drain_requests_refuse_a_full_channel_instead_of_blocking() {
     let intake = Arc::new(intake_gate::IntakeGate::new(
         Arc::default(),
         Arc::clone(&links),
-        0.0,
     ));
     let h = StreamWorkerHandle {
         sender,
@@ -2052,6 +2058,9 @@ impl SegmentSink for StallAfterFirstSink {
     }
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.inner.follow_stream_to(stream_t);
+    }
+    fn sets_off(&self, seg: &ContinuousSegment) -> bool {
+        self.inner.sets_off(seg)
     }
 }
 

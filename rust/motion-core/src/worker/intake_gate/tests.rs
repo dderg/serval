@@ -8,17 +8,24 @@ use super::*;
 const RESERVE_S: f64 = 0.5;
 const TOLERANCE_S: f64 = 0.05;
 
+fn links_reserving(reserve_s: f64) -> Arc<WorkerLinks> {
+    let links: Arc<WorkerLinks> = Arc::default();
+    links.publish_reserve(reserve_s);
+    links
+}
+
 fn gate_with_runway(runway_s: f64) -> IntakeGate {
     let frontier: Arc<CommittedFrontier> = Arc::default();
     frontier.advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
-    IntakeGate::new(frontier, Arc::default(), RESERVE_S)
+    IntakeGate::new(frontier, links_reserving(RESERVE_S))
 }
 
 #[test]
 fn the_cap_is_the_reserve_plus_the_pumps_stall_headroom() {
-    let gate = gate_with_runway(0.0);
+    let links = links_reserving(RESERVE_S);
+    let gate = IntakeGate::new(Arc::default(), Arc::clone(&links));
     assert_eq!(gate.cap_secs(), RESERVE_S + crate::pump::MAX_LEAD_SECS);
-    gate.set_reserve(1.5);
+    links.publish_reserve(1.5);
     assert_eq!(gate.cap_secs(), 1.5 + crate::pump::MAX_LEAD_SECS);
 }
 
@@ -56,12 +63,12 @@ fn moves_waiting_in_the_inbox_count_against_the_cap() {
 fn gate_with_planned_ahead(runway_s: f64, planned_ahead_s: f64) -> IntakeGate {
     let frontier: Arc<CommittedFrontier> = Arc::default();
     frontier.advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
-    let links: Arc<WorkerLinks> = Arc::default();
+    let links = links_reserving(RESERVE_S);
     let dispatched_s = 10.0_f64;
     links
         .last_move_time_bits
         .store(dispatched_s.to_bits(), Ordering::Release);
-    let gate = IntakeGate::new(frontier, links, RESERVE_S);
+    let gate = IntakeGate::new(frontier, links);
     gate.set_planned_through(dispatched_s + planned_ahead_s);
     gate
 }
@@ -119,8 +126,7 @@ fn the_peak_ahead_is_the_most_noted_since_it_was_last_taken() {
 #[test]
 fn a_reopening_less_than_a_nanosecond_away_has_happened() {
     const SUB_NANOSECOND_S: f64 = 1.0e-10;
-    let links: Arc<WorkerLinks> = Arc::default();
-    let gate = IntakeGate::new(Arc::default(), links, RESERVE_S);
+    let gate = IntakeGate::new(Arc::default(), links_reserving(RESERVE_S));
     gate.set_planned_through(gate.cap_secs() + SUB_NANOSECOND_S);
     assert_eq!(gate.reopens_in(), None);
     assert!(gate.admits());
@@ -130,8 +136,7 @@ fn a_reopening_less_than_a_nanosecond_away_has_happened() {
 fn a_pipeline_no_mcu_executes_always_admits() {
     let gate = IntakeGate::new(
         Arc::new(CommittedFrontier::unexecuted()),
-        Arc::default(),
-        RESERVE_S,
+        links_reserving(RESERVE_S),
     );
     assert!(gate.admits());
 }
