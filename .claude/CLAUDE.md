@@ -187,9 +187,16 @@ in one `edit`, and take the tag from the previous edit's response. Do not fall b
 edits reviewable and silently match more than you meant.
 # Hardware lock
 
-The Pi bench is shared: every use goes through `tools/bench/lock.py hold -- <cmd>`, which
-queues behind the current holder and prints who holds it and for how long (waits of
-20 minutes were seen). Hold it for the whole session script, not per command.
+The Pi bench is shared: every use takes `~/bench/.lock` (`tools/bench/lock.py hold -- <cmd>` or a
+bench tool's own lock), which queues behind the current holder and prints who holds it and for
+how long (waits of 20-47 minutes were seen). One hold = one self-contained unit of at most 30
+minutes that starts by restoring its deploy (sync, F401 firmware, `deploy.py settle`: printer.cfg,
+no bench drop-in or cpufreq cap, no orphaned Pi job, klippy idle). `lock.MAX_HOLD_S` = 1800 s from
+acquisition is the policy, no flag raises it: at the cap the hold's process tree is killed and it
+exits 124 naming the command and its elapsed time; nested holds share the outer deadline. Builds,
+`analyze.py`, checkers and reports run outside holds. `suite.py`, `qualify.py`, `ab.py`,
+`throughput_pi.py` and `throughput_recheck.py` split themselves into such holds and release the
+lock between them: never wrap them in `lock.py hold`.
 
 # Qualification
 
@@ -199,10 +206,15 @@ and prints `DEFERRED to qualification` for the two that needed the Pi per PR (th
 config's exact-tree `PINNED_CORES` window, the calibration's age, now 10 days). A PR that
 commits a `pi_window.json` for its exact tree is still held to it.
 
-A tag is gated by `uv run python scripts/qualify.py run [REV]` (one bench hold: deploy + F401
-identity, full suite, soak group, `throughput_pi.py`, calibration; README "Qualification").
-A pass pushes `qualified-<UTC date>[-n]`; a failure prints the bisect command.
-`qualify.py status` shows the debt; `land-pr.sh` prints it after each landing.
+A tag is gated by `uv run python scripts/qualify.py run [REV]`: resumable units `deploy`,
+`suite-1..4`, `soak-<row>` x2, `pi`, `calibration` (README "Qualification"), each one or more
+holds of at most 30 minutes, ~9 holds and ~1.5 h of bench in all instead of one 2.5 h hold.
+Each unit's record lives under `~/bench/qualifications/<rev>/units/`; a rerun skips a unit that
+passed for the same rev, F401 build id, expect-fail issues of its rows and Pi identity (serial,
+kernel, OS, dpkg status, boot config, toolchain, capture board) within 24 h, so a reboot or a lost
+lock costs one hold. A failed unit stops the run and prints the bisect command (one suite hold
+per candidate). `qualified-<UTC date>[-n]` is pushed only when every unit passed inside the
+window. `qualify.py status` shows the debt; `land-pr.sh` prints it after each landing.
 **Print from the latest `qualified-*` tag, not from main.**
 
 How far CI decides per config is the gate's `trust:` line (lowest prediction lowered by the worst

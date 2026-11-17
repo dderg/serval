@@ -22,12 +22,14 @@
 // staged pipeline.
 //
 // Stops at rest (G4, M400, M84, ...) reach the pipeline as the live engine
-// sends them. --mesh activates a bed mesh before the first move, as klippy's
-// `BED_MESH_PROFILE LOAD` does with the toolhead at the origin: the JSON is
-// the request `bed_mesh` hands `set_bed_mesh`, and the G-code starts from
-// the Z the activation renamed. --check fails on any emitted segment that
+// sends them. --mesh activates a bed mesh as klippy's `BED_MESH_PROFILE LOAD`
+// does with the toolhead at the origin: the JSON is the request `bed_mesh`
+// hands `set_bed_mesh`, the G-code starts from the Z the activation renamed,
+// and the plan starts at the first position the G-code names with the mesh
+// active there. --check fails on any emitted segment that
 // does not evaluate to finite positions. Any failure prints one
-// `REPLAY_FAILURE {json}` line for scripts/preflight.py.
+// `REPLAY_FAILURE {json}` line for scripts/preflight.py; a panic then exits
+// with EXIT_REPORTED_PANIC instead of aborting, so it leaves no core dump.
 
 use std::env;
 use std::fs;
@@ -42,11 +44,12 @@ use std::time::Instant;
 use geometry::{GcodePos, MachinePos, MeshGridSpec, ProbedMesh, SurfaceTransform};
 use motion_core::seam_test_harness::{LiveScript, LiveScriptError};
 use motion_pipeline::timing::stage_totals;
-use motion_pipeline::{Control, Pipeline, StreamInput, TrajectoryItem};
-use pipeline_snapshot::{PlanStep, SnapshotError};
+use motion_pipeline::{Pipeline, StreamInput, TrajectoryItem};
+use pipeline_snapshot::SnapshotError;
 use trajectory::ContinuousSegment;
 
 const EXIT_FAILURE: i32 = 1;
+const EXIT_REPORTED_PANIC: i32 = 70;
 
 #[derive(Clone, Copy)]
 enum FailureKind {
@@ -130,8 +133,8 @@ fn record_failure(kind: FailureKind, message: &str, location: Option<&str>) {
     let _ = std::io::stdout().flush();
 }
 
-/// Release builds abort on panic, so a panic on any thread records its
-/// failure from the hook.
+/// A panic on any thread records its failure from the hook; the record is
+/// flushed by then, so the process exits at once.
 fn record_panics() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -144,6 +147,7 @@ fn record_panics() {
         let location = info.location().map(ToString::to_string);
         record_failure(FailureKind::Panic, &message, location.as_deref());
         default_hook(info);
+        process::exit(EXIT_REPORTED_PANIC);
     }));
 }
 
@@ -257,27 +261,6 @@ fn load_mesh(path: &str) -> Result<SurfaceTransform, String> {
     .map_err(|e| format!("set_bed_mesh: {e}"))
 }
 
-fn stream_inputs(
-    steps: Vec<PlanStep>,
-    mesh: Option<Arc<SurfaceTransform>>,
-    gcode_z_rebase: f64,
-) -> Vec<StreamInput> {
-    let mut inputs = Vec::with_capacity(steps.len() + 1);
-    if let Some(mesh) = mesh {
-        inputs.push(StreamInput::Control(Control::SetMesh {
-            mesh: Some(mesh),
-            gcode_z_rebase,
-        }));
-    }
-    for step in steps {
-        step.feed(|input| {
-            inputs.push(input);
-            true
-        });
-    }
-    inputs
-}
-
 fn non_finite(seg: &ContinuousSegment) -> Option<String> {
     if !(seg.t_start.is_finite() && seg.t_end.is_finite()) {
         return Some(format!(
@@ -354,7 +337,7 @@ fn main() {
     MOVE_LINES
         .set(std::mem::take(&mut script.move_lines))
         .expect("the move lines are set once");
-    let inputs = stream_inputs(std::mem::take(&mut script.steps), mesh, gcode_z_rebase);
+    let inputs = script.take_inputs(mesh);
 
     let wall = Instant::now();
     let (arrival_tx, arrival_rx) = crossbeam_channel::unbounded::<(f64, f64)>();
