@@ -35,6 +35,14 @@ void mcu_demux_consume(void);
 // branch (gated on CONFIG_HAVE_BOOTLOADER_REQUEST); callers need not check.
 void mcu_demux_pump(const uint8_t *buf, uint16_t len);
 
+#if CONFIG_MACH_LINUX
+// Bytes mcu_demux_pump fed since the last take. A dispatch that shuts the
+// MCU down longjmps out of the pump, leaving this at the end of the frame
+// that shut it down: the console feeds the rest on its next pass (#879: the
+// config_reset klippy sends right behind emergency_stop, read in one chunk).
+uint16_t mcu_demux_take_fed(void);
+#endif
+
 const uint8_t *mcu_demux_klipper_buf(void);
 uint8_t        mcu_demux_klipper_len(void);
 
