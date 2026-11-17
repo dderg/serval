@@ -27,13 +27,6 @@ impl StepMode {
 
 pub const MAX_STEPPER_OIDS: usize = 16;
 
-#[derive(Debug, Clone, Copy)]
-pub struct TickState {
-    pub dt: f32,
-    pub positions: [f32; 4], // [x, y, z, e] logical
-    pub motors: [f32; 4],    // [a, b, z, e] or [x, y, z, e] post-kinematic
-}
-
 pub type EngineImpl = Engine;
 
 // `force_idle` handshake calls Klipper's `irq_save`/`irq_restore` to gate

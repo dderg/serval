@@ -552,6 +552,7 @@ pub struct StepcompressEndpoint {
     barriers: BarrierLedger,
     barrier_ack_deadline_secs: f64,
     latched_fatal: Option<String>,
+    mcu_shut_down: bool,
     buzz: Option<StepBuzz>,
     drain_pass_budget: Option<std::time::Duration>,
     link_health: Option<Arc<host_rt::host_io::link_health::LinkHealth>>,
@@ -715,6 +716,7 @@ impl StepcompressEndpoint {
             barriers: BarrierLedger::with_capacity(lanes.len()),
             barrier_ack_deadline_secs,
             latched_fatal: None,
+            mcu_shut_down: false,
             buzz: None,
             drain_pass_budget: None,
             link_health,
@@ -2065,6 +2067,12 @@ impl StepcompressEndpoint {
         self.latched_fatal.is_some()
     }
 
+    /// The mcu drops every command from here on and acks no barrier, so the
+    /// endpoint stops sending and stops waiting on the barriers outstanding.
+    pub fn on_mcu_shutdown(&mut self) {
+        self.mcu_shut_down = true;
+    }
+
     /// Every fatal this endpoint produces is unrecoverable by construction:
     /// the shim's timeline, the mcu's move queue, or the transport is already
     /// wrong, and the next attempt reproduces it. Retrying one silently — the
@@ -2099,6 +2107,9 @@ impl StepcompressEndpoint {
     }
 
     pub fn tick(&mut self) -> Result<(), SendError> {
+        if self.mcu_shut_down {
+            return Ok(());
+        }
         self.reject_latched_fatal()?;
         self.tick_inner().map_err(|e| self.escalate(e))
     }
