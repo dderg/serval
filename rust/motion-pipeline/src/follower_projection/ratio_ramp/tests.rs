@@ -10,9 +10,10 @@ use super::super::{
     FollowerState, OdometerLeaves, SpanSide, Table as SpanTable, shaped_leader_odometer,
 };
 use super::{
-    AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
-    NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RatioSmoothing, RestSide,
-    ShapedLeaders, Spill, TimedSeam, ValleyKind, WIDTH_SLOPE_BOUND, WidthField, leg_crawls,
+    AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, CrawlRatios, Crossing, ENVELOPE_SLOPE,
+    KERNEL_PEAK, NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RatioSmoothing,
+    RestSide, ShapedLeaders, Spill, TimedSeam, ValleyKind, WIDTH_SLOPE_BOUND, WidthField,
+    leg_crawls,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -1618,15 +1619,15 @@ fn a_crawl_lays_a_valley_where_the_guard_holds_the_follower_or_the_advance_would
         rate: 119.0,
         jerk: 119.0 * 119.0 / 0.647,
     };
-    assert!(crawl.needs_valley(&guarded, 0.0337));
-    assert!(!crawl.needs_valley(&behind_a_kernel, 0.2));
-    assert!(crawl.needs_valley(&behind_a_kernel, 0.5));
+    assert!(crawl.needs_valley(&guarded, read_ratio(0.0337)));
+    assert!(!crawl.needs_valley(&behind_a_kernel, read_ratio(0.2)));
+    assert!(crawl.needs_valley(&behind_a_kernel, read_ratio(0.5)));
     let cruise = Crossing {
         speed: 2.5,
         ..crawl
     };
-    assert!(!cruise.needs_valley(&guarded, 0.5));
-    assert!(!cruise.needs_valley(&behind_a_kernel, 0.5));
+    assert!(!cruise.needs_valley(&guarded, read_ratio(0.5)));
+    assert!(!cruise.needs_valley(&behind_a_kernel, read_ratio(0.5)));
     let turnaround = Crossing {
         speed: 0.0,
         rate: 119.0,
@@ -1636,7 +1637,59 @@ fn a_crawl_lays_a_valley_where_the_guard_holds_the_follower_or_the_advance_would
         advance_slope_s: 0.0,
         ..guarded
     };
-    assert!(turnaround.needs_valley(&no_advance, 0.0337));
+    assert!(turnaround.needs_valley(&no_advance, read_ratio(0.0337)));
+}
+
+/// The ratios a crawl reads all at `ratio`, within its reach and smoothed.
+fn read_ratio(ratio: f64) -> CrawlRatios {
+    CrawlRatios {
+        in_reach: ratio,
+        read: ratio,
+    }
+}
+
+/// #903: a follower the turning guard holds lays a crawl valley only where
+/// the advance reads a ratio there: at ratio 0, a travel's crawl, the
+/// turning asks nothing of the follower, and the guard backed the leaders
+/// off to make room for a valley nobody reads. A turnaround keeps its
+/// valley whatever the ratio.
+#[test]
+fn a_guarded_follower_lays_no_crawl_valley_where_it_extrudes_nothing() {
+    let guarded = RatioRampRule {
+        advance_slope_s: 0.5,
+        max_velocity_mm_s: 50.0,
+        max_accel_mm_s2: 2000.0,
+        kernel_jerk_per_accel_hz: f64::INFINITY,
+    };
+    let crawl = Crossing {
+        speed: 0.647,
+        rate: 119.0,
+        jerk: 119.0 * 119.0 / 0.647,
+    };
+    assert!(!crawl.needs_valley(&guarded, read_ratio(0.0)));
+    let turnaround = Crossing {
+        speed: 0.0,
+        rate: 119.0,
+        jerk: 0.0,
+    };
+    assert!(turnaround.needs_valley(&guarded, read_ratio(0.0)));
+}
+
+/// #903: whether a guarded follower extrudes at a crawl reads the ratio
+/// the smoothed advance table holds within the leaders' reach: an
+/// extrusion ending in a travel 1.2 mm before the crawl, its step ramped
+/// over 1 mm either side, still reaches a 0.3 mm reach, though no laid
+/// span within it extrudes; 1.5 mm past the step it does not.
+#[test]
+fn a_crawl_reads_the_ratio_a_ramp_carries_into_its_reach() {
+    let table: Table = vec![(10.0, 0.04, 0.04), (10.0, 0.0, 0.0)];
+    let state = smoothed(&table, cruise(length(&table)));
+    let tables = (state.spans.as_slice(), state.advance_spans.as_slice());
+    let near = CrawlRatios::around(&state.smoothing, tables, 11.2, 0.3);
+    assert_eq!(near.in_reach, 0.0);
+    assert!(near.read > 0.0, "{near:?}");
+    let far = CrawlRatios::around(&state.smoothing, tables, 11.5, 0.3);
+    assert_eq!(far.read, 0.0, "{far:?}");
 }
 
 /// The P1 bowden kernel crawl of `voron_first_layers` at t≈63.92 s: read
@@ -1659,17 +1712,17 @@ fn a_kernel_after_the_advance_spares_a_crawl_its_valley() {
         jerk: 1.74e6,
     };
     let ratio = 0.034;
-    assert!(crawl.needs_valley(&kernel_free, ratio));
+    assert!(crawl.needs_valley(&kernel_free, read_ratio(ratio)));
     let smoothed = RatioRampRule {
         kernel_jerk_per_accel_hz: 2.0 / (0.5 * 0.04),
         ..kernel_free
     };
-    assert!(!crawl.needs_valley(&smoothed, ratio));
+    assert!(!crawl.needs_valley(&smoothed, read_ratio(ratio)));
     let turnaround = Crossing {
         speed: 0.0,
         ..crawl
     };
-    assert!(turnaround.needs_valley(&smoothed, ratio));
+    assert!(turnaround.needs_valley(&smoothed, read_ratio(ratio)));
 }
 
 /// The P1 Bowden crawl of `voron_first_layers` at t≈10.485 s (gscale 0.45
