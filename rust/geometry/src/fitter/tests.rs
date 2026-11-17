@@ -1045,5 +1045,8 @@ fn a_blend_into_a_travel_ends_its_ratio_ramp_on_zero() {
     assert_eq!(ramp[0].ratio, 0.060_446);
     assert_eq!(ramp[0].ratio_end, ramp[1].ratio);
     assert_eq!(ramp[1].ratio_end, 0.0, "{ramp:?}");
-    assert!(ramp.iter().all(|demand| demand.ratio >= 0.0 && demand.ratio_end >= 0.0));
+    assert!(
+        ramp.iter()
+            .all(|demand| demand.ratio >= 0.0 && demand.ratio_end >= 0.0)
+    );
 }
