@@ -51,7 +51,12 @@ impl Drop for RatioSmoothing {
                     .iter()
                     .chain(&self.valleys)
                     .filter(|valley| kinds.contains(&valley.kind))
-                    .map(|valley| (valley.reach_start().max(0.0), valley.reach_end().min(path_end)))
+                    .map(|valley| {
+                        (
+                            valley.reach_start().max(0.0),
+                            valley.reach_end().min(path_end),
+                        )
+                    })
                     .filter(|(lo, hi)| lo < hi)
                     .collect(),
             )

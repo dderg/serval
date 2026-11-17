@@ -450,8 +450,7 @@ fn print_like_failure(printer: &str, ratio: f64, moves: &[PrintMove]) -> Option<
     let audit = corpus::extruder::extruder_audit(&snapshot, &gcode, &config)
         .expect("the strategy limits the extruder");
     let excesses: Vec<String> = audit.excesses.iter().map(ToString::to_string).collect();
-    (!excesses.is_empty())
-        .then(|| format!("{gcode}\n{printer}\n{}: {excesses:?}", audit.summary()))
+    (!excesses.is_empty()).then(|| format!("{gcode}\n{printer}\n{}: {excesses:?}", audit.summary()))
 }
 
 proptest! {
@@ -521,30 +520,148 @@ max_extrude_only_accel: 5000
 #[test]
 fn a_ratio_step_ramping_into_a_crawl_side_plans_within_the_extruder_limits() {
     let moves = [
-        PrintMove::Line { turn: 0.4453970580868697, length_mm: 0.08724551618549914, feed_mm_s: 126.92786675546716, ratio_jitter: Some(0.18307493377378248) },
-        PrintMove::Line { turn: 0.5347926537076366, length_mm: 0.09906039716886528, feed_mm_s: 198.6486467843766, ratio_jitter: None },
-        PrintMove::Line { turn: 2.2181117011357845, length_mm: 0.07359850564771436, feed_mm_s: 210.42431979334052, ratio_jitter: Some(-0.38969626671081964) },
-        PrintMove::Line { turn: 3.2233642992221734, length_mm: 2.297048752418555, feed_mm_s: 76.32399910279231, ratio_jitter: None },
-        PrintMove::Line { turn: 2.8829616812000536, length_mm: 2.8498657154555014, feed_mm_s: 235.01815766067898, ratio_jitter: Some(-0.43620889912452787) },
-        PrintMove::Line { turn: 4.790200647295755, length_mm: 0.7716705902165792, feed_mm_s: 193.07661868237045, ratio_jitter: Some(0.2086437881617884) },
-        PrintMove::Line { turn: 0.4595372567991594, length_mm: 0.6084310423948747, feed_mm_s: 165.87527517588973, ratio_jitter: Some(-0.04969426935122287) },
-        PrintMove::Line { turn: 3.0393510283254703, length_mm: 1.4088092847739644, feed_mm_s: 211.59760300244022, ratio_jitter: Some(-0.2915940117931435) },
-        PrintMove::Line { turn: -0.27501761138810854, length_mm: 2.709952080658379, feed_mm_s: 91.29068783003602, ratio_jitter: Some(-0.4497002682258164) },
-        PrintMove::Line { turn: 3.3848823282406815, length_mm: 11.429376715718998, feed_mm_s: 103.00977455332931, ratio_jitter: Some(-0.48908015690039164) },
-        PrintMove::Line { turn: 5.86657129843279, length_mm: 7.725149075843305, feed_mm_s: 263.24942444370487, ratio_jitter: Some(-0.031244275828838187) },
-        PrintMove::Line { turn: 0.7498762824029065, length_mm: 0.12398279162189307, feed_mm_s: 179.41474766360452, ratio_jitter: Some(-0.19472465383242124) },
-        PrintMove::Line { turn: -0.09099386419494253, length_mm: 0.500893076174017, feed_mm_s: 127.35284578104289, ratio_jitter: Some(-0.0009826218904185175) },
-        PrintMove::Line { turn: 0.15327696249071596, length_mm: 9.061544232875576, feed_mm_s: 29.571066201657317, ratio_jitter: Some(-0.05612154219415402) },
-        PrintMove::Line { turn: -0.4155228447993262, length_mm: 0.45079284238384304, feed_mm_s: 21.697257115884508, ratio_jitter: Some(0.2872380808136781) },
-        PrintMove::Line { turn: -0.45393514190287637, length_mm: 0.46822326773093964, feed_mm_s: 91.97366349734762, ratio_jitter: Some(-0.29054247390490484) },
-        PrintMove::Line { turn: 0.02074041762618198, length_mm: 0.9749543859069524, feed_mm_s: 256.90216662093474, ratio_jitter: Some(0.3935682218089948) },
-        PrintMove::Line { turn: 0.5352951234153126, length_mm: 1.9675940767543143, feed_mm_s: 291.6742829113563, ratio_jitter: None },
-        PrintMove::Line { turn: 0.05727145462325999, length_mm: 17.550404945378162, feed_mm_s: 68.61138854039872, ratio_jitter: Some(-0.19325944268530412) },
-        PrintMove::Line { turn: -0.11933006463934184, length_mm: 4.579901485406777, feed_mm_s: 105.22373412837642, ratio_jitter: None },
-        PrintMove::Line { turn: -0.044465756506873635, length_mm: 0.08310827404242764, feed_mm_s: 295.1441197835098, ratio_jitter: Some(0.2579972485136182) },
-        PrintMove::HopTravel { heading: 5.628584364939775, length_mm: 19.019184452506614 },
-        PrintMove::Line { turn: 0.5450908709851561, length_mm: 0.21023402783964062, feed_mm_s: 65.91953590383167, ratio_jitter: Some(-0.05917705071798234) },
-        PrintMove::Line { turn: -0.47629377914997895, length_mm: 1.9246647461270798, feed_mm_s: 77.57153109790576, ratio_jitter: None },
+        PrintMove::Line {
+            turn: 0.4453970580868697,
+            length_mm: 0.08724551618549914,
+            feed_mm_s: 126.92786675546716,
+            ratio_jitter: Some(0.18307493377378248),
+        },
+        PrintMove::Line {
+            turn: 0.5347926537076366,
+            length_mm: 0.09906039716886528,
+            feed_mm_s: 198.6486467843766,
+            ratio_jitter: None,
+        },
+        PrintMove::Line {
+            turn: 2.2181117011357845,
+            length_mm: 0.07359850564771436,
+            feed_mm_s: 210.42431979334052,
+            ratio_jitter: Some(-0.38969626671081964),
+        },
+        PrintMove::Line {
+            turn: 3.2233642992221734,
+            length_mm: 2.297048752418555,
+            feed_mm_s: 76.32399910279231,
+            ratio_jitter: None,
+        },
+        PrintMove::Line {
+            turn: 2.8829616812000536,
+            length_mm: 2.8498657154555014,
+            feed_mm_s: 235.01815766067898,
+            ratio_jitter: Some(-0.43620889912452787),
+        },
+        PrintMove::Line {
+            turn: 4.790200647295755,
+            length_mm: 0.7716705902165792,
+            feed_mm_s: 193.07661868237045,
+            ratio_jitter: Some(0.2086437881617884),
+        },
+        PrintMove::Line {
+            turn: 0.4595372567991594,
+            length_mm: 0.6084310423948747,
+            feed_mm_s: 165.87527517588973,
+            ratio_jitter: Some(-0.04969426935122287),
+        },
+        PrintMove::Line {
+            turn: 3.0393510283254703,
+            length_mm: 1.4088092847739644,
+            feed_mm_s: 211.59760300244022,
+            ratio_jitter: Some(-0.2915940117931435),
+        },
+        PrintMove::Line {
+            turn: -0.27501761138810854,
+            length_mm: 2.709952080658379,
+            feed_mm_s: 91.29068783003602,
+            ratio_jitter: Some(-0.4497002682258164),
+        },
+        PrintMove::Line {
+            turn: 3.3848823282406815,
+            length_mm: 11.429376715718998,
+            feed_mm_s: 103.00977455332931,
+            ratio_jitter: Some(-0.48908015690039164),
+        },
+        PrintMove::Line {
+            turn: 5.86657129843279,
+            length_mm: 7.725149075843305,
+            feed_mm_s: 263.24942444370487,
+            ratio_jitter: Some(-0.031244275828838187),
+        },
+        PrintMove::Line {
+            turn: 0.7498762824029065,
+            length_mm: 0.12398279162189307,
+            feed_mm_s: 179.41474766360452,
+            ratio_jitter: Some(-0.19472465383242124),
+        },
+        PrintMove::Line {
+            turn: -0.09099386419494253,
+            length_mm: 0.500893076174017,
+            feed_mm_s: 127.35284578104289,
+            ratio_jitter: Some(-0.0009826218904185175),
+        },
+        PrintMove::Line {
+            turn: 0.15327696249071596,
+            length_mm: 9.061544232875576,
+            feed_mm_s: 29.571066201657317,
+            ratio_jitter: Some(-0.05612154219415402),
+        },
+        PrintMove::Line {
+            turn: -0.4155228447993262,
+            length_mm: 0.45079284238384304,
+            feed_mm_s: 21.697257115884508,
+            ratio_jitter: Some(0.2872380808136781),
+        },
+        PrintMove::Line {
+            turn: -0.45393514190287637,
+            length_mm: 0.46822326773093964,
+            feed_mm_s: 91.97366349734762,
+            ratio_jitter: Some(-0.29054247390490484),
+        },
+        PrintMove::Line {
+            turn: 0.02074041762618198,
+            length_mm: 0.9749543859069524,
+            feed_mm_s: 256.90216662093474,
+            ratio_jitter: Some(0.3935682218089948),
+        },
+        PrintMove::Line {
+            turn: 0.5352951234153126,
+            length_mm: 1.9675940767543143,
+            feed_mm_s: 291.6742829113563,
+            ratio_jitter: None,
+        },
+        PrintMove::Line {
+            turn: 0.05727145462325999,
+            length_mm: 17.550404945378162,
+            feed_mm_s: 68.61138854039872,
+            ratio_jitter: Some(-0.19325944268530412),
+        },
+        PrintMove::Line {
+            turn: -0.11933006463934184,
+            length_mm: 4.579901485406777,
+            feed_mm_s: 105.22373412837642,
+            ratio_jitter: None,
+        },
+        PrintMove::Line {
+            turn: -0.044465756506873635,
+            length_mm: 0.08310827404242764,
+            feed_mm_s: 295.1441197835098,
+            ratio_jitter: Some(0.2579972485136182),
+        },
+        PrintMove::HopTravel {
+            heading: 5.628584364939775,
+            length_mm: 19.019184452506614,
+        },
+        PrintMove::Line {
+            turn: 0.5450908709851561,
+            length_mm: 0.21023402783964062,
+            feed_mm_s: 65.91953590383167,
+            ratio_jitter: Some(-0.05917705071798234),
+        },
+        PrintMove::Line {
+            turn: -0.47629377914997895,
+            length_mm: 1.9246647461270798,
+            feed_mm_s: 77.57153109790576,
+            ratio_jitter: None,
+        },
     ];
     let failure = print_like_failure(CRAWL_SIDE_RAMP_PRINTER, 0.056202335201128814, &moves);
     assert!(failure.is_none(), "{}", failure.unwrap_or_default());
