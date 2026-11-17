@@ -15,6 +15,15 @@
 //! fuzzes the same planar space and additionally asserts the smoothness
 //! budgets (seam C0/C1, velocity limits). Every bug a fuzz finds gets pinned
 //! below as an `#[ignore]`d regression test until fixed.
+//!
+//! `an_advanced_extruder_plans_print_like_streams` plans print-like G-code
+//! (dense short extrusions whose ratio jitters, curves, reversals into
+//! travels, retracts with a z hop) through X/Y shapers and a kernel-free
+//! linear advance whose extruder limit binds, under every kind of corner
+//! budget: the configuration whose crawl valleys the turning guard and the
+//! follower projection lay. Planning must not fail.
+
+use std::fmt::Write as _;
 
 use motion_pipeline::live_config;
 use pipeline_snapshot::audit::{
@@ -23,7 +32,9 @@ use pipeline_snapshot::audit::{
 use pipeline_snapshot::waypoints::{Waypoint, extrusion_ratio_bound};
 use pipeline_snapshot::{
     CartesianLimits, ExactTrajectory, PlannerConfig, SnapshotParams, pipeline_snapshot,
+    pipeline_snapshot_for_config,
 };
+use planner_config::from_doc::planner_config_from_text;
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
 
@@ -269,6 +280,151 @@ proptest! {
         let (_, report) = run_case(limits, &moves);
         prop_assert!(report.hard_ok(), "{report}");
         prop_assert!(report.target_ok(), "{report}");
+    }
+}
+
+/// The corner option of a `[printer]` section, every kind a config may set.
+fn corner_option_strategy() -> impl Strategy<Value = String> {
+    prop_oneof![
+        1 => Just(String::new()),
+        1 => Just("square_corner_velocity: 0\n".to_owned()),
+        1 => (1.0..20.0_f64).prop_map(|scv| format!("square_corner_velocity: {scv}\n")),
+        2 => (-2.3..0.7_f64)
+            .prop_map(|log_mm| format!("corner_deviation: {}\n", libm::pow(10.0, log_mm))),
+    ]
+}
+
+/// A corexy printer with X/Y smooth shapers and a linear advance no kernel
+/// follows, its extruder limited: the follower the turning guard holds.
+fn advanced_printer_strategy() -> impl Strategy<Value = String> {
+    (
+        (300.0..1000.0_f64, 3000.0..70_000.0_f64, corner_option_strategy()),
+        (30.0..120.0_f64, 30.0..120.0_f64),
+        (0.01..0.06_f64, 2000.0..20_000.0_f64),
+    )
+        .prop_map(|((velocity, accel, corner), (fx, fy), (k, e_accel))| {
+            format!(
+                "[printer]\nmax_velocity: {velocity}\nmax_accel: {accel}\n{corner}\
+                 max_z_velocity: 25\nmax_z_accel: 100\n\
+                 [kinematics]\ntype: corexy\naxis_x: x\naxis_y: y\naxis_z: z\n\
+                 a_motors: a\nb_motors: b\nz_motors: z\n\
+                 [axis x]\npost_processors: shaper_x\n[axis y]\npost_processors: shaper_y\n\
+                 [axis z]\n[axis e]\nfollows: x, y, z\nmotors: extruder\npost_processors: pa\n\
+                 max_accel: {e_accel}\n\
+                 [post_processor pa]\ntype: linear_pressure_advance\nk: {k}\n\
+                 [post_processor shaper_x]\ntype: smooth_mzv\nfrequency_hz: {fx}\n\
+                 [post_processor shaper_y]\ntype: smooth_zv\nfrequency_hz: {fy}\n\
+                 [motor a]\ndrive: stepper\n[motor b]\ndrive: stepper\n\
+                 [motor z]\ndrive: stepper\n[motor extruder]\ndrive: stepper\n\
+                 [extruder]\nmax_extrude_only_velocity: 50\nmax_extrude_only_accel: 5000\n"
+            )
+        })
+}
+
+/// One print move: an extrusion or travel turning `turn` off the last
+/// heading, or a retract, z hop and travel to `heading` and back down.
+#[derive(Debug, Clone, Copy)]
+enum PrintMove {
+    Line {
+        turn: f64,
+        length_mm: f64,
+        feed_mm_s: f64,
+        ratio_jitter: Option<f64>,
+    },
+    HopTravel {
+        heading: f64,
+        length_mm: f64,
+    },
+}
+
+/// Slicer output: mostly short extrusions bending along an outline, their
+/// ratio off the layer's by the width and rounding a slicer puts in each
+/// line, reversals, travels, and hops.
+fn print_move_strategy() -> impl Strategy<Value = PrintMove> {
+    let turn = prop_oneof![
+        6 => -0.6..0.6_f64,
+        2 => (-0.3..0.3_f64).prop_map(|off| std::f64::consts::PI + off),
+        2 => 0.0..std::f64::consts::TAU,
+    ];
+    let jitter = prop_oneof![4 => (-0.5..0.5_f64).prop_map(Some), 1 => Just(None)];
+    prop_oneof![
+        9 => (turn, -1.3..1.3_f64, 20.0..300.0_f64, jitter).prop_map(
+            |(turn, log_len, feed_mm_s, ratio_jitter)| PrintMove::Line {
+                turn,
+                length_mm: libm::pow(10.0, log_len),
+                feed_mm_s,
+                ratio_jitter,
+            }
+        ),
+        1 => (0.0..std::f64::consts::TAU, 1.0..30.0_f64)
+            .prop_map(|(heading, length_mm)| PrintMove::HopTravel { heading, length_mm }),
+    ]
+}
+
+const RETRACT_MM: f64 = 0.5;
+const HOP_MM: f64 = 0.4;
+const TRAVEL_FEED_MM_S: f64 = 500.0;
+
+/// The G-code of `moves` from the bed's middle, at `ratio` mm of filament
+/// per mm of path, each extrusion off it by its jitter; one without is a
+/// travel.
+fn print_gcode(ratio: f64, moves: &[PrintMove]) -> String {
+    let (mut x, mut y, mut heading) = (150.0, 150.0, 0.0_f64);
+    let z = 0.2_f64;
+    let mut gcode = format!("G90\nM83\nG1 X{x} Y{y} Z{z} F{}\n", 60.0 * TRAVEL_FEED_MM_S);
+    for m in moves {
+        match *m {
+            PrintMove::Line {
+                turn,
+                length_mm,
+                feed_mm_s,
+                ratio_jitter,
+            } => {
+                heading += turn;
+                x += length_mm * libm::cos(heading);
+                y += length_mm * libm::sin(heading);
+                let extrude = ratio_jitter
+                    .map(|jitter| format!(" E{:.5}", ratio * (1.0 + jitter) * length_mm))
+                    .unwrap_or_default();
+                writeln!(gcode, "G1 X{x:.3} Y{y:.3}{extrude} F{:.0}", 60.0 * feed_mm_s)
+                    .expect("a string takes G-code");
+            }
+            PrintMove::HopTravel {
+                heading: to,
+                length_mm,
+            } => {
+                heading = to;
+                x += length_mm * libm::cos(heading);
+                y += length_mm * libm::sin(heading);
+                let feed = 60.0 * TRAVEL_FEED_MM_S;
+                write!(
+                    gcode,
+                    "G1 E-{RETRACT_MM} F2400\nG1 Z{:.3} F600\nG1 X{x:.3} Y{y:.3} F{feed:.0}\n\
+                     G1 Z{z:.3} F600\nG1 E{RETRACT_MM} F2400\n",
+                    z + HOP_MM
+                )
+                .expect("a string takes G-code");
+            }
+        }
+    }
+    gcode
+}
+
+proptest! {
+    #![proptest_config(fresh_seed_config())]
+
+    #[test]
+    fn an_advanced_extruder_plans_print_like_streams(
+        printer in advanced_printer_strategy(),
+        ratio in 0.02..0.06_f64,
+        moves in prop::collection::vec(print_move_strategy(), 2..40),
+    ) {
+        let planner = planner_config_from_text(&printer).expect("the strategy draws valid configs");
+        let gcode = print_gcode(ratio, &moves);
+        let waypoints = pipeline_snapshot::waypoints::parse_gcode(&gcode, &planner.cartesian)
+            .expect("the strategy draws valid G-code");
+        let snapshot = pipeline_snapshot_for_config(&waypoints, &planner, None);
+        prop_assert!(snapshot.is_ok(), "{gcode}\n{printer}\n{:?}", snapshot.err());
     }
 }
 
