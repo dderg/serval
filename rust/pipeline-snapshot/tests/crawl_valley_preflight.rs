@@ -268,3 +268,81 @@ fn a_valley_step_behind_the_committed_path_is_read_by_nothing() {
     std::fs::write(&config, OPENING_CRAWL_PRINTER).expect("temp config");
     plans_within_the_extruder_limits("opening_reversal", OPENING_REVERSAL, &config);
 }
+
+/// #898: a corexy with a kernel-free advance and a 0.74 mm corner budget,
+/// drawn by the print-like planner fuzz.
+const WAITING_CRAWL_PRINTER: &str = "[printer]
+max_velocity: 942.3988288103301
+max_accel: 47403.38670336128
+corner_deviation: 0.7382658358164043
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 12568.097981509703
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.034813571169232026
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 54.08761953978757
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 66.50291608902367
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #898: extrusions, a retract and hop, a travel, and extrusions again:
+/// the projection took the path through a crawl whose valley was still
+/// waiting on the spans past it.
+const CRAWL_WAITING_PAST_A_HOP: &str = "G90
+M83
+G1 X150.0 Y150.0 Z0.2 F30000
+G1 X162.520 Y148.170 F17051
+G1 X161.935 Y148.180 E0.02696 F9159
+G1 X164.740 Y154.177 E0.30497 F15202
+G1 X163.435 Y145.208 E0.00660 F8121
+G1 X163.466 Y145.716 E0.01341 F4821
+G1 X163.193 Y146.504 E0.03146 F16205
+G1 E-0.5 F2400
+G1 Z0.600 F600
+G1 X146.809 Y122.606 F30000
+G1 Z0.200 F600
+G1 E0.5 F2400
+G1 X144.519 Y122.373 E0.06849 F15916
+G1 X157.333 Y126.537 E0.28132 F10331
+";
+
+#[test]
+fn a_waiting_crawl_keeps_its_path_untaken() {
+    let config =
+        std::env::temp_dir().join(format!("waiting_crawl_printer_{}.cfg", std::process::id()));
+    std::fs::write(&config, WAITING_CRAWL_PRINTER).expect("temp config");
+    plans_within_the_extruder_limits("crawl_waiting_past_a_hop", CRAWL_WAITING_PAST_A_HOP, &config);
+}
