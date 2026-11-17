@@ -989,6 +989,7 @@ impl geometry::velocity::FanOut for geometry::velocity::Serial
 pub fn geometry::velocity::Serial::lead_and_follow(&self, usize, impl core::ops::function::FnOnce(), impl core::ops::function::Fn() + core::marker::Sync)
 pub fn geometry::velocity::brake_horizon(&[geometry::velocity::BrakeMove], impl core::iter::traits::double_ended::DoubleEndedIterator<Item = f64> + core::iter::traits::exact_size::ExactSizeIterator) -> core::option::Option<usize>
 pub fn geometry::velocity::brake_move(&geometry::frontend::Move, &geometry::ExtrusionBudget, bool, core::option::Option<(&geometry::frontend::Move, &geometry::ExtrusionBudget, &geometry::velocity::BrakeMove)>, f64, geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::BrakeMove, geometry::velocity::VelocityError>
+pub fn geometry::velocity::extrude_only_move_caps(f64, (f64, f64), (f64, f64)) -> (f64, f64)
 pub fn geometry::velocity::extrusion_budgets(&[geometry::frontend::Move], f64, f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
 pub fn geometry::velocity::plan_velocity_stops(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
 pub fn geometry::velocity::plan_velocity_stops_reconstruct_prefix(&[geometry::frontend::Move], &[bool], geometry::velocity::VelocityPlanParams<'_>, usize) -> core::result::Result<geometry::velocity::VelocityProfile, geometry::velocity::VelocityError>
