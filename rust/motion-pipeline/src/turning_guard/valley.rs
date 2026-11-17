@@ -1184,16 +1184,22 @@ impl Crawl {
     /// the leaders' least path in the [`VALLEY_LEAD_BUDGET_S`] after the
     /// run covers once those cells are tracked; where they cover too
     /// little, the first grid width past the leaders' reach once the path
-    /// after the run covers it. Where the segment ends first (`all` its
-    /// cells tracked) no room is left ([`Reserve::none`]): past its end the
-    /// leaders rest, and the projection, reading no motion there, widens
-    /// the side until it fits. `false` while it waits.
+    /// after the run covers it. Never narrower than `laid`, the width the
+    /// side was laid at before a re-plan past the run: backing those moves
+    /// off slows the leaders over the budget, and a narrower side would
+    /// rebuild steeper on the cells already proven against the wider one,
+    /// which may lie behind the frozen seam where no back-off reaches; it
+    /// waits until the path after the run covers it. Where the segment ends
+    /// first (`all` its cells tracked) no room is left ([`Reserve::none`]):
+    /// past its end the leaders rest, and the projection, reading no motion
+    /// there, widens the side until it fits. `false` while it waits.
     pub fn resolve_after(
         &mut self,
         track: &TrackView,
         all: bool,
         (h, fit): (f64, FitMiss),
         shadow: &dyn Fn(i64) -> CellBounds,
+        laid: Option<f64>,
     ) -> bool {
         let slot = self.slot;
         let (first, last) = slot.cells;
@@ -1216,6 +1222,14 @@ impl Crawl {
                 None => return false,
             },
         };
+        let width = laid.map_or(width, |laid| width.max(laid));
+        if width > covered.most {
+            if !all {
+                return false;
+            }
+            self.after = Some(Reserve::none(slot.cells));
+            return true;
+        }
         let mut side_to = last;
         while side_to < to && slot.distance(track, side_to + 1, h, fit).0 < width {
             side_to += 1;

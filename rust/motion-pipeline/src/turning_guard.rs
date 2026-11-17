@@ -1,5 +1,5 @@
 use std::cell::{Ref, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
@@ -91,6 +91,10 @@ const MEMO_WINDOWS: i64 = 16;
 /// proves every cell such a side may reach with the room its rebuild there
 /// needs added ([`valley::Crawl`]): the projection then finds a side no
 /// wider that fits, and reaches back no further than it holds the path.
+/// An after side keeps the width it was first laid at when a back-off
+/// slows the leaders past its crawl: the narrower side the slower leaders
+/// would cover rebuilds steeper, so the back-off would raise the demand it
+/// answers, on cells it can no longer reach once they are emitted.
 /// A crawl whose side cannot fit within the budget backs the moves around
 /// it off, and fails loudly where no back-off can help ([`ValleyStuck`]).
 /// Rest valleys, where the leaders rest over an extrude-only move or a
@@ -135,11 +139,13 @@ pub(crate) struct TurningGuard {
 
 /// Where the follower projection may lay advance valleys: the grid cells
 /// scanned for crawls, in order up to `scanned`, the run of crawling cells
-/// still open from `run` as `run_scan` reads it, and the crawls found
-/// whose valleys a cell still to check may read.
+/// still open from `run` as `run_scan` reads it, the crawls found whose
+/// valleys a cell still to check may read, and the width each crawl's
+/// after side was first laid at, by the cell its run starts in.
 struct Valleys {
     track: CellTrack,
     crawls: Vec<Crawl>,
+    after_widths: BTreeMap<i64, f64>,
     scanned: i64,
     run: Option<i64>,
     run_scan: RunScan,
@@ -414,6 +420,7 @@ impl TurningGuard {
             valleys: Valleys {
                 track: CellTrack::default(),
                 crawls: Vec::new(),
+                after_widths: BTreeMap::new(),
                 scanned: 0,
                 run: None,
                 run_scan: RunScan::default(),
@@ -701,15 +708,25 @@ impl TurningGuard {
         }
         let fit = self.valleys.fit;
         let mut crawls = std::mem::take(&mut self.valleys.crawls);
+        let mut after_widths = std::mem::take(&mut self.valleys.after_widths);
         {
             let bounds = |n: i64| self.tracked_bounds(n);
             let shadow = |n: i64| self.shadow(n);
             let track = TrackView::new(&self.valleys.track, &bounds, (h, fit));
             for crawl in crawls.iter_mut().filter(|crawl| crawl.after.is_none()) {
-                crawl.resolve_after(&track, all, (h, fit), &shadow);
+                let run_start = crawl.cells().0;
+                let laid = after_widths.get(&run_start).copied();
+                if !crawl.resolve_after(&track, all, (h, fit), &shadow, laid) {
+                    continue;
+                }
+                let width = crawl.after.as_ref().map_or(0.0, |after| after.width);
+                if width > 0.0 {
+                    after_widths.insert(run_start, width);
+                }
             }
         }
         self.valleys.crawls = crawls;
+        self.valleys.after_widths = after_widths;
         None
     }
 
@@ -1308,6 +1325,7 @@ impl TurningGuard {
         let Valleys {
             track,
             crawls,
+            after_widths,
             scanned,
             run,
             ..
@@ -1323,6 +1341,7 @@ impl TurningGuard {
             - 3
             - budget_cells;
         track.trim_before(keep);
+        after_widths.retain(|&run_start, _| run_start >= keep);
         keep
     }
 
@@ -1651,9 +1670,11 @@ impl TurningGuard {
     /// sides read the motion up to [`VALLEY_LEAD_BUDGET_S`] past its run,
     /// and a re-plan there resizes them, so the sides of every crawl whose
     /// run ends within that budget and the kernels' reach before the first
-    /// move unchecked count; the first move overlapping the earliest of
-    /// these is the earliest a back-off can touch. The motion it changes
-    /// moves the shaped motion `w` (the kernels' forward reach) before it,
+    /// move unchecked count, and those of every crawl whose after side,
+    /// laid wider than the path the budget covers, reaches that move; the
+    /// first move overlapping the earliest of these is the earliest a
+    /// back-off can touch. The motion it changes moves the shaped motion
+    /// `w` (the kernels' forward reach) before it,
     /// where a crawl may then be found whose before side reaches the
     /// [`VALLEY_LEAD_BUDGET_S`] further back and whose cells' checks back
     /// off from `u` before that: the first move overlapping there is the
@@ -1683,7 +1704,10 @@ impl TurningGuard {
             .valleys
             .crawls
             .iter()
-            .filter(|crawl| crawl.cells().1 + budget_cells + ahead + 2 >= unchecked_cell)
+            .filter(|crawl| {
+                crawl.cells().1 + budget_cells + ahead + 2 >= unchecked_cell
+                    || crawl.reach().1.saturating_add(ahead + 2) >= unchecked_cell
+            })
             .map(|crawl| crawl.before.cells.0 as f64 * h)
             .fold(unchecked_from, f64::min);
         let touched_from = sides_from - (back + 2) as f64 * h;

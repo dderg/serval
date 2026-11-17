@@ -183,15 +183,51 @@ fn a_crawl_s_after_side_waits_for_the_lead_budget_past_its_run() {
     let mut crawl = Crawl::found(slot, 1, &short, -1, (H, fit), &|n| short.get(n))
         .expect("the side fits the budget");
     assert!(
-        !crawl.resolve_after(&short, false, (H, fit), &|n| short.get(n)),
+        !crawl.resolve_after(&short, false, (H, fit), &|n| short.get(n), None),
         "the after side settled before its budget's cells were tracked"
     );
     let long = track_with_crawl(10.0, crawl_cells, crawl_cells.1 + budget_cells + 1, fit);
     let long = view(&long, fit);
-    assert!(crawl.resolve_after(&long, false, (H, fit), &|n| long.get(n)));
+    assert!(crawl.resolve_after(&long, false, (H, fit), &|n| long.get(n), None));
     let after = crawl.after.clone().expect("the after side settled");
     assert!(after.cells.0 == crawl_cells.0 && after.cells.1 > crawl_cells.1);
     assert_eq!(crawl.reach(), (crawl.before.cells.0, after.cells.1));
+}
+
+/// The width a crawl's after side resolves at, the leaders past the run at
+/// `cruise` mm/s, read through `end`, never narrower than `laid`.
+fn after_width(cruise: f64, end: i64, laid: Option<f64>) -> Option<f64> {
+    let fit = FitMiss::of(0.005, 50.0);
+    let crawl_cells = (800, 810);
+    let track = track_with_crawl(cruise, crawl_cells, end, fit);
+    let track = view(&track, fit);
+    let slot = slot_over(&track, crawl_cells, fit).expect("the run crawls");
+    let mut crawl = Crawl::found(slot, 1, &track, -1, (H, fit), &|n| track.get(n))
+        .expect("the side fits the budget");
+    crawl
+        .resolve_after(&track, false, (H, fit), &|n| track.get(n), laid)
+        .then(|| crawl.after.expect("the after side settled").width)
+}
+
+/// A back-off past a crawl slows the leaders over its after side's budget:
+/// the side stays as wide as it was laid, waiting for the path to cover it,
+/// instead of narrowing and rebuilding steeper on cells proven against it.
+#[test]
+fn a_back_off_past_a_crawl_never_narrows_its_after_side() {
+    let budget_cells = (VALLEY_LEAD_BUDGET_S / H).floor() as i64;
+    let end = 810 + budget_cells + 1;
+    let laid = after_width(10.0, end, None).expect("the side settles past the budget");
+    let slowed = after_width(5.0, end, None).expect("the side settles past the budget");
+    assert!(
+        slowed < laid,
+        "slower leaders lay {slowed} mm, not under {laid} mm"
+    );
+    assert_eq!(
+        after_width(5.0, end, Some(laid)),
+        None,
+        "the side settled before the path covered its {laid} mm"
+    );
+    assert_eq!(after_width(5.0, 4 * end, Some(laid)), Some(laid));
 }
 
 /// The projection holds the weight at zero back to a rest where no before
