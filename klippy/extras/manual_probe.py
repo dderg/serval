@@ -5,6 +5,8 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import bisect
 
+Z_AXIS_SECTION = "axis z"
+
 
 class ManualProbe:
     def __init__(self, config):
@@ -18,7 +20,7 @@ class ManualProbe:
             desc=self.cmd_MANUAL_PROBE_help,
         )
         # Endstop value for cartesian printers with separate Z axis
-        zconfig = config.getsection("stepper_z")
+        zconfig = config.getsection(Z_AXIS_SECTION)
         self.z_position_endstop = zconfig.getfloat(
             "position_endstop", None, note_valid=False
         )
@@ -62,12 +64,12 @@ class ManualProbe:
             return
         z_pos = self.z_position_endstop - kin_pos[2]
         self.gcode.respond_info(
-            "stepper_z: position_endstop: %.3f\n"
+            "%s: position_endstop: %.3f\n"
             "The SAVE_CONFIG command will update the printer config file\n"
-            "with the above and restart the printer." % (z_pos,)
+            "with the above and restart the printer." % (Z_AXIS_SECTION, z_pos)
         )
         configfile = self.printer.lookup_object("configfile")
-        configfile.set("stepper_z", "position_endstop", "%.3f" % (z_pos,))
+        configfile.set(Z_AXIS_SECTION, "position_endstop", "%.3f" % (z_pos,))
 
     cmd_Z_ENDSTOP_CALIBRATE_help = "Calibrate a Z endstop"
 
@@ -82,12 +84,13 @@ class ManualProbe:
         else:
             new_calibrate = self.z_position_endstop - offset
             self.gcode.respond_info(
-                "stepper_z: position_endstop: %.3f\n"
+                "%s: position_endstop: %.3f\n"
                 "The SAVE_CONFIG command will update the printer config file\n"
-                "with the above and restart the printer." % (new_calibrate)
+                "with the above and restart the printer."
+                % (Z_AXIS_SECTION, new_calibrate)
             )
             configfile.set(
-                "stepper_z", "position_endstop", "%.3f" % (new_calibrate,)
+                Z_AXIS_SECTION, "position_endstop", "%.3f" % (new_calibrate,)
             )
 
     cmd_Z_OFFSET_APPLY_ENDSTOP_help = "Adjust the z endstop_position"
