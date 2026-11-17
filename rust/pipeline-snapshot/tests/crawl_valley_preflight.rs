@@ -771,3 +771,19 @@ fn a_follower_without_an_advance_widens_crawl_valleys_over_taken_path() {
     let config = corpus::repo().join("snapshots/cases/straight_line/printer.cfg");
     corpus::plan("prime_after_a_hop", PRIME_AFTER_A_HOP, &config).expect("the print plans");
 }
+
+/// #903 (guard-limits' sweep, `syn_tiny_zigzag_0.01`): a thousand 10 µm
+/// travel zigzags on the bench printer, nothing extruded. Each crawl laid
+/// a valley the advance never reads, and one widened the last over path
+/// the projection had taken (`place_valley`'s widening check).
+#[test]
+fn a_travel_zigzag_lays_no_crawl_valleys() {
+    const ZIGZAGS: usize = 1000;
+    let mut gcode = String::from("G90\nM83\nG1 X10 Y10 F6000\nG1 X10 Y10 F6000\n");
+    for step in 1..=ZIGZAGS {
+        let y = if step % 2 == 1 { 10.01 } else { 10.0 };
+        gcode.push_str(&format!("G1 X{:.2} Y{y}\n", 10.0 + 0.01 * step as f64));
+    }
+    let config = corpus::repo().join(BENCH_PRINTER);
+    corpus::plan("travel_zigzag", &gcode, &config).expect("the zigzag plans");
+}
