@@ -489,10 +489,12 @@ class HarnessPacer:
     def sleep(
         self, seconds: float, stop: Optional[threading.Event] = None
     ) -> bool:
-        """Sleep `seconds` of printer time; False if `stop` was set."""
-        target = self._clock.now_ns() + int(seconds * 1e9)
-        self._clock.hold_at(self._slot, target)
-        while self._clock.now_ns() < target:
+        """Sleep `seconds` of printer time; False if `stop` was set. A
+        clock that stops short of the target is a wedge, not a sleep: it
+        fails like any other virtual wait instead of spinning forever."""
+        deadline = VirtualDeadline(self._clock, seconds)
+        self._clock.hold_at(self._slot, deadline.end_ns)
+        while not deadline.expired():
             if stop is None:
                 time.sleep(self.POLL_REAL_S)
             elif stop.wait(self.POLL_REAL_S):
@@ -512,6 +514,10 @@ class VirtualDeadline:
         self._last_ns = clock.now_ns()
         self._end_ns = self._last_ns + int(timeout * 1e9)
         self._last_progress = time.monotonic()
+
+    @property
+    def end_ns(self) -> int:
+        return self._end_ns
 
     def expired(self) -> bool:
         now_ns = self._clock.now_ns()
