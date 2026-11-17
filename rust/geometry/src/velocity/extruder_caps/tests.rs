@@ -61,6 +61,8 @@ fn between_rests(length: f64) -> ReachableSpeed {
             kappa: 0.0,
         },
         run_mm: length,
+        behind_mm: 0.0,
+        ahead_mm: 0.0,
     }
 }
 
