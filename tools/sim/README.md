@@ -211,7 +211,14 @@ area's edges (each side, through a corner, near-tangent), along and off
 its grid lines, through its nodes and through the fade band, at low and
 high speed, and a profile switch at print boundaries
 (`fuzzing/mesh_paths.py`); and a timeline of user actions at print-time
-marks (`fuzzing/timeline.py`). `fuzzing/driver.py` runs it on a fresh world and
+marks (`fuzzing/timeline.py`). From streams of their own, so a seed's
+other draws stay as they were: a filament runout switch,
+`[exclude_object]` and a hotend thermal model (`fuzzing/thermal.py`: the
+heater pin's duty drives the thermistor's ADC, so M109 and
+TEMPERATURE_WAIT wait out a heat-up); heat-up waits and object labels in
+the programs; M220, M221, SET_VELOCITY_LIMIT, a filament runout and
+EXCLUDE_OBJECT in the timeline; an idle gap and SDCARD_RESET_FILE before
+a print. `fuzzing/driver.py` runs it on a fresh world and
 raises the first violated invariant (`fuzzing/checks.py` names each and
 where its threshold comes from). Rest probes in the print file (M400, a
 mark pin, a dwell) let a paced wait read every motor's step counter at

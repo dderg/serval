@@ -80,12 +80,14 @@ def _save_world(world, directory: pathlib.Path) -> None:
 def run_scenario(
     chosen: Scenario, scratch: pathlib.Path, keep: Optional[pathlib.Path]
 ) -> dict:
-    """Run `chosen` in `scratch`; on a failure copy the world's logs under
+    """Run `chosen` in `scratch`; on a failure, or with the step tap on
+    (its record is the point of the run), copy the world's logs under
     `keep`."""
     from tools.sim.world import SimWorld
 
     os.environ["RUST_LOG"] = checks.PACER_LOG
-    if os.environ.get(STEP_TAP_SWITCH):
+    tapped = bool(os.environ.get(STEP_TAP_SWITCH))
+    if tapped:
         tap_dir = scratch / "logs" / STEP_TAP_SUBDIR
         tap_dir.mkdir(parents=True, exist_ok=True)
         os.environ[STEP_TAP_DIR_ENV] = str(tap_dir)
@@ -104,7 +106,7 @@ def run_scenario(
         memory = watch.violation(world.klippy_proc)
         violations = ([memory] if memory else []) + checks.ordered(step, logged)
         notes.append(f"klippy peak RSS {watch.peak_mb:.0f} MB")
-        if violations and keep is not None:
+        if keep is not None and (violations or tapped):
             _save_world(world, keep)
     finally:
         world.shutdown()

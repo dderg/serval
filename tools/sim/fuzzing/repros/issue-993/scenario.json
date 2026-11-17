@@ -1,0 +1,95 @@
+{
+ "seed": 12051,
+ "printer": {
+  "base": "neptune",
+  "topology": "one_mcu",
+  "max_velocity": 150.0,
+  "max_accel": 4680.0,
+  "corner": "corner_deviation",
+  "corner_value": 0.118,
+  "max_z_velocity": 10.0,
+  "max_z_accel": 200.0,
+  "shaper_x": null,
+  "shaper_y": null,
+  "pa_k": 0.046,
+  "extruder_kernel": null,
+  "mesh": "none",
+  "mesh_points": [],
+  "mesh_fade": false,
+  "mesh_at_start": false,
+  "heaters": true,
+  "pause_macro": "park",
+  "cancel_macro": "stock_order",
+  "end_steps": [],
+  "idle_timeout_s": 6.5,
+  "runout_sensor": false,
+  "exclude_object": false,
+  "hotend_model": false
+ },
+ "programs": [
+  {
+   "name": "A",
+   "segments": [
+    {
+     "kind": "perimeters",
+     "lines": [
+      "G90",
+      "G1 Z0.6 F600",
+      "G1 X107.271 Y70.677 F6720",
+      "G1 X122.163 Y70.677 E0.55696 F3660",
+      "G1 X124.564 Y73.078 E0.12699 F3660",
+      "G1 X124.564 Y87.97 E0.55696 F3660",
+      "G1 X122.163 Y90.371 E0.12699 F3660",
+      "G1 X107.271 Y90.371 E0.55696 F3660",
+      "G1 X104.87 Y87.97 E0.12699 F3660",
+      "G1 X104.87 Y73.078 E0.55696 F3660",
+      "G1 X107.271 Y70.677 E0.12699 F3660",
+      "G1 X107.721 Y71.127 F8100",
+      "G1 X121.713 Y71.127 E0.5233 F3660",
+      "G1 X124.114 Y73.528 E0.12699 F3660",
+      "G1 X124.114 Y87.52 E0.5233 F3660",
+      "G1 X121.713 Y89.921 E0.12699 F3660",
+      "G1 X107.721 Y89.921 E0.5233 F3660",
+      "G1 X105.32 Y87.52 E0.12699 F3660",
+      "G1 X105.32 Y73.528 E0.5233 F3660",
+      "G1 X107.721 Y71.127 E0.12699 F3660",
+      "G1 X108.171 Y71.577 F8160",
+      "G1 X121.263 Y71.577 E0.48964 F3660",
+      "G1 X123.664 Y73.978 E0.12699 F3660",
+      "G1 X123.664 Y87.07 E0.48964 F3660",
+      "G1 X121.263 Y89.471 E0.12699 F3660",
+      "G1 X108.171 Y89.471 E0.48964 F3660",
+      "G1 X105.77 Y87.07 E0.12699 F3660",
+      "G1 X105.77 Y73.978 E0.48964 F3660",
+      "G1 X108.171 Y71.577 E0.12699 F3660",
+      "G1 X108.621 Y72.027 F8040",
+      "G1 X120.813 Y72.027 E0.45598 F3660",
+      "G1 X123.214 Y74.428 E0.12699 F3660",
+      "G1 X123.214 Y86.62 E0.45598 F3660",
+      "G1 X120.813 Y89.021 E0.12699 F3660",
+      "G1 X108.621 Y89.021 E0.45598 F3660",
+      "G1 X106.22 Y86.62 E0.12699 F3660",
+      "G1 X106.22 Y74.428 E0.45598 F3660",
+      "G1 X108.621 Y72.027 E0.12699 F3660",
+      ";fuzz_probe"
+     ]
+    }
+   ],
+   "end_print": false
+  }
+ ],
+ "prints": [
+  "A",
+  "A"
+ ],
+ "leads": [
+  {
+   "idle_s": 0.0,
+   "reset_file": false
+  },
+  {
+   "idle_s": 40.0,
+   "reset_file": false
+  }
+ ]
+}
