@@ -5,14 +5,19 @@ use crate::frontend::{ExtruderCaps, LeaderSpillId, SettleDemand};
 use crate::path::CurvatureProfile;
 
 use super::disk;
-use super::extruder_caps::{DemandReach, extruder_accel_cap, velocity_rate};
+use super::extruder_caps::{
+    DemandReach, StepJoin, extruder_accel_cap, extruder_ratio_ends, rest_crossing_accel,
+    velocity_rate,
+};
 use super::z_caps::z_capped;
 use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
 
 /// The relative margin a move's reachable speed keeps over the envelope it
 /// is read off, so a plan that reaches the envelope to the last rounding
-/// never rides the ceiling it becomes.
-const REACHABLE_SLACK: f64 = 1e-9;
+/// never rides the ceiling it becomes; and a stop-crossing budget keeps
+/// under the bisected edge of the crossings that fit
+/// ([`super::extruder_caps::rest_crossing_accel`]).
+pub(super) const REACHABLE_SLACK: f64 = 1e-9;
 
 /// The largest extrusion ratio `m` lays along the path on `axis`: 0 for
 /// travel, retraction (a negative ratio) and an extrude-only move, whose
@@ -386,6 +391,8 @@ struct Mark {
     rest: bool,
     moves_on: [bool; 3],
     extruding: Option<(usize, f64)>,
+    ratio_ends: (f64, f64),
+    budgeted: Option<JoinSide>,
     reach: Option<Reach>,
     extruder: Option<ExtruderCaps>,
     rest_behind_mm: f64,
@@ -400,6 +407,14 @@ struct Settled {
     reachable: ReachableSpeed,
     least_time_s: f64,
     realizable_accel_mm_s2: f64,
+}
+
+/// What a join between two moves reads of one of them from its budget: the
+/// fastest the leaders reach about it and the axes the path moves on there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct JoinSide {
+    fastest_mm_s: f64,
+    axes: [bool; 3],
 }
 
 impl Mark {
@@ -451,11 +466,13 @@ struct Dropped {
     accel_mm_s2: f64,
     realizable_accel_mm_s2: f64,
     ratios: Vec<(usize, RatioSpan)>,
+    last: Option<Mark>,
 }
 
 impl Dropped {
     fn absorb(&mut self, mark: &Mark) {
         let settled = mark.settled();
+        self.last = Some(*mark);
         self.end_mm = mark.end_mm;
         self.reachable_mm_s = self.reachable_mm_s.max(settled.reachable.peak_mm_s);
         self.accel_mm_s2 = self.accel_mm_s2.max(mark.accel_mm_s2);
@@ -665,6 +682,8 @@ impl Marks {
                 .limits
                 .extruder
                 .map(|caps| (caps.axis_index, extruding_ratio(m, caps.axis_index))),
+            ratio_ends: extruder_ratio_ends(m),
+            budgeted: None,
             reach: m
                 .limits
                 .extruder
@@ -1020,6 +1039,85 @@ impl Marks {
         })
     }
 
+    /// The fastest the leaders reach about `marks[index]` and the spatial
+    /// axes the path moves on within their spill of it, as its budget reads
+    /// them: a join reads both of its moves'. `None` while moves still to
+    /// come could change them.
+    fn join_side(&self, index: usize, closed: bool) -> Option<JoinSide> {
+        let mark = self.marks[index];
+        if let Some(side) = mark.budgeted {
+            return Some(side);
+        }
+        let fastest_mm_s = match mark.reach {
+            Some(reach) => self.fastest_in_reach(index, reach, closed)?,
+            None => f64::INFINITY,
+        };
+        Some(JoinSide {
+            fastest_mm_s,
+            axes: self.axes_in_reach(index, closed)?,
+        })
+    }
+
+    /// The largest acceleration up to the larger of their limits at which
+    /// the moves either side of the join entering `marks[dn]` let the
+    /// leaders cross its ratio step from a stop within the extruder's limits
+    /// ([`rest_crossing_accel`]), read as [`super::extruder_caps::ratio_step_ceiling`]
+    /// reads the join from their budgets; infinite where the ratio does not
+    /// step there. `None` while moves still to come could change it.
+    fn join_accel(&self, (up, dn): (Mark, usize), up_side: JoinSide, closed: bool) -> Option<f64> {
+        let down = self.marks[dn];
+        if up.rest || down.rest {
+            return Some(f64::INFINITY);
+        }
+        let Some(join) = StepJoin::new(
+            (up.extruder, down.extruder),
+            [up.ratio_ends, down.ratio_ends],
+        )
+        .filter(StepJoin::binds_stop_crossings) else {
+            return Some(f64::INFINITY);
+        };
+        let dn_side = self.join_side(dn, closed)?;
+        let rest_room_mm = match down.reach {
+            Some(reach) => self.rest_room(dn, reach, dn_side.fastest_mm_s, closed)?,
+            None => f64::INFINITY,
+        };
+        Some(rest_crossing_accel(
+            &join,
+            (
+                up_side.fastest_mm_s.min(dn_side.fastest_mm_s),
+                either(up_side.axes, dn_side.axes),
+            ),
+            rest_room_mm,
+            up.accel_mm_s2.max(down.accel_mm_s2),
+        ))
+    }
+
+    /// The acceleration `marks[index]` may take for the leaders to cross
+    /// the ratio steps at its ends from a stop within the extruder's limits
+    /// ([`Self::join_accel`]): each join's, which the move on its other side
+    /// takes too. `None` while moves still to come could change it.
+    fn step_accel(&self, index: usize, closed: bool) -> Option<f64> {
+        let mark = self.marks[index];
+        let side = self.join_side(index, closed)?;
+        let before = match index.checked_sub(1) {
+            Some(up) => Some((self.marks[up], self.join_side(up, closed)?)),
+            None => self
+                .dropped
+                .last
+                .and_then(|up| up.budgeted.map(|up_side| (up, up_side))),
+        };
+        let entering = match before {
+            Some((up, up_side)) => self.join_accel((up, index), up_side, closed)?,
+            None => f64::INFINITY,
+        };
+        let leaving = match self.marks.get(index + 1) {
+            Some(_) => self.join_accel((mark, index + 1), side, closed)?,
+            None if closed => f64::INFINITY,
+            None => return None,
+        };
+        Some(entering.min(leaving))
+    }
+
     /// The scan for motion on the leaders the kernels shape within
     /// `window_s` on one side of `marks[index]`, up to the first rest: the
     /// largest acceleration and extrusion ratio on `caps`' axis of the
@@ -1179,6 +1277,7 @@ impl Marks {
             rest_room_mm: extruding.rest_room_mm,
             fastest_reachable_mm_s: extruding.fastest_reachable_mm_s,
             strongest_accel_mm_s2: extruding.strongest_accel_mm_s2,
+            step_accel_mm_s2: self.step_accel(index, closed)?,
             reachable,
         })
     }
@@ -1206,7 +1305,9 @@ impl Marks {
 /// shaped speed at its joins (infinite on a move no extruder budget
 /// reaches), the largest acceleration a move within that reach may take,
 /// which a ratio ramp at its joins rides (0 on a move no extruder budget
-/// reaches), and the fastest the leaders can cross it.
+/// reaches), the most acceleration it may take for the leaders to cross
+/// the ratio steps at its ends from a stop within the extruder's limits,
+/// and the fastest the leaders can cross it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtrusionBudget {
     pub ratio_in_reach: f64,
@@ -1216,6 +1317,7 @@ pub struct ExtrusionBudget {
     pub rest_room_mm: f64,
     pub fastest_reachable_mm_s: f64,
     pub strongest_accel_mm_s2: f64,
+    pub(crate) step_accel_mm_s2: f64,
     pub reachable: ReachableSpeed,
 }
 
@@ -1242,8 +1344,10 @@ impl ExtrudingReach {
 /// [`Reach`], which the leaders' kernels and a ratio ramp carry across the
 /// joins however short the moves between, and an extrude-only move's rest
 /// holds. Moves on a stream pass through in order and leave once the moves
-/// after them cover their reach, so a move's budget never depends on how
-/// far the stream had arrived when it was planned.
+/// after them cover their reach, and where a move's end steps the ratio, the
+/// reach of the move after it, whose budget that join reads too; so a
+/// move's budget never depends on how far the stream had arrived when it
+/// was planned.
 #[derive(Debug)]
 pub struct ExtrusionReach {
     marks: Marks,
@@ -1302,6 +1406,10 @@ impl ExtrusionReach {
         let first = self.marks.marks.len() - self.pending.len();
         self.marks.settle(self.closed, &self.pending, first);
         let budget = self.marks.budget(first, self.closed)?;
+        self.marks.marks[first].budgeted = Some(JoinSide {
+            fastest_mm_s: budget.fastest_reachable_mm_s,
+            axes: budget.axes_in_reach,
+        });
         let m = self.pending.pop_front().expect("a waiting move");
         self.forget_beyond_history();
         Some((m, budget))
