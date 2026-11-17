@@ -142,7 +142,8 @@ pub(crate) struct TurningGuard {
 /// valleys a cell still to check may read, the runs of crawling cells
 /// along which the follower may extrude nothing within the projection's
 /// read range, where it extrudes, and the widest ramp of a ratio step any
-/// move admitted may take.
+/// move may take: at the printer's `max_velocity`, which every move's
+/// limit stays under (`RuntimeLimits::effective`).
 struct Valleys {
     track: CellTrack,
     crawls: Vec<Crawl>,
@@ -410,7 +411,7 @@ impl TurningGuard {
                 crawls: Vec::new(),
                 travels: Vec::new(),
                 extruding: ExtrudingCells::default(),
-                ramp_cap_mm: 0.0,
+                ramp_cap_mm: 0.5 * config.limits.max_velocity_mm_s * RATIO_RAMP_MAX_TIME_S,
                 scanned: 0,
                 run: None,
                 run_scan: RunScan::default(),
@@ -517,7 +518,6 @@ impl TurningGuard {
         self.valleys.crawls.clear();
         self.valleys.travels.clear();
         self.valleys.extruding.clear();
-        self.valleys.ramp_cap_mm = 0.0;
         self.valleys.scanned = 0;
         self.valleys.run = None;
         self.valleys.run_scan = RunScan::default();
@@ -559,8 +559,6 @@ impl TurningGuard {
             budget,
         } = planned;
         self.assert_starts_where_the_toolhead_is(&geometry);
-        let ramp_mm = 0.5 * geometry.limits.max_velocity_mm_s * RATIO_RAMP_MAX_TIME_S;
-        self.valleys.ramp_cap_mm = self.valleys.ramp_cap_mm.max(ramp_mm);
         let held = &self.entries;
         let stop = held
             .moves
@@ -592,9 +590,18 @@ impl TurningGuard {
             }
         }
         self.carried_position = timing.end.or(self.carried_position);
-        entries
-            .summaries
-            .push(summary_of(&geometry, &velocity, &budget, &timing));
+        let summary = summary_of(&geometry, &velocity, &budget, &timing);
+        let ramp_cap = self.valleys.ramp_cap_mm;
+        assert!(
+            summary
+                .extrusion_ramp_mm
+                .is_none_or(|ramp| ramp <= ramp_cap),
+            "turning guard: line {} ramps its ratio steps over {:?} mm, past the {ramp_cap} mm \
+             the printer's max_velocity allows",
+            geometry.source.start_line,
+            summary.extrusion_ramp_mm
+        );
+        entries.summaries.push(summary);
         entries
             .spans
             .push(phase_spans(&geometry, &velocity, timing.t0));

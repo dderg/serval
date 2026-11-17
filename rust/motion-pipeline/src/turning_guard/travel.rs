@@ -207,9 +207,9 @@ impl TravelCrawl {
     /// the leaders' reach of a cleared run: the projection would lay a
     /// valley there the guard left no room for. The leaders' path only
     /// grows, so the path to `n` is at least the path to the cleared cell,
-    /// which the clear proved longer than the reach and the widest ramp of
-    /// a move then admitted: this fails only for a ramp wider than that,
-    /// past a velocity limit raised mid-stream above every limit before.
+    /// which the clear proved longer than the reach and the ramp cap, and
+    /// the guard admits no move whose ramp passes that cap: unreachable
+    /// unless one of those proofs is wrong.
     pub fn assert_clear_of(&self, n: i64, before: f64, ramp: f64) {
         let Some(cleared) = self.cleared else {
             return;
