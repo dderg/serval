@@ -64,7 +64,8 @@ impl SideTrail {
     pub(super) fn record(&mut self, leg: &RampLeg, table_end: f64) {
         let (t_start, t_end) = leg.support;
         self.legs += 1;
-        let intervals = TRAIL_PROBES_PER_LEG.max(((t_end - t_start) / NODE_SPACING_S).ceil() as usize);
+        let intervals =
+            TRAIL_PROBES_PER_LEG.max(((t_end - t_start) / NODE_SPACING_S).ceil() as usize);
         for index in 0..=intervals {
             let t = if index == intervals {
                 t_end
@@ -88,6 +89,24 @@ impl SideTrail {
         self.probes
             .back()
             .map_or(f64::NEG_INFINITY, |probe| probe.s)
+    }
+
+    /// How many legs the trail has probed.
+    pub(super) fn legs(&self) -> u64 {
+        self.legs
+    }
+
+    /// The trail as it stood once its first `legs` legs were probed.
+    pub(super) fn as_of(&self, legs: u64) -> Self {
+        Self {
+            probes: self
+                .probes
+                .iter()
+                .filter(|probe| probe.leg <= legs)
+                .copied()
+                .collect(),
+            legs,
+        }
     }
 
     /// The path the leaders had reached [`VALLEY_LEAD_BUDGET_S`] before the
@@ -283,6 +302,17 @@ impl Edge {
     }
 }
 
+/// What a crawl valley's sides read as laid: the span table up to `table`,
+/// infinite where the leaders rest past the trail; the leaders' trail; and
+/// the smoothed ratio, final up to `smoothing`
+/// ([`RatioSmoothing::final_through`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SideReads<'a> {
+    pub(super) table: f64,
+    pub(super) trail: &'a SideTrail,
+    pub(super) smoothing: f64,
+}
+
 /// The width of the `side` of the crawl valley leaving its zero stretch at
 /// `edge`: the narrowest [`crawl_side_width`] lays where, over every
 /// interval between neighbouring probes of the trail over it, the
@@ -298,11 +328,14 @@ impl Edge {
 /// edge of a zero stretch the leaders cross at speed is where the rebuild
 /// bends hardest. The turning guard proves the same sum cell by cell for
 /// the widest side the lead budget covers, so a side no wider fits here.
-/// With an infinite `table_end` the leaders rest past the trail, and the
+/// With an infinite table end the leaders rest past the trail, and the
 /// side reads it as far as it goes; else a side whose ratio the smoothing
-/// reads past `table_end` waits for the spans laid there
-/// ([`RatioSmoothing::reads_within`]). It fails loudly where the leaders
-/// leave the follower no room in any interval: it never narrows a side to
+/// reads past the table's end waits for the spans laid there
+/// ([`RatioSmoothing::reads_within`]). A side waits too until the
+/// smoothed ratio over it is final: a step's ramp, and whether the side
+/// budgets it, follows the width at the step, which nodes still to come
+/// may move. It fails loudly where the leaders leave the follower no room
+/// in any interval: it never narrows a side to
 /// make it fit. An interval whose own reading passes the limit is read
 /// again across the width field's node spacing first
 /// ([`SideTrail::read_across`]): a sliver leg's mean reads the fit, not
@@ -338,7 +371,11 @@ pub(super) fn crawl_side(
     side: Side,
     edge: Edge,
     reach: f64,
-    (smoothing, (laid, advance), table_end): (&RatioSmoothing, (&[RatioSpan], &[RatioSpan]), f64),
+    (smoothing, (laid, advance), reads): (
+        &RatioSmoothing,
+        (&[RatioSpan], &[RatioSpan]),
+        SideReads<'_>,
+    ),
     steps: &StepWindows,
     rule: &RatioRampRule,
     limit: f64,
@@ -346,7 +383,7 @@ pub(super) fn crawl_side(
     if rule.kernel_jerk_per_accel_hz.is_finite() {
         return Ok(Some(reach));
     }
-    let trail = &smoothing.trail;
+    let trail = reads.trail;
     let slope = rule.advance_slope_s;
     let Edge {
         s: turn,
@@ -362,14 +399,18 @@ pub(super) fn crawl_side(
             Side::Before => (turn - width, turn),
             Side::After => (turn, turn + width),
         };
-        if table_end.is_finite()
-            && (window.1 > trail.through().min(table_end)
-                || !smoothing.reads_within(Table::Advance, window.1, table_end))
+        if reads.table.is_finite()
+            && (window.1 > trail.through().min(reads.table)
+                || !smoothing.reads_within(Table::Advance, window.1, reads.table))
         {
             waits = true;
             return true;
         }
         let window = (window.0, window.1.min(trail.through()));
+        if window.1 > reads.smoothing {
+            waits = true;
+            return true;
+        }
         let motion = trail.over(window, side);
         let distance_of = |probe: &TrailProbe| match side {
             Side::Before => turn - probe.s,
@@ -406,9 +447,8 @@ pub(super) fn crawl_side(
             smoothing.step_ramps((lo, hi), &|table, s| steps.owns(table, s))
         };
         let accel = motion.path_accel.max(crossing.rate);
-        let crossing_speed = |(from, to, _): Interval| {
-            0.5 * (from.speed + to.speed + accel * (to.t - from.t).abs())
-        };
+        let crossing_speed =
+            |(from, to, _): Interval| 0.5 * (from.speed + to.speed + accel * (to.t - from.t).abs());
         let velocity_fits = |interval: Interval, ratio: f64| {
             let (from, to, _) = interval;
             let (lo, hi) = clipped(interval);
@@ -418,7 +458,10 @@ pub(super) fn crawl_side(
             let interval_accel = from.path_accel.abs().max(to.path_accel.abs());
             let (near, far) = {
                 let distances = [from, to].map(|probe| distance_of(probe));
-                (distances[0].min(distances[1]), distances[0].max(distances[1]))
+                (
+                    distances[0].min(distances[1]),
+                    distances[0].max(distances[1]),
+                )
             };
             let (weight, steepest) = side_slope_within((near, far), width, floor);
             let lead = weight * (ramps.slope * speed * speed + ratio * interval_accel)
@@ -728,7 +771,7 @@ impl StepWindows {
     /// follower's limit ([`Self::flow`]).
     pub(super) fn assert_flow_fits(
         &self,
-        smoothing: &RatioSmoothing,
+        (smoothing, trail): (&RatioSmoothing, &SideTrail),
         laid: &[RatioSpan],
         rule: &RatioRampRule,
     ) {
@@ -736,7 +779,7 @@ impl StepWindows {
             return;
         }
         let zero = self.zero_stretch();
-        let path_accel = self.path_accel(&smoothing.trail);
+        let path_accel = self.path_accel(trail);
         let flow = self.flow(smoothing, laid, path_accel);
         assert!(
             flow <= rule.max_accel_mm_s2,

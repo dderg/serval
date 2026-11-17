@@ -17,7 +17,7 @@ mod crawl_sides;
 mod jet;
 mod models;
 
-use crawl_sides::{Side, SideTrail, StepWindows, Unlaid, crawl_side};
+use crawl_sides::{Side, SideReads, SideTrail, StepWindows, Unlaid, crawl_side};
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
 pub(super) use models::{PathReach, ValleyWeight, narrow_floats};
@@ -847,8 +847,14 @@ impl SeamCluster<'_> {
             .iter()
             .filter(|piece| piece.from <= hi && piece.to > lo)
             .map(|piece| {
-                let over = (lo.max(piece.from) - piece.from, hi.min(piece.to) - piece.from);
-                (piece.derivative_peak(2, over), piece.derivative_peak(3, over))
+                let over = (
+                    lo.max(piece.from) - piece.from,
+                    hi.min(piece.to) - piece.from,
+                );
+                (
+                    piece.derivative_peak(2, over),
+                    piece.derivative_peak(3, over),
+                )
             })
             .fold((0.0, 0.0), |(slope, curvature), (s, c)| {
                 (slope.max(s), curvature.max(c))
@@ -867,7 +873,9 @@ impl ClusterPiece {
             .collect();
         let farthest = over.0.abs().max(over.1.abs());
         let rounding: f64 = (order..self.roundings.len())
-            .map(|power| falling(power) * self.roundings[power] * farthest.powi((power - order) as i32))
+            .map(|power| {
+                falling(power) * self.roundings[power] * farthest.powi((power - order) as i32)
+            })
             .sum();
         peak_magnitude(&derivative, over) + rounding
     }
@@ -2157,9 +2165,10 @@ pub(super) struct RatioSmoothing {
     laid_tails: VecDeque<LegTail>,
     backlog: VecDeque<PendingSegment>,
     /// Crawls whose valleys wait for the ratio or the leaders past the laid
-    /// table: the next leg's spans decide whether one is laid, and how
-    /// wide its after side reaches.
-    waiting_crawls: Vec<(f64, Crossing)>,
+    /// table, or for the smoothed ratio over their sides to be final: the
+    /// next leg's spans decide whether one is laid, and how wide its after
+    /// side reaches.
+    waiting_crawls: Vec<Crawl>,
     trail: SideTrail,
     #[cfg(feature = "valley-audit")]
     audit: audit::ValleyLog,
@@ -2176,16 +2185,51 @@ impl RatioSmoothing {
     }
 
     /// No window may reach back past `s`: the leaders rest there, or the
-    /// stream drained there and what precedes it is already committed. A
-    /// rest valley still open closes there, with nothing after it.
-    pub(super) fn close_at(&mut self, s: f64) {
-        self.floor = self.floor.max(s);
-        self.reach_into_next = None;
-        self.waiting_crawls.clear();
-        self.laid_tails.clear();
-        self.close_rest(s, 0.0);
+    /// stream drained there and what precedes it is already committed. The
+    /// width is final up to `s`, so every crawl still waiting lays its
+    /// valley, `tables` as laid, or the stream fails loudly. A rest valley
+    /// still open closes there, with nothing after it.
+    pub(super) fn close_at(&mut self, s: f64, tables: (&[RatioSpan], &[RatioSpan])) {
         self.width.close(s);
         self.refresh_clusters();
+        self.lay_resting_crawls(tables);
+        assert!(
+            self.waiting_crawls.is_empty(),
+            "follower projection: the crawls {:?} still wait for their valleys where the stream \
+             closes at s={s}",
+            self.waiting_crawls
+        );
+        self.floor = self.floor.max(s);
+        self.reach_into_next = None;
+        self.laid_tails.clear();
+        self.close_rest(s, 0.0);
+        self.refresh_clusters();
+    }
+
+    /// Lays the valley of every crawl still waiting where the leaders come
+    /// to rest past what is laid so far, which its sides read no further
+    /// ([`Crawl::rests_past`]). One whose sides read a smoothed ratio that
+    /// is not final yet waits on.
+    fn lay_resting_crawls(&mut self, tables: (&[RatioSpan], &[RatioSpan])) {
+        let Some(rule) = self.width.rule else {
+            return;
+        };
+        let laid = RestedPast {
+            table_end: tables.0.last().map_or(self.floor, |last| last.s1),
+            trail_legs: self.trail.legs(),
+        };
+        for crawl in std::mem::take(&mut self.waiting_crawls) {
+            let rests_past = Some(crawl.rests_past.unwrap_or(laid));
+            self.lay_crawl_valley(
+                tables,
+                &rule,
+                Crawl {
+                    rests_past,
+                    ..crawl
+                },
+                f64::INFINITY,
+            );
+        }
     }
 
     /// Rebuilds the tables' clusters where their seams or the width field
@@ -2241,10 +2285,7 @@ impl RatioSmoothing {
         self.audit.lay_through(table_end);
         if table_end <= leg.start_s {
             self.width.extend(leaders, leg, table_end);
-            for crawl in std::mem::take(&mut self.waiting_crawls) {
-                self.lay_crawl_valley((spans, advance_spans), rule, crawl, f64::INFINITY);
-            }
-            self.close_at(leg.start_s);
+            self.close_at(leg.start_s, (spans, advance_spans));
             return;
         }
         self.trail.record(leg, table_end);
@@ -2266,7 +2307,12 @@ impl RatioSmoothing {
         let closes_a_rest =
             self.lay_rest_valley((spans, advance_spans), leg, rule, crossing, table_end);
         if reach > SPAN_MIN_LEN_MM && self.open_rest.is_none() && !closes_a_rest {
-            self.lay_crawl_valley((spans, advance_spans), rule, (seam, crossing), table_end);
+            self.lay_crawl_valley(
+                (spans, advance_spans),
+                rule,
+                (seam, crossing).into(),
+                table_end,
+            );
         }
         let crawls = if leg.rests || self.open_rest.is_some() {
             [None; 3]
@@ -2274,7 +2320,7 @@ impl RatioSmoothing {
             leg_crawls(leaders, leg, table_end)
         };
         for crawl in crawls.into_iter().flatten() {
-            self.lay_crawl_valley((spans, advance_spans), rule, crawl, table_end);
+            self.lay_crawl_valley((spans, advance_spans), rule, crawl.into(), table_end);
         }
         let mut crossings = LegCrossings::of(leaders);
         self.width.widen_seams_into(&mut crossings, leg.support);
@@ -2297,23 +2343,29 @@ impl RatioSmoothing {
     /// after the table's end too, so a reach running past `table_end`, or
     /// an after side past the leaders probed, waits for the next leg; an
     /// infinite `table_end`, where the leaders come to rest past the table,
-    /// lays it with what is laid. A crawl behind one still waiting waits
-    /// too: valleys are laid in path order. Leaders that do not crawl need
-    /// no valley at any ratio, so they wait for none.
+    /// lays it with what is laid, as does a crawl the leaders came to rest
+    /// past while it waited ([`Crawl::rests_past`]). A crawl behind one
+    /// still waiting waits too: valleys are laid in path order. Leaders
+    /// that do not crawl need no valley at any ratio, so they wait for none.
     fn lay_crawl_valley(
         &mut self,
         tables: (&[RatioSpan], &[RatioSpan]),
         rule: &RatioRampRule,
-        (turn, crossing): (f64, Crossing),
+        crawl: Crawl,
         table_end: f64,
     ) {
+        let Crawl { turn, crossing, .. } = crawl;
         if !crossing.crawls() {
             return;
         }
         if !self.waiting_crawls.is_empty() {
-            self.waiting_crawls.push((turn, crossing));
+            self.waiting_crawls.push(crawl);
             return;
         }
+        let (tables, table_end) = match crawl.rests_past {
+            Some(rested) => (rested.tables(tables), f64::INFINITY),
+            None => (tables, table_end),
+        };
         let reach = crossing
             .valley_reach()
             .min(turn - self.rested_through(turn));
@@ -2329,14 +2381,12 @@ impl RatioSmoothing {
                 turn + reach > table_end
             };
             if undecided {
-                self.waiting_crawls.push((turn, crossing));
+                self.waiting_crawls.push(crawl);
             }
             return;
         }
-        if let Err(Unlaid::Waits) =
-            self.lay_valley(tables, rule, (turn, crossing), reach, table_end)
-        {
-            self.waiting_crawls.push((turn, crossing));
+        if let Err(Unlaid::Waits) = self.lay_valley(tables, rule, crawl, reach, table_end) {
+            self.waiting_crawls.push(crawl);
         }
     }
 
@@ -2377,17 +2427,17 @@ impl RatioSmoothing {
         &mut self,
         tables: (&[RatioSpan], &[RatioSpan]),
         rule: &RatioRampRule,
-        crawl: (f64, Crossing),
+        crawl: Crawl,
         reach: f64,
         table_end: f64,
     ) -> Result<(), Unlaid> {
-        let turn = crawl.0;
+        let turn = crawl.turn;
         if self.holds_zero_at(turn) {
             return Ok(());
         }
         self.refresh_clusters();
         let guarded = guarded_by_the_turning_guard(rule);
-        let mut steps = StepWindows::around(turn, crawl.1, reach, guarded);
+        let mut steps = StepWindows::around(turn, crawl.crossing, reach, guarded);
         let rested = self.rested_through(turn);
         let held = turn - self.back_reach_limit(turn);
         let window = steps.window;
@@ -2395,8 +2445,18 @@ impl RatioSmoothing {
         let leaves_a_side = |s: f64| rested >= held || s - window - reach >= held;
         steps.own_near(tables, &untaken, &|s| untaken(s) && leaves_a_side(s));
         let zero = steps.zero_stretch();
-        let edges = steps.edges(&self.trail, table_end)?;
-        let laid = (&*self, tables, table_end);
+        let smoothing_final = self.final_through(table_end);
+        let rested_trail = crawl
+            .rests_past
+            .map(|rested| self.trail.as_of(rested.trail_legs));
+        let trail = rested_trail.as_ref().unwrap_or(&self.trail);
+        let edges = steps.edges(trail, table_end)?;
+        let reads = SideReads {
+            table: table_end,
+            trail,
+            smoothing: smoothing_final,
+        };
+        let laid = (&*self, tables, reads);
         let after = crawl_side(
             Side::After,
             edges.1,
@@ -2435,7 +2495,7 @@ impl RatioSmoothing {
             (before, after),
             (edges.0.floor, edges.1.floor),
         );
-        steps.assert_flow_fits(self, tables.0, rule);
+        steps.assert_flow_fits((self, trail), tables.0, rule);
         for owned in &steps.owned {
             for &s in &owned.run {
                 assert!(
@@ -2470,18 +2530,32 @@ impl RatioSmoothing {
     }
 
     /// Whether a valley laid holds the weight flat at zero at the crawl
-    /// `turn` ([`AdvanceValley::holds_zero_at`]): the last one, or any one
-    /// where `turn` lies no further back than the last one's zero stretch.
-    /// A crawl at a seam is the slowest point of the leg before or after it
-    /// too, read a hair inside that leg, and a crawl valley's flat floor
-    /// runs on past a rest valley laid at its end, a retract after a
-    /// reversal.
+    /// `turn` ([`AdvanceValley::holds_zero_at`]): the last one laid up to
+    /// it ([`Self::laid_up_to`]), or any one where `turn` lies no further
+    /// back than that one's zero stretch. A crawl at a seam is the slowest
+    /// point of the leg before or after it too, read a hair inside that
+    /// leg, and a crawl valley's flat floor runs on past a rest valley laid
+    /// at its end, a retract after a reversal.
     fn holds_zero_at(&self, turn: f64) -> bool {
-        let Some(last) = self.valleys.last() else {
+        let laid = self.laid_up_to(turn);
+        let Some(last) = laid.last() else {
             return false;
         };
         let held = |valley: &AdvanceValley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM);
-        held(last) || (turn >= last.start && self.valleys.iter().any(held))
+        held(last) || (turn >= last.start && laid.iter().any(held))
+    }
+
+    /// The valleys laid before the crawl `turn` on the path: all but the
+    /// rest valleys a crawl the leaders came to rest past while it waited
+    /// ([`Crawl::rests_past`]) lies behind.
+    fn laid_up_to(&self, turn: f64) -> &[AdvanceValley] {
+        let past = self
+            .valleys
+            .iter()
+            .rev()
+            .take_while(|valley| valley.kind == ValleyKind::Rest && valley.start > turn)
+            .count();
+        &self.valleys[..self.valleys.len() - past]
     }
 
     fn last_crawl_reach_end(&self) -> f64 {
@@ -2513,7 +2587,7 @@ impl RatioSmoothing {
             return;
         }
         if let Some(laid) = self
-            .valleys
+            .laid_up_to(turn)
             .iter()
             .find(|valley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM))
         {
@@ -2554,15 +2628,19 @@ impl RatioSmoothing {
                      the projection has taken the path to {back} mm before it",
                     turn - start + before
                 );
-                self.valleys.push(AdvanceValley {
-                    start,
-                    end,
-                    before,
-                    after,
-                    floor_before,
-                    floor_after,
-                    kind: ValleyKind::Crawl,
-                });
+                let at = self.laid_up_to(turn).len();
+                self.valleys.insert(
+                    at,
+                    AdvanceValley {
+                        start,
+                        end,
+                        before,
+                        after,
+                        floor_before,
+                        floor_after,
+                        kind: ValleyKind::Crawl,
+                    },
+                );
             }
         }
         self.assert_crawl_valleys_apart();
@@ -2768,12 +2846,9 @@ impl RatioSmoothing {
             closing.valley_reach().min(table_end - self.floor)
         });
         let lead = table_end - budget_back_from(table_end);
-        let waiting = self
-            .waiting_crawls
-            .first()
-            .map_or(0.0, |&(turn, crossing)| {
-                table_end - budget_back_from(turn).min(turn - crossing.valley_reach())
-            });
+        let waiting = self.waiting_crawls.first().map_or(0.0, |crawl| {
+            table_end - budget_back_from(crawl.turn).min(crawl.turn - crawl.crossing.valley_reach())
+        });
         let unlaid = opening.max(lead).max(waiting);
         let widened_from = self
             .valleys
@@ -3258,9 +3333,7 @@ impl RatioSmoothing {
             },
         );
         if self.open_rest.is_none() {
-            for crawl in std::mem::take(&mut self.waiting_crawls) {
-                self.lay_crawl_valley((spans, advance_spans), rule, crawl, f64::INFINITY);
-            }
+            self.lay_resting_crawls((spans, advance_spans));
             let side = RestSide {
                 rest: rest_start,
                 seam,
@@ -3881,6 +3954,49 @@ struct Crossing {
     speed: f64,
     rate: f64,
     jerk: f64,
+}
+
+/// A crawl a valley is laid at: where on the path, how the leaders cross
+/// it, and, where they came to rest past it while its valley waited, what
+/// was laid then, which its valley reads as at the rest
+/// ([`RatioSmoothing::lay_crawl_valley`]).
+#[derive(Debug, Clone, Copy)]
+struct Crawl {
+    turn: f64,
+    crossing: Crossing,
+    rests_past: Option<RestedPast>,
+}
+
+/// What was laid where the leaders came to rest past a crawl still
+/// waiting: the span tables up to `table_end`, and the trail's first
+/// `trail_legs` legs.
+#[derive(Debug, Clone, Copy)]
+struct RestedPast {
+    table_end: f64,
+    trail_legs: u64,
+}
+
+impl RestedPast {
+    /// The spans of `tables` laid by then.
+    fn tables<'t>(
+        &self,
+        (laid, advance): (&'t [RatioSpan], &'t [RatioSpan]),
+    ) -> (&'t [RatioSpan], &'t [RatioSpan]) {
+        let by_then = |spans: &'t [RatioSpan]| {
+            &spans[..spans.partition_point(|span| span.s0 < self.table_end)]
+        };
+        (by_then(laid), by_then(advance))
+    }
+}
+
+impl From<(f64, Crossing)> for Crawl {
+    fn from((turn, crossing): (f64, Crossing)) -> Self {
+        Self {
+            turn,
+            crossing,
+            rests_past: None,
+        }
+    }
 }
 
 impl Crossing {
