@@ -76,7 +76,10 @@ G1 X165.088 Y150.000 E0.00361 F1200
 ";
 
 fn assert_within_limits(name: &str, gcode: &str, config_text: &str) {
-    let config = std::env::temp_dir().join(format!("ratio_step_at_stop_{name}_{}.cfg", std::process::id()));
+    let config = std::env::temp_dir().join(format!(
+        "ratio_step_at_stop_{name}_{}.cfg",
+        std::process::id()
+    ));
     std::fs::write(&config, config_text).expect("temp config");
     let snapshot = corpus::plan(name, gcode, &config).expect("the stream plans");
     let audit = corpus::extruder::extruder_audit(&snapshot, gcode, &config)
