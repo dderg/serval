@@ -213,10 +213,10 @@ def test_zero_slots_is_refused(monkeypatch):
 def test_a_back_to_back_exclusive_chain_does_not_starve_a_waiting_normal_job(
     tmp_path,
 ):
-    first = start(tmp_path, 3, "A", "--exclusive")
-    time.sleep(0.3)
+    first = start(tmp_path, 3, "A", "--exclusive", hold=3)
+    wait_for(lambda: first.pid in slots.holders(tmp_path / "slots", 3))
     normal = start(tmp_path, 3, "N")
-    time.sleep(0.3)
+    wait_for(lambda: normal.pid in queued_pids(tmp_path))
     second = start(tmp_path, 3, "B", "--exclusive")
     for job in (first, normal, second):
         assert job.wait(timeout=60) == 0
