@@ -841,8 +841,8 @@ impl RatioSmoothing {
             return None;
         };
         let at_rest = |lo: f64, hi: f64| lo >= hi || self.width.bounds(lo, hi).0 == 0.0;
-        let reads_interval = at_rest(read.0, self.width.nodes[a].s)
-            && at_rest(self.width.nodes[b].s, read.1);
+        let reads_interval =
+            at_rest(read.0, self.width.nodes[a].s) && at_rest(self.width.nodes[b].s, read.1);
         let moving =
             self.smoothed_formula(seams, read, (widths.0.max(0.0), widths.1.max(0.0)), || {
                 reads_interval.then_some(interval)
