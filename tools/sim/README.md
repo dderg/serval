@@ -205,8 +205,12 @@ extruder chain, bed mesh, heaters, macros and idle timeout
 (slices of `gcode/voron_*.gcode`, perimeters, infill, strokes, tiny
 segments, zigzags, travel, Z, limit changes, extrude-only, retracts,
 rests, G92, relative/absolute E, step-lattice coordinates;
-`fuzzing/program.py`); and a timeline of user actions at print-time marks
-(`fuzzing/timeline.py`). `fuzzing/driver.py` runs it on a fresh world and
+`fuzzing/program.py`); with a bed mesh, seam segments across the probed
+area's edges (each side, through a corner, near-tangent), along and off
+its grid lines, through its nodes and through the fade band, at low and
+high speed, and a profile switch at print boundaries
+(`fuzzing/mesh_paths.py`); and a timeline of user actions at print-time
+marks (`fuzzing/timeline.py`). `fuzzing/driver.py` runs it on a fresh world and
 raises the first violated invariant (`fuzzing/checks.py` names each and
 where its threshold comes from). Rest probes in the print file (M400, a
 mark pin, a dwell) let a paced wait read every motor's step counter at
