@@ -74,3 +74,14 @@ def test_the_slow_speeds_span_the_crawl_speed():
     assert speeds[0] == 1.0
     assert speeds[-1] == 20.0
     assert SPECS["crawl_s5"].crawl_speed_mm_s == 2.5
+
+
+def test_the_sim_repro_prints_the_bench_crawl_s5():
+    fixture = (
+        crawl_gcode.BENCH.parents[1]
+        / "tools"
+        / "sim"
+        / "gcode"
+        / "crawl_s5.gcode"
+    )
+    assert fixture.read_text() == crawl_gcode.render(SPECS["crawl_s5"])
