@@ -56,12 +56,31 @@ fn a_busy_stream_that_falls_from_the_reserve_past_half_of_it_unobserved_brakes_a
 fn the_reserve_covers_a_brake_after_the_most_runway_lost_planning_blind() {
     let mut pacer = Pacer::default();
     pacer.note_drain(0.3, Some(0.0));
-    pacer.note_step(1.0, 0.6);
-    pacer.note_step(0.6, 0.9);
+    pacer.note_step(1.0, 0.6, Duration::ZERO);
+    pacer.note_step(0.6, 0.9, Duration::ZERO);
     assert!(
         (pacer.reserve_secs() - DRAIN_RESERVE_SAFETY * (0.3 + 0.4 + LOW_MARGIN_WARN_SECS)).abs()
             < 1e-12
     );
+}
+
+/// #983: the step that first hands a slow section's lead-in on runs while
+/// nothing is committed. Set off before it, the stream loses the whole step.
+#[test]
+fn a_step_planning_a_stream_yet_to_set_off_costs_its_whole_length() {
+    let mut pacer = Pacer::default();
+    let took = Duration::from_millis(650);
+    assert_eq!(pacer.note_step(0.0, 0.0, took), Some(took.as_secs_f64()));
+    assert!(
+        (pacer.reserve_secs() - DRAIN_RESERVE_SAFETY * (0.65 + LOW_MARGIN_WARN_SECS)).abs() < 1e-12
+    );
+}
+
+#[test]
+fn a_step_with_runway_costs_what_it_lost_of_it_however_long_it_took() {
+    let mut pacer = Pacer::default();
+    assert_eq!(pacer.note_step(1.0, 0.95, Duration::from_secs(1)), None);
+    assert_eq!(pacer.reserve_secs(), Pacer::default().reserve_secs());
 }
 
 #[test]
@@ -93,7 +112,7 @@ fn a_brake_costing_more_than_the_reserve_cap_holds_caps_the_reserve() {
 #[test]
 fn planning_that_loses_more_runway_than_the_reserve_cap_holds_caps_the_reserve() {
     let mut pacer = Pacer::default();
-    assert!(pacer.note_step(2.0, 0.5));
+    assert!(pacer.note_step(2.0, 0.5, Duration::ZERO).is_some());
     assert_eq!(pacer.reserve_secs(), RESERVE_CAP_S);
     assert!(pacer.reserve_capped());
 }
@@ -101,7 +120,7 @@ fn planning_that_loses_more_runway_than_the_reserve_cap_holds_caps_the_reserve()
 #[test]
 fn a_reserve_under_the_cap_is_not_capped() {
     let mut pacer = Pacer::default();
-    assert!(pacer.note_step(0.6, 0.2));
+    assert!(pacer.note_step(0.6, 0.2, Duration::ZERO).is_some());
     assert!(!pacer.reserve_capped());
 }
 
@@ -321,7 +340,7 @@ fn a_stream_in_flight_waits_out_its_prime_only_while_one_brake_still_fits() {
     let base = Instant::now();
     let mut pacer = Pacer::default();
     pacer.note_drain(0.2, Some(0.0));
-    pacer.note_step(0.6, 0.55);
+    pacer.note_step(0.6, 0.55, Duration::ZERO);
     pacer.note_move(base);
     let one_brake_s = 0.2 + 0.05 + LOW_MARGIN_WARN_SECS;
     assert_eq!(

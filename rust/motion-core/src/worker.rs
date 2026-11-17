@@ -440,10 +440,10 @@ impl StreamWorkerHandle {
         }
         .into_staged(move |item| trajectory.send(item).is_ok());
         let pacer = ingress::Pacer::default();
+        links.publish_reserve(pacer.reserve_secs());
         let intake = Arc::new(intake_gate::IntakeGate::new(
             Arc::clone(&timeline.frontier),
             Arc::clone(&links),
-            pacer.reserve_secs(),
         ));
         let ingress = ingress::Ingress {
             config,
