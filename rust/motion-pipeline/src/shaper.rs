@@ -5810,11 +5810,27 @@ pub(crate) fn nonlinear_advance_models(
     models
 }
 
-/// How far a reciprocal advance's unit velocity may reach past zero onto
-/// the branch opposite the one its window is modelled on. Within it the
-/// branches `u/(1 ± u)` differ from `u/(1 + |u|)` by at most `3S²`, their
-/// slopes by `5S` and their curvatures by `4.1`.
-const RECIPROCAL_BRANCH_SLACK: f64 = 1e-9;
+/// How many roundings [`reciprocal_branch_miss`] takes, at most, to each
+/// of its bounds.
+const BRANCH_MISS_ROUNDINGS: usize = 8;
+
+/// How far `u/(1 + u)`, its slope and its curvature, which a window
+/// modelled on the positive branch reads, miss the reciprocal shape
+/// `u/(1 − u)` on `u ∈ [−reach, 0]`: `2u²/(1 − u²)`, `4|u|/(1 − u²)²` and
+/// `2/(1 − u)³ + 2/(1 + u)³`, each at most its value at `u = −reach`; the
+/// shape is odd, so the negative branch misses as much.
+fn reciprocal_branch_miss(reach: f64) -> [f64; 3] {
+    let near = (1.0 - reach) * (1.0 + reach);
+    let bound = |value: f64| {
+        let ball = Ball::rounded(value, BRANCH_MISS_ROUNDINGS);
+        taylor::upper(ball.mid + ball.rad)
+    };
+    [
+        bound(2.0 * reach * reach / near),
+        bound(4.0 * reach / (near * near)),
+        bound(2.0 + 2.0 / (1.0 - reach).powi(3)),
+    ]
+}
 
 /// The unit-scaled advance shape `s(u)`, `s'(u)`, `s''(u)` of a velocity's
 /// model, and how far each may miss the shape where the model's range
@@ -5842,15 +5858,11 @@ impl AdvanceShape {
             }
             trajectory::AdvanceModel::Reciprocal => {
                 let (centre, spread) = unit.spread();
-                let subtraction = f64::EPSILON * (centre.abs() + spread);
-                let sign = if centre - spread >= -RECIPROCAL_BRANCH_SLACK {
-                    1.0
-                } else if centre + spread <= RECIPROCAL_BRANCH_SLACK {
-                    -1.0
-                } else {
+                let sign = if centre >= 0.0 { 1.0 } else { -1.0 };
+                let past_zero = spread + f64::EPSILON * (centre.abs() + spread) - sign * centre;
+                if past_zero >= 1.0 {
                     return None;
-                };
-                let reaches_other_branch = sign * centre - spread - subtraction < 0.0;
+                }
                 let reciprocal = unit
                     .scale(Ball::exact(sign))
                     .add_ball(Ball::exact(1.0))
@@ -5864,12 +5876,8 @@ impl AdvanceShape {
                     },
                     curvature: slope.mul(&reciprocal).scale(Ball::exact(-2.0 * sign)),
                     slope,
-                    branch_miss: if reaches_other_branch {
-                        [
-                            3.0 * RECIPROCAL_BRANCH_SLACK * RECIPROCAL_BRANCH_SLACK,
-                            5.0 * RECIPROCAL_BRANCH_SLACK,
-                            4.1,
-                        ]
+                    branch_miss: if past_zero > 0.0 {
+                        reciprocal_branch_miss(past_zero)
                     } else {
                         [0.0; 3]
                     },
