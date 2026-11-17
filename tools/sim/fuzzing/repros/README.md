@@ -25,3 +25,4 @@ tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-* --repeat 3
 | #931 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-931` | panic `shaper.rs` "axis 3 (follower_source): fit tolerance failed" |
 | #932 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-932` | panic `shaper.rs` "advanced_follower_source span ... neither exact polynomials nor an enclosure" |
 | #940 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-940 --repeat 10` | intermittent: pacer_brake `RunwayExhausted` at print start; not minimized |
+| #993 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-993` | idle_timeout: `state 'Printing', extruder target 150.0` 8.5 s after the second print, which followed a 40 s idle gap |
