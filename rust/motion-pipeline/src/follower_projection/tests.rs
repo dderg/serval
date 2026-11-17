@@ -2990,19 +2990,34 @@ fn a_constant_source_stays_constant_whatever_is_laid_past_it() {
     assert_eq!(constant_of(&followed), constant_of(&alone));
 }
 
-/// A leader whose velocity `10·(u − 0.5)` crosses zero at 0.5: its watch
-/// over `[0.2, 0.9]` sees the reversal on any part holding 0.5, and none
-/// on parts clear of it.
+/// A piece over `[2, 3]` whose velocity `10·(u − 0.5)` crosses zero at
+/// 2.5 isolates that reversal to where the velocity stays within the
+/// odometer's rate tolerance, 1e-7 either side; a piece whose velocity
+/// keeps its sign has none.
 #[test]
-fn a_velocity_watch_sees_a_reversal_only_where_it_lies() {
-    let piece = BezierPiece {
-        u_start: 0.0,
-        u_end: 1.0,
+fn a_piece_isolates_its_velocity_reversal() {
+    let reversing = BezierPiece {
+        u_start: 2.0,
+        u_end: 3.0,
         coeffs: vec![3.0, -5.0, 5.0],
     };
-    let watch = super::VelocityControls::of(&piece, 0.2, 0.9);
-    assert!(watch.may_reverse_on(0.2, 0.9));
-    assert!(watch.may_reverse_on(0.45, 0.55));
-    assert!(!watch.may_reverse_on(0.2, 0.45));
-    assert!(!watch.may_reverse_on(0.55, 0.9));
+    let mut reversals = Vec::new();
+    super::VelocityControls::of(&reversing).reversals(&mut reversals);
+    assert!(
+        reversals.iter().any(|&(from, to)| from <= 2.5 && to >= 2.5),
+        "{reversals:?}"
+    );
+    let reach = 4e-7;
+    for &(from, to) in &reversals {
+        assert!(from >= 2.5 - reach && to <= 2.5 + reach, "{from}..{to}");
+    }
+
+    let monotone = BezierPiece {
+        u_start: 2.0,
+        u_end: 3.0,
+        coeffs: vec![3.0, 1.0, 5.0],
+    };
+    let mut none = Vec::new();
+    super::VelocityControls::of(&monotone).reversals(&mut none);
+    assert!(none.is_empty(), "{none:?}");
 }

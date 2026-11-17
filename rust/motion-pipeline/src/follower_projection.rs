@@ -2612,14 +2612,18 @@ impl SpeedZeroSliver {
 struct LeaderPieces {
     base: f64,
     pieces: Vec<BezierPiece>,
+    /// Where the pieces' velocity may change sign, in time order
+    /// ([`VelocityControls::reversals`]).
+    reversals: Vec<(f64, f64)>,
 }
 
 impl LeaderPieces {
     fn of(axis: &ContinuousAxis) -> Option<Self> {
-        let candidate = match axis {
+        let mut candidate = match axis {
             ContinuousAxis::Spline(curve) => Some(Self {
                 base: 0.0,
                 pieces: extract_bezier_pieces(curve),
+                reversals: Vec::new(),
             }),
             ContinuousAxis::RelativeSpline {
                 base_position,
@@ -2627,6 +2631,7 @@ impl LeaderPieces {
             } => Some(Self {
                 base: *base_position,
                 pieces: extract_bezier_pieces(curve),
+                reversals: Vec::new(),
             }),
             ContinuousAxis::PiecewiseRelativeSpline(relative_pieces) => {
                 let mut pieces = Vec::new();
@@ -2639,11 +2644,21 @@ impl LeaderPieces {
                 let contiguous = pieces
                     .windows(2)
                     .all(|pair| pair[0].u_end == pair[1].u_start);
-                contiguous.then_some(Self { base: 0.0, pieces })
+                contiguous.then_some(Self {
+                    base: 0.0,
+                    pieces,
+                    reversals: Vec::new(),
+                })
             }
             _ => None,
         }?;
-        candidate.matches(axis).then_some(candidate)
+        if !candidate.matches(axis) {
+            return None;
+        }
+        for piece in &candidate.pieces {
+            VelocityControls::of(piece).reversals(&mut candidate.reversals);
+        }
+        Some(candidate)
     }
 
     /// Whether every piece reads what the axis does at its far Gauss
@@ -2906,14 +2921,6 @@ impl<'a> ShapedLeaders<'a> {
 
     fn speed(&self, t: f64) -> f64 {
         norm_of((0..self.axes.len()).map(|index| self.pva(index, t).1))
-    }
-
-    /// The cached piece leader `index` reads over all of `[lo, hi]`.
-    fn piece_over(&self, index: usize, lo: f64, hi: f64) -> Option<&BezierPiece> {
-        self.pieces
-            .get(index)
-            .and_then(Option::as_ref)
-            .and_then(|pieces| pieces.piece_over(lo, 0.5 * lo + 0.5 * hi, hi))
     }
 
     /// A lower bound on the speed of `bounded` leaders over `[lo, hi]`, and
@@ -5197,8 +5204,15 @@ static ODOMETER_END_ZONE_CHECKS: LazyLock<Vec<f64>> = LazyLock::new(|| {
 /// The most Bernstein controls a leader velocity's watch holds.
 const VELOCITY_CONTROLS_MAX: usize = 16;
 
-/// One leader's velocity over a grid window as Bernstein controls on
-/// `[lo, hi]`, whose hull holds the velocity on any part of the window.
+/// How many halvings of a leaf put its end zone, between its outermost
+/// midpoint check and its end, at or under the leaf's width.
+const END_ZONE_HALVINGS: u32 = 10;
+
+/// The halvings a reversal is isolated to: the deepest leaf's end zone.
+const REVERSAL_ISOLATION_DEPTH: u32 = INTEGRAL_MAX_DEPTH + END_ZONE_HALVINGS;
+
+/// One leader piece's velocity on `[lo, hi]` as Bernstein controls, whose
+/// hull holds the velocity there.
 #[derive(Clone, Copy)]
 struct VelocityControls {
     lo: f64,
@@ -5209,75 +5223,98 @@ struct VelocityControls {
 
 impl VelocityControls {
     /// The velocity of `piece`, a power polynomial about its start, over
-    /// `[lo, hi]`: shifted to `lo`, scaled to the window, then converted.
-    fn of(piece: &BezierPiece, lo: f64, hi: f64) -> Self {
+    /// its span.
+    fn of(piece: &BezierPiece) -> Self {
         let len = piece.coeffs.len().saturating_sub(1).max(1);
         assert!(
             len <= VELOCITY_CONTROLS_MAX,
-            "a degree-{len} leader piece exceeds the odometer's velocity watch"
+            "a degree-{len} leader piece exceeds the odometer's velocity controls"
         );
+        let width = piece.u_end - piece.u_start;
         let mut power = [0.0; VELOCITY_CONTROLS_MAX];
-        for (k, slot) in power.iter_mut().enumerate().take(len) {
-            *slot = piece.coeffs.get(k + 1).map_or(0.0, |c| c * (k + 1) as f64);
-        }
-        let origin = lo - piece.u_start;
-        for done in 0..len.saturating_sub(1) {
-            for k in (done..len - 1).rev() {
-                power[k] += origin * power[k + 1];
-            }
-        }
-        let width = hi - lo;
         let mut scale = 1.0;
-        for slot in power.iter_mut().take(len) {
-            *slot *= scale;
+        for (k, slot) in power.iter_mut().enumerate().take(len) {
+            *slot = piece.coeffs.get(k + 1).map_or(0.0, |c| c * (k + 1) as f64) * scale;
             scale *= width;
         }
         let degree = len - 1;
+        let mut degree_row = [0.0; VELOCITY_CONTROLS_MAX];
+        let mut row = [0.0; VELOCITY_CONTROLS_MAX];
+        row[0] = 1.0;
+        degree_row[0] = 1.0;
+        for j in 1..=degree {
+            degree_row[j] = degree_row[j - 1] * (degree + 1 - j) as f64 / j as f64;
+        }
         let mut controls = [0.0; VELOCITY_CONTROLS_MAX];
         for (i, control) in controls.iter_mut().enumerate().take(len) {
-            *control = (0..=i)
-                .map(|j| binomial(i, j) / binomial(degree, j) * power[j])
-                .sum();
+            for j in (1..=i).rev() {
+                row[j] += row[j - 1];
+            }
+            *control = (0..=i).map(|j| row[j] / degree_row[j] * power[j]).sum();
         }
         Self {
-            lo,
-            hi,
+            lo: piece.u_start,
+            hi: piece.u_end,
             controls,
             len,
         }
     }
 
-    /// Whether the velocity may change sign on `[from, to]` by more than
-    /// the odometer's rate tolerance either way: its controls there,
-    /// split off by de Casteljau, straddle zero past it.
-    fn may_reverse_on(&self, from: f64, to: f64) -> bool {
-        let width = self.hi - self.lo;
-        let end = ((to - self.lo) / width).clamp(0.0, 1.0);
-        let start = ((from - self.lo) / width).clamp(0.0, 1.0);
-        let mut controls = self.controls;
-        let degree = self.len - 1;
-        for level in 1..=degree {
-            for i in (level..=degree).rev() {
-                controls[i] = (1.0 - end) * controls[i - 1] + end * controls[i];
-            }
-        }
-        let start = if end > 0.0 { start / end } else { 0.0 };
-        for level in 1..=degree {
-            for i in 0..=degree - level {
-                controls[i] = (1.0 - start) * controls[i] + start * controls[i + 1];
-            }
-        }
-        let (low, high) = controls[..self.len]
+    fn hull(&self) -> (f64, f64) {
+        self.controls[..self.len]
             .iter()
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &control| {
                 (low.min(control), high.max(control))
-            });
-        low < -ODOMETER_RATE_TOL_MM_S && high > ODOMETER_RATE_TOL_MM_S
+            })
     }
-}
 
-fn binomial(n: usize, k: usize) -> f64 {
-    (0..k).fold(1.0, |product, i| product * (n - i) as f64 / (i + 1) as f64)
+    /// The controls of the two halves, by de Casteljau.
+    fn halves(&self) -> (Self, Self) {
+        let degree = self.len - 1;
+        let middle = 0.5 * self.lo + 0.5 * self.hi;
+        let mut work = self.controls;
+        let mut left = *self;
+        let mut right = *self;
+        left.hi = middle;
+        right.lo = middle;
+        left.controls[0] = work[0];
+        right.controls[degree] = work[degree];
+        for level in 1..=degree {
+            for i in 0..=degree - level {
+                work[i] = 0.5 * work[i] + 0.5 * work[i + 1];
+            }
+            left.controls[level] = work[0];
+            right.controls[degree - level] = work[degree - level];
+        }
+        (left, right)
+    }
+
+    /// The stretches where the velocity may change sign, if it may change
+    /// sign by more than the odometer's rate tolerance either way over the
+    /// whole piece: each narrowed until the velocity there stays within
+    /// the tolerance, where it adds no more than that to the speed, or
+    /// [`REVERSAL_ISOLATION_DEPTH`] halvings deep.
+    fn reversals(&self, out: &mut Vec<(f64, f64)>) {
+        let (low, high) = self.hull();
+        if low < -ODOMETER_RATE_TOL_MM_S && high > ODOMETER_RATE_TOL_MM_S {
+            self.isolate(0, out);
+        }
+    }
+
+    fn isolate(&self, depth: u32, out: &mut Vec<(f64, f64)>) {
+        let (low, high) = self.hull();
+        if low > 0.0 || high < 0.0 {
+            return;
+        }
+        let within_tolerance = low >= -ODOMETER_RATE_TOL_MM_S && high <= ODOMETER_RATE_TOL_MM_S;
+        if within_tolerance || depth == REVERSAL_ISOLATION_DEPTH {
+            out.push((self.lo, self.hi));
+            return;
+        }
+        let (left, right) = self.halves();
+        left.isolate(depth + 1, out);
+        right.isolate(depth + 1, out);
+    }
 }
 
 /// Where in a grid window a leaf's end zones, between its outermost
@@ -5285,44 +5322,45 @@ fn binomial(n: usize, k: usize) -> f64 {
 /// each leader is one polynomial piece, so the leaders' speed is smooth
 /// wherever it stays clear of zero; it kinks only where a leader's
 /// velocity changes sign while the others are slow, a reversal the nodes
-/// miss when it lands in an end zone. The leaders whose velocity hull over
-/// the window straddles zero are watched, and a leaf's end zones are
-/// checked where one of them may reverse there; a leader without a cached
-/// piece that may reverse in the window has every end zone checked.
+/// miss when it lands in an end zone. A leaf's end zones are checked where
+/// one of the leaders' reversal stretches meets them; a leader without
+/// cached pieces that may reverse in the window has every end zone checked.
 #[derive(Default)]
 struct EndZones {
-    watched: [Option<VelocityControls>; MAX_LEADERS],
+    reversals: Vec<(f64, f64)>,
     unwatched_reversal: bool,
 }
 
 impl EndZones {
     fn of(leaders: &ShapedLeaders, lo: f64, hi: f64) -> Self {
-        let mut watched = [None; MAX_LEADERS];
-        let mut unwatched_reversal = false;
-        for (index, slot) in watched.iter_mut().enumerate().take(leaders.axes.len()) {
-            if let Some(piece) = leaders.piece_over(index, lo, hi) {
-                let controls = VelocityControls::of(piece, lo, hi);
-                *slot = controls.may_reverse_on(lo, hi).then_some(controls);
+        let mut zones = Self::default();
+        for (index, axis) in leaders.axes.iter().enumerate() {
+            if let Some(Some(pieces)) = leaders.pieces.get(index) {
+                zones.reversals.extend(
+                    pieces
+                        .reversals
+                        .iter()
+                        .filter(|&&(from, to)| to >= lo && from <= hi),
+                );
                 continue;
             }
-            let bounds = leaders.axes[index].pva_bounds(lo, hi).unwrap_or_else(|error| {
+            let bounds = axis.pva_bounds(lo, hi).unwrap_or_else(|error| {
                 panic!("leader {index} has no velocity bounds over [{lo}, {hi}]: {error}")
             });
-            unwatched_reversal |= bounds.velocity_min < -ODOMETER_RATE_TOL_MM_S
+            zones.unwatched_reversal |= bounds.velocity_min < -ODOMETER_RATE_TOL_MM_S
                 && bounds.velocity_max > ODOMETER_RATE_TOL_MM_S;
         }
-        Self {
-            watched,
-            unwatched_reversal,
-        }
+        zones
     }
 
     /// Whether a leader may reverse within `zone` of either end of `[a, b]`.
     fn hold_a_reversal(&self, (a, b): (f64, f64), zone: f64) -> bool {
-        self.unwatched_reversal
-            || self.watched.iter().flatten().any(|controls| {
-                controls.may_reverse_on(a, a + zone) || controls.may_reverse_on(b - zone, b)
-            })
+        let meets = |from: f64, to: f64| {
+            self.reversals
+                .iter()
+                .any(|&(start, end)| end >= from && start <= to)
+        };
+        self.unwatched_reversal || meets(a, a + zone) || meets(b - zone, b)
     }
 }
 
