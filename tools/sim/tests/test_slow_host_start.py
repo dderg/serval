@@ -11,6 +11,7 @@ pipeline's threads wait out their CPU time, scaled to a Pi."""
 
 import dataclasses
 import json
+import pathlib
 
 import pytest
 
@@ -32,6 +33,18 @@ PRINT_TIMEOUT_S = 600.0
 CRAWL_EXPECTED_S = 60
 BENCH_AB_STEP_LINES = (0, 3)
 NS_PER_S = 1e9
+FIRST_LAYERS = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "gcode"
+    / "voron_first_layers.gcode"
+)
+FIRST_LAYERS_LINES = 300
+FIRST_STEP_TIMEOUT_S = 10.0
+MOTION_STILL_S = 2.0
+# The prime a stream sets off on: `STARTUP_PRIME_S` plus the unmeasured
+# reserve (motion-core `worker/ingress/pacer.rs`).
+PRIMED_START_S = 0.54
+FIRST_STEP_SLACK_S = 0.1
 FATAL_EVENTS = (
     "anchor_underrun",
     "anchor_low_margin",
@@ -171,4 +184,93 @@ def test_a_slow_section_starts_on_a_pi(sim_world, monkeypatch, row):
     assert "host_compute_charged" in names, "the pipeline ran uncharged"
     fatal = [name for name in FATAL_EVENTS if name in names]
     assert not fatal, world.log_tail()[-3000:]
+    assert world.shutdown_line() is None, world.log_tail()[-3000:]
+
+
+def _first_step_s(world, control, issue) -> float:
+    """Seconds from `issue()` to the first X/Y motor step after it."""
+    for line in BENCH_AB_STEP_LINES:
+        control.reset_step_times(line)
+    issued_s = world.vclock.now_ns() / NS_PER_S
+    issue()
+    world.wait_until(
+        lambda: any(
+            control.get_step_times(line)["count"]
+            for line in BENCH_AB_STEP_LINES
+        ),
+        timeout=FIRST_STEP_TIMEOUT_S,
+        what="the first step",
+    )
+    return _first_step_after(control, issued_s)
+
+
+def _still(world, control) -> None:
+    def last_step_s():
+        return (
+            max(
+                control.get_step_times(line)["last_ns"]
+                for line in BENCH_AB_STEP_LINES
+            )
+            / NS_PER_S
+        )
+
+    world.wait_until(
+        lambda: (
+            world.vclock.now_ns() / NS_PER_S - last_step_s() >= MOTION_STILL_S
+        ),
+        timeout=PRINT_TIMEOUT_S,
+        what=f"X/Y still for {MOTION_STILL_S}s",
+    )
+
+
+@pytest.mark.parametrize(
+    "scale", [None, PI_COMPUTE_SCALE], ids=["dev_box", "pi"]
+)
+def test_jog_print_start_and_resume_set_off_within_the_prime(
+    sim_world, monkeypatch, scale
+):
+    """What the set-off rule costs an ordinary start: a jog, a print, a
+    RESUME. Each first step lands within the prime a stream starts on."""
+    if scale is not None:
+        monkeypatch.setenv("SERVAL_HOST_COMPUTE_SCALE", str(scale))
+    world = sim_world(
+        lambda w: configs.bench_print_config(w.h7_pty, str(w.gcode_dir)),
+        dual_mcu=False,
+    )
+    control = world.sim_control("h7")
+    world.gcode_ok("SET_KINEMATIC_POSITION X=100 Y=100 Z=10", timeout=10)
+    world.gcode_ok("G91")
+    jog_s = _first_step_s(world, control, lambda: world.gcode_ok("G1 X1 F1200"))
+    world.gcode_ok("G90")
+    _still(world, control)
+    gcode = world.gcode_dir / "first_layers.gcode"
+    lines = FIRST_LAYERS.read_text().splitlines()[:FIRST_LAYERS_LINES]
+    gcode.write_text("\n".join(lines) + "\n")
+    world.gcode_ok("SET_KINEMATIC_POSITION X=0 Y=0 Z=0", timeout=10)
+    print_s = _first_step_s(
+        world,
+        control,
+        lambda: world.gcode_ok(f"SDCARD_PRINT_FILE FILENAME={gcode.name}"),
+    )
+    world.gcode_ok("PAUSE", timeout=PRINT_TIMEOUT_S)
+    _still(world, control)
+    resume_s = _first_step_s(
+        world,
+        control,
+        lambda: world.gcode_ok("RESUME", timeout=PRINT_TIMEOUT_S),
+    )
+    world.gcode_ok("CANCEL_PRINT", timeout=PRINT_TIMEOUT_S)
+
+    record = {
+        "scale": scale,
+        "jog_s": jog_s,
+        "print_s": print_s,
+        "resume_s": resume_s,
+    }
+    with (world.log_dir / "start_latency.jsonl").open("a") as stream:
+        stream.write(json.dumps(record) + "\n")
+    assert all(
+        latency_s <= PRIMED_START_S + FIRST_STEP_SLACK_S
+        for latency_s in (jog_s, print_s, resume_s)
+    ), record
     assert world.shutdown_line() is None, world.log_tail()[-3000:]
