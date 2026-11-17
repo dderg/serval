@@ -8,13 +8,12 @@ none is in the suite; a fix PR moves its directory into the regression set
 Replay one (the image copies the tree, run.sh maps the path):
 
 ```
-tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-892
+tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-893
 tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-* --repeat 3
 ```
 
 | issue | replay | expected failure |
 |---|---|---|
-| #892 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-892` | uncommanded_shutdown: `Internal error on command:"M400"` (API FIRMWARE_RESTART in M400) |
 | #893 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-893` | pin_order: motors move within 0.3 s of the mark pin, inside the `G4 P1500` after it |
 | #895 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-895` | panic `crawl_sides.rs:347` "the leaders ask N mm/s² of the follower" |
 | #896 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-896` | panic `ratio_ramp.rs` assert_weight_continuous "the advance valley ... steps its weight" |
