@@ -529,6 +529,7 @@ pub fn geometry::ratio_ramp::coupled_bend(f64, f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::crawl_floor(f64, f64) -> f64
 pub fn geometry::ratio_ramp::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
 pub fn geometry::ratio_ramp::crawl_step_window(f64) -> f64
+pub fn geometry::ratio_ramp::fit_speed_miss(f64, f64) -> f64
 pub fn geometry::ratio_ramp::kept_floor(f64, f64) -> f64
 pub fn geometry::ratio_ramp::leader_reach(f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::longest_ramp_time(f64, f64) -> f64
@@ -537,6 +538,7 @@ pub fn geometry::ratio_ramp::rest_room_reach_mm(f64) -> f64
 pub fn geometry::ratio_ramp::side_weight(f64, f64, f64) -> (f64, f64, f64)
 pub fn geometry::ratio_ramp::turns_around(f64, f64) -> bool
 pub fn geometry::ratio_ramp::valley_reach(f64, f64) -> f64
+pub fn geometry::ratio_ramp::valley_speed_crawl_rebuild(f64, f64) -> f64
 pub fn geometry::ratio_ramp::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>
 pub mod geometry::segment
 pub struct geometry::segment::CubicSegment
@@ -1577,6 +1579,7 @@ pub fn geometry::crawl_floor(f64, f64) -> f64
 pub fn geometry::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
 pub fn geometry::crawl_step_window(f64) -> f64
 pub fn geometry::extrusion_budgets(&[geometry::frontend::Move], f64, f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
+pub fn geometry::fit_speed_miss(f64, f64) -> f64
 pub fn geometry::kept_floor(f64, f64) -> f64
 pub fn geometry::leader_reach(f64, f64, f64) -> f64
 pub fn geometry::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
@@ -1589,4 +1592,5 @@ pub fn geometry::seam_requires_stop(&geometry::frontend::Move, &geometry::fronte
 pub fn geometry::side_weight(f64, f64, f64) -> (f64, f64, f64)
 pub fn geometry::turns_around(f64, f64) -> bool
 pub fn geometry::valley_reach(f64, f64) -> f64
+pub fn geometry::valley_speed_crawl_rebuild(f64, f64) -> f64
 pub fn geometry::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>

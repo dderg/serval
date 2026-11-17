@@ -2,7 +2,7 @@
 //! advance valley, laid by the follower projection and bounded by the
 //! turning guard from the same rule.
 
-use super::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S};
+use super::{ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S};
 
 /// The ramp time over which a turnaround or crawl valley releases and
 /// rebuilds the advance's lead, the longest, whatever the step there; and
@@ -796,6 +796,39 @@ pub fn widest_crawl_side_within(reach: f64, limit: f64) -> Option<f64> {
     let past_limit = crawl_side_grid_step_past(limit.min(CRAWL_SIDE_WIDEST_MM));
     let widest = crawl_side_grid(past_limit - 1);
     (widest > reach).then_some(widest)
+}
+
+/// How fast leaders fitted to within `position` of a path, their
+/// acceleration within `accel` of its, may stray from its speed:
+/// `2·√(position·accel)`, the fastest an error held within `position`
+/// whose rate changes no faster than `accel` can change (Landau's
+/// inequality on a half-line).
+#[must_use]
+pub fn fit_speed_miss(position: f64, accel: f64) -> f64 {
+    2.0 * libm::sqrt(position * accel)
+}
+
+/// The most the rebuild of a crawl valley side asks,
+/// `|W″·ṡ³ + 3W′·ṡ·s̈|` ([`CrawlSide::rebuild`]), where the shaped leaders
+/// cross at [`ADVANCE_VALLEY_SPEED_MM_S`] `v` with no acceleration of their
+/// own through the whole [`VALLEY_LEAD_BUDGET_S`] `T` before the crawl.
+/// Leaders fitted to within `fit_position` and `fit_accel` of them
+/// ([`fit_speed_miss`] `δ`) crawl at `v − δ` to `v`, accelerating within
+/// `fit_accel`, and are at most `v + δ` fast; the crawl's floor is that of
+/// its slowest speed at `fit_accel`, its widest unbounded; the side is the
+/// widest the `v·T` of path the leaders cover leaves past their reach, or
+/// the reach where none is. An advance of slope `k` at extrusion ratio `r`
+/// asks `k·r` times this of its follower around such a crawl however far
+/// the turning guard backs off the moves there, since none of it reads the
+/// moves' acceleration.
+#[must_use]
+pub fn valley_speed_crawl_rebuild(fit_position: f64, fit_accel: f64) -> f64 {
+    let speed = ADVANCE_VALLEY_SPEED_MM_S;
+    let miss = fit_speed_miss(fit_position, fit_accel);
+    let reach = valley_reach(speed, fit_accel);
+    let width = widest_crawl_side_within(reach, speed * VALLEY_LEAD_BUDGET_S).unwrap_or(reach);
+    let floor = crawl_floor((speed - miss).max(0.0), fit_accel);
+    CrawlSide::either_way(speed, fit_accel, speed + miss, (floor, f64::INFINITY)).rebuild(width)
 }
 
 #[cfg(test)]
