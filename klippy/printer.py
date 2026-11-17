@@ -485,9 +485,10 @@ class Printer:
         # Check restart flags
         run_result = self.run_result
         try:
-            self._dispatch_stop_event("klippy:stopping")
             if run_result == "firmware_restart":
                 self._dispatch_stop_event("klippy:firmware_restart")
+            else:
+                self._dispatch_stop_event("klippy:stopping")
             self._dispatch_disconnect()
         except:
             logging.exception("Unhandled exception during post run")
