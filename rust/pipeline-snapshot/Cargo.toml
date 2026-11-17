@@ -21,10 +21,15 @@ trajectory = { path = "../trajectory" }
 
 [features]
 fit-audit = ["motion-pipeline/fit-audit"]
+valley-audit = ["motion-pipeline/valley-audit"]
 
 [[test]]
 name = "fit_tolerance"
 required-features = ["fit-audit"]
+
+[[test]]
+name = "released_path"
+required-features = ["valley-audit"]
 
 [dev-dependencies]
 source-tree = { path = "../source-tree" }

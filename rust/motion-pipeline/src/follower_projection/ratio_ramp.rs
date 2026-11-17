@@ -11,6 +11,8 @@ use super::{
     ShapedLeaders, Table,
 };
 
+#[cfg(feature = "valley-audit")]
+mod audit;
 mod crawl_sides;
 mod jet;
 mod models;
@@ -2074,6 +2076,8 @@ pub(super) struct RatioSmoothing {
     /// wide its after side reaches.
     waiting_crawls: Vec<(f64, Crossing)>,
     trail: SideTrail,
+    #[cfg(feature = "valley-audit")]
+    audit: audit::ValleyLog,
 }
 
 impl RatioSmoothing {
@@ -2148,6 +2152,8 @@ impl RatioSmoothing {
         self.width.rule = Some(*rule);
         let leaders = leg.shaped_leaders;
         let table_end = spans.last().map_or(leg.start_s, |last| last.s1);
+        #[cfg(feature = "valley-audit")]
+        self.audit.lay_through(table_end);
         if table_end <= leg.start_s {
             self.width.extend(leaders, leg, table_end);
             for crawl in std::mem::take(&mut self.waiting_crawls) {
@@ -2357,6 +2363,8 @@ impl RatioSmoothing {
                 seams.cap_step(s, owned.half_width);
             }
         }
+        #[cfg(feature = "valley-audit")]
+        audit::lay_crawl(turn, crawl.1, reach, zero);
         self.place_valley(turn, (zero, sides), floors);
         Ok(())
     }
@@ -3050,6 +3058,8 @@ impl RatioSmoothing {
     /// and the width nodes behind the first seam kept.
     pub(super) fn prune_before(&mut self, s: f64) {
         self.pruned_before = self.pruned_before.max(s);
+        #[cfg(feature = "valley-audit")]
+        self.audit.prune(&self.valleys, s);
         self.valleys.retain(|valley| valley.reach_end() >= s);
         let (Some(first), Some(last)) = (self.width.nodes.first(), self.width.nodes.last()) else {
             return;

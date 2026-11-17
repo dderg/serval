@@ -356,78 +356,23 @@ fn a_waiting_crawl_keeps_its_path_untaken() {
     );
 }
 
-/// #897: a corexy with a kernel-free advance limited to 6359 mm/s² and
-/// `square_corner_velocity: 0`, drawn by the print-like planner fuzz.
-const FAR_STEPS_PRINTER: &str = "[printer]
-max_velocity: 386.46480970262087
-max_accel: 51666.60727129722
-square_corner_velocity: 0
-max_z_velocity: 25
-max_z_accel: 100
-[kinematics]
-type: corexy
-axis_x: x
-axis_y: y
-axis_z: z
-a_motors: a
-b_motors: b
-z_motors: z
-[axis x]
-post_processors: shaper_x
-[axis y]
-post_processors: shaper_y
-[axis z]
-[axis e]
-follows: x, y, z
-motors: extruder
-post_processors: pa
-max_accel: 6358.545634714979
-[post_processor pa]
-type: linear_pressure_advance
-k: 0.025743938421182125
-[post_processor shaper_x]
-type: smooth_mzv
-frequency_hz: 105.76857975056504
-[post_processor shaper_y]
-type: smooth_zv
-frequency_hz: 80.640952705959
-[motor a]
-drive: stepper
-[motor b]
-drive: stepper
-[motor z]
-drive: stepper
-[motor extruder]
-drive: stepper
-[extruder]
-axis: e
-max_extrude_only_velocity: 50
-max_extrude_only_accel: 5000
-";
-
-/// #897: a reversal's crawl valley owns the ratio steps 0.9 and 2.5 mm
-/// after it, where the leaders may cross at ~206 mm/s; capped to the
-/// crawl's 0.24 mm step window their flow asked 6734 mm/s².
-const STEPS_FAR_PAST_A_REVERSAL: &str = "G90
-M83
-G1 X148.223 Y158.619 F10632
-G1 X150.159 Y151.491 E0.41688 F13620
-G1 X150.794 Y146.569 E0.23578 F11562
-G1 X155.997 Y145.112 E0.14745 F7538
-G1 X155.077 Y145.258 E0.02331 F4309
-G1 X153.500 Y145.541 E0.06676 F6878
-G1 X145.159 Y142.668 F14889
-";
+fn plans_its_draw(draw: &corpus::crawl_cascade::Draw) {
+    plans_within_the_extruder_limits(draw.name, draw.gcode, &draw.config());
+}
 
 #[test]
-fn a_crawl_valley_widens_far_owned_steps_to_fit_their_flow() {
-    let config = std::env::temp_dir().join(format!("far_steps_printer_{}.cfg", std::process::id()));
-    std::fs::write(&config, FAR_STEPS_PRINTER).expect("temp config");
-    plans_within_the_extruder_limits(
-        "steps_far_past_a_reversal",
-        STEPS_FAR_PAST_A_REVERSAL,
-        &config,
-    );
+fn steps_far_past_a_reversal_keep_the_extruder_within_its_limit() {
+    plans_its_draw(&corpus::crawl_cascade::STEPS_FAR_PAST_A_REVERSAL);
+}
+
+#[test]
+fn a_crawl_among_a_streams_steps_keeps_the_extruder_within_its_limit() {
+    plans_its_draw(&corpus::crawl_cascade::CRAWL_OWNING_THE_STREAM);
+}
+
+#[test]
+fn a_crawl_among_close_steps_keeps_the_extruder_within_its_limit() {
+    plans_its_draw(&corpus::crawl_cascade::CRAWL_AMONG_CLOSE_STEPS);
 }
 
 /// #895: a corexy with a kernel-free advance limited to 12492 mm/s², drawn

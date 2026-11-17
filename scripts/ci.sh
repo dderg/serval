@@ -234,8 +234,11 @@ job_rust_fit_audit() {
         -E 'test(/^fit_audit::/)'
     host_cargo nextest run --profile ci -p pipeline-snapshot --features fit-audit \
         --test fit_tolerance
+    host_cargo nextest run --profile ci -p pipeline-snapshot --features valley-audit \
+        --test released_path
     cargo clippy -p motion-pipeline --features fit-audit --all-targets -- -D warnings
     cargo clippy -p pipeline-snapshot --features fit-audit --all-targets -- -D warnings
+    cargo clippy -p pipeline-snapshot --features valley-audit --all-targets -- -D warnings
 }
 
 job_rust_clippy() { cd "$RUST" && cargo clippy --workspace --all-targets -- -D warnings; }

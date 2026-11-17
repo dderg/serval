@@ -17,6 +17,7 @@ use pipeline_snapshot::waypoints::parse_gcode;
 use pipeline_snapshot::{SampleSide, pipeline_snapshot_for_config};
 use planner_config::from_doc::{planner_config_from_text, read_motion_settings};
 
+pub mod crawl_cascade;
 pub mod extruder;
 pub mod known_corner_overs;
 pub mod known_extruder_excesses;
