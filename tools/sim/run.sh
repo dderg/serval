@@ -16,6 +16,10 @@
 #   ./run.sh --no-cache               # force a full rebuild
 #   ./run.sh --privileged             # SCHED_FIFO for jitter-sensitive runs
 #   SIM_JITTER=3 ./run.sh test        # share a cpuset with 3 bursty CPU burners
+#   ./run.sh fuzz --seeds 1..500      # seeded scenario fuzzer; results in .sim-fuzz/
+#   ./run.sh fuzz --seed 1234         # replay one seed
+#   ./run.sh fuzz --replay DIR...     # replay saved scenarios: .sim-fuzz/ runs, or the
+#                                     # committed repros in tools/sim/fuzzing/repros/
 
 set -euo pipefail
 
@@ -24,6 +28,17 @@ export DOCKER_BUILDKIT=1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+IMAGE_REPO_ROOT="/kalico"
+
+# A replay directory as the fuzz container sees it: .sim-fuzz/ is mounted at
+# its host path; anything else in the tree is in the image under /kalico.
+image_path() {
+    case "$1" in
+        "$REPO_ROOT/.sim-fuzz"/*) echo "$1" ;;
+        "$REPO_ROOT"/*) echo "$IMAGE_REPO_ROOT/${1#"$REPO_ROOT"/}" ;;
+        *) echo "run.sh: --replay $1 is neither under .sim-fuzz/ nor in the tree" >&2; exit 2 ;;
+    esac
+}
 
 GIT_DIR="$(cd "$REPO_ROOT" && git rev-parse --git-common-dir 2>/dev/null || echo "$REPO_ROOT/.git")"
 MAIN_REPO="$(cd "$GIT_DIR/.." 2>/dev/null && pwd || echo "$REPO_ROOT")"
@@ -37,6 +52,11 @@ DOCKER_ARGS=(--rm --ulimit memlock=-1:-1 --ulimit core=0)
 # reproducing starvation-class failures (transport wedge, clocksync skew)
 # deterministically instead of waiting for ambient host load.
 [[ -n "${SIM_DOCKER_CPUS:-}" ]] && DOCKER_ARGS+=(--cpus "$SIM_DOCKER_CPUS")
+# SIM_DOCKER_MEMORY=SIZE caps the container's memory (no swap). Containers
+# live outside the caller's systemd unit, so a unit MemoryMax does not
+# reach them; fuzz mode defaults it to 16g.
+[[ "${1:-}" == fuzz ]] && : "${SIM_DOCKER_MEMORY:=16g}"
+[[ -n "${SIM_DOCKER_MEMORY:-}" ]] && DOCKER_ARGS+=(--memory "$SIM_DOCKER_MEMORY" --memory-swap "$SIM_DOCKER_MEMORY")
 # SIM_JITTER=N pins the container and N bursty burner containers (50 ms
 # spin, 20 ms sleep) to one cpuset (SIM_JITTER_CPUS, default 0,1): the
 # uneven preemption of a loaded CI runner, which a flat --cpus quota does
@@ -75,7 +95,7 @@ KEEP_LOGS=""
 VERBOSE=""
 
 case "${1:-}" in
-    test|serve|shell|save-image)
+    test|serve|shell|save-image|fuzz)
         MODE="$1"
         shift
         ;;
@@ -83,6 +103,14 @@ esac
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --replay)
+            EXTRA_ARGS+=("$1")
+            shift
+            while [[ $# -gt 0 && "$1" != -* ]]; do
+                EXTRA_ARGS+=("$(image_path "$(realpath "$1")")")
+                shift
+            done
+            ;;
         --branch|-b)
             BRANCH="$2"
             shift 2
@@ -252,6 +280,30 @@ case "$MODE" in
         if [[ -n "$KEEP_LOGS" && "$(id -u)" != 0 ]]; then
             docker run --rm -v "$KEEP_LOGS:/sim-logs" --entrypoint chown \
                 "$IMAGE_TAG" -R "$(id -u):$(id -g)" /sim-logs >/dev/null 2>&1 || true
+        fi
+        exit "$rc"
+        ;;
+    fuzz)
+        # Worlds run in the container's /tmp (unix socket paths must stay
+        # short); failures, minimized scenarios and summaries land in
+        # .sim-fuzz/, mounted at its host path so repro paths read the same
+        # on both sides.
+        FUZZ_ROOT="$REPO_ROOT/.sim-fuzz"
+        mkdir -p "$FUZZ_ROOT"
+        [[ -n "${SIM_FUZZ_JOBS:-}" ]] && DOCKER_ARGS+=(-e SIM_FUZZ_JOBS)
+        # A planner allocation blow-up (#901) ends its own scenario under the
+        # container cap above; a world past its share is reported `memory`
+        # (tools/sim/fuzzing/memory.py). --init: the SIGTERM slots.py sends at
+        # a batch's hold cap reaches docker, which passes it to the
+        # container's PID 1, and a bare python3 there ignores it; the
+        # container would outlive its slot.
+        rc=0
+        docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} --init -v "$FUZZ_ROOT:$FUZZ_ROOT" \
+            --entrypoint python3 "$IMAGE_TAG" tools/sim/fuzz.py --out-root "$FUZZ_ROOT" \
+            ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || rc=$?
+        if [[ "$(id -u)" != 0 ]]; then
+            docker run --rm -v "$FUZZ_ROOT:$FUZZ_ROOT" --entrypoint chown \
+                "$IMAGE_TAG" -R "$(id -u):$(id -g)" "$FUZZ_ROOT" >/dev/null 2>&1 || true
         fi
         exit "$rc"
         ;;

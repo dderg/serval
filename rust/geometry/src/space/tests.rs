@@ -96,6 +96,7 @@ fn unwarp_z_state_inverts_the_lowerer_chain_rule() {
         let vz_m = vz_g * (1.0 + w.wz) + w.wx * vx + w.wy * vy;
         let az_m = az_g * (1.0 + w.wz)
             + 2.0 * (w.wxz * vx + w.wyz * vy) * vz_g
+            + w.wzz * vz_g * vz_g
             + w.wxx * vx * vx
             + 2.0 * w.wxy * vx * vy
             + w.wyy * vy * vy
