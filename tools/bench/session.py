@@ -23,6 +23,7 @@ import run
 import soak_gcode
 from capture import Capture
 from session_scenarios import (
+    KLIPPY_READY_AFTER_PRINT_END_S,
     SCENARIO_BY_NAME,
     SOAK_SCENARIOS,
     Act,
@@ -35,6 +36,7 @@ POLL_S = 0.25
 SETTLE_S = 4.0
 ACTION_TIMEOUT_S = 120.0
 UNREACHABLE = "unreachable"
+READY = "ready"
 ERROR_TEXT_LIMIT = 400
 STATUS_QUERY = "/printer/objects/query?print_stats&virtual_sdcard"
 ACTIVE_PRINT = frozenset({"printing", "paused"})
@@ -230,7 +232,9 @@ class Session:
         if action.after is After.PREVIOUS:
             return lambda: self.last_sent + action.delay_s
         if action.after is After.PRINT_END:
-            return lambda: self._plus(self._print_ended_at(), action.delay_s)
+            return lambda: self._plus(
+                self._ready_after_print_end(), action.delay_s
+            )
         offset = self.markers[action.marker]
         return lambda: self._plus(self._line_read_at(offset), action.delay_s)
 
@@ -249,10 +253,26 @@ class Session:
         returned = starts[-1]["returned"]
         return [s for s in self.record["samples"] if s["t"] > returned]
 
-    def _print_ended_at(self) -> float | None:
+    def _ready_after_print_end(self) -> float | None:
+        ended = None
         for state in self._since_last_start():
-            if state["print"] in ENDED_PRINT:
+            if ended is None and state["print"] in ENDED_PRINT:
+                ended = state["t"]
+            if ended is not None and state["klippy"] == READY:
                 return state["t"]
+        if ended is None:
+            return None
+        last = self.record["samples"][-1]
+        waited_s = last["t"] - ended
+        if not KLIPPY_READY_AFTER_PRINT_END_S.holds(waited_s):
+            raise run.BenchError(
+                f"{self.scenario.name}: "
+                + KLIPPY_READY_AFTER_PRINT_END_S.judge(
+                    "klippy ready after the print ended: not yet, after",
+                    waited_s,
+                )
+                + f"; klippy is {last['klippy']!r}"
+            )
         return None
 
     def _line_read_at(self, offset: int) -> float | None:
