@@ -634,18 +634,14 @@ fn build_move_caps(
                 if !(length.is_finite() && length > LENGTH_EPS_MM) {
                     return Err(VelocityError::NonFinite { line_no });
                 }
-                (
-                    length,
-                    0.0,
-                    0.0,
-                    0.0,
+                let (velocity, accel) = extrude_only_move_limits(
+                    (m.limits.max_velocity_mm_s, m.limits.accel_mm_s2),
                     (
-                        path_ceiling.min(params.max_extrude_only_velocity_mm_s),
-                        m.limits
-                            .accel_mm_s2
-                            .min(params.max_extrude_only_accel_mm_s2),
+                        params.max_extrude_only_velocity_mm_s,
+                        params.max_extrude_only_accel_mm_s2,
                     ),
-                )
+                );
+                (length, 0.0, 0.0, 0.0, (path_ceiling.min(velocity), accel))
             }
         };
         let ((flat_ceiling, accel), step_capacity_overload) = match params.step_capacity {
@@ -683,6 +679,22 @@ fn build_move_caps(
         });
     }
     Ok(caps)
+}
+
+/// The velocity and acceleration limits an extrude-only move (a retract,
+/// unretract or prime) is planned under, below its feed: the toolhead's
+/// `(max_velocity, accel)`, each within the extruder's `(velocity, accel)`
+/// extrude-only caps. `[axis e]`'s caps govern the extruder only while it
+/// follows toolhead motion.
+#[must_use]
+pub fn extrude_only_move_limits(
+    (max_velocity_mm_s, accel_mm_s2): (f64, f64),
+    (extrude_only_velocity_mm_s, extrude_only_accel_mm_s2): (f64, f64),
+) -> (f64, f64) {
+    (
+        max_velocity_mm_s.min(extrude_only_velocity_mm_s),
+        accel_mm_s2.min(extrude_only_accel_mm_s2),
+    )
 }
 
 fn check_entry_ceiling(

@@ -1,24 +1,29 @@
 //! The planned extruder against the limits of the config it was planned
-//! under. While the toolhead moves, e holds the `[axis e]` `max_velocity` /
-//! `max_accel` its advance and ratio ramps are planned within; while it
-//! rests, the extrude-only caps retracts and primes are planned under. Its
+//! under. Which caps hold is the commanded move's, as the planner reads
+//! it, never the shaped toolhead's motion: while e follows the toolhead,
+//! its spill included, the `[axis e]` `max_velocity` / `max_accel` its
+//! advance and ratio ramps are planned within; through an extrude-only
+//! move, the limits the planner plans it under below its feed
+//! ([`geometry::velocity::extrude_only_move_limits`]) plus the follower's
+//! while toolhead motion that extrudes is within its window. Its
 //! acceleration may leave those caps by the fit's acceleration tolerance
 //! only, and its velocity steps only by rounding, bar the steps a
 //! kernel-free advance makes where an unshaped leader steps its
 //! acceleration, which [`motion_pipeline::follower_velocity_step_allowance`]
 //! bounds.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use pipeline_snapshot::SampleSide;
-use pipeline_snapshot::waypoints::extrusion_ratio_bound;
+use motion_pipeline::live_config;
+use pipeline_snapshot::waypoints::{Waypoint, extrusion_ratio_bound};
+use pipeline_snapshot::{SampleSide, SegmentCommand, Snapshot};
 
-use super::{motion_settings, waypoints};
+use super::{motion_settings, planner, waypoints};
 
 const E_AXIS: usize = 3;
 const SPATIAL_AXES: [&str; 3] = ["x", "y", "z"];
 const E_PROBES_PER_INTERVAL: usize = 16;
-const TOOLHEAD_REST_MM_S: f64 = 1e-9;
 const VELOCITY_SLACK: f64 = 1e-6;
 const ROW_JOIN_S: f64 = 1e-9;
 const LEADER_ACCEL_STEP_ROUNDING_MM_S2: f64 = 1e-6;
@@ -44,33 +49,38 @@ impl Caps {
         velocity: f64::INFINITY,
         accel: f64::INFINITY,
     };
+    const STILL: Self = Self {
+        velocity: 0.0,
+        accel: 0.0,
+    };
 
     fn is_unlimited(self) -> bool {
         self.velocity.is_infinite() && self.accel.is_infinite()
     }
 }
 
-/// What the toolhead does while the extruder is probed. A rest transition
-/// is a rest within the extruder chain's own window of motion, where its
-/// kernel or ratio ramp moves the extruder for that motion.
+/// The move the plan commands while the extruder is probed, which decides
+/// the caps that hold it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolheadPhase {
-    Moving,
-    RestTransition,
-    Resting,
+pub enum Commanded {
+    /// A toolhead move, or none: e follows the toolhead.
+    Following,
+    /// An extrude-only move: a retract, unretract or prime.
+    ExtrudeOnly,
 }
 
 /// What the plan may ask of the extruder: the follower axis's caps while
-/// the toolhead moves, rest transitions included, the extrude-only caps the
-/// planner plans retracts and primes under while it rests, the fit's
-/// acceleration tolerance (`max_accel_deviation`) on top of either, and the
-/// largest velocity step it may take at once.
+/// it follows the toolhead, the extrude-only caps the planner plans
+/// retracts and primes under, the fit's acceleration tolerance
+/// (`max_accel_deviation`) on top of either, the window around a toolhead
+/// move the follower moves e in for it, and the largest velocity step it
+/// may take at once.
 #[derive(Debug, Clone, Copy)]
 struct ExtruderLimits {
     moving: Caps,
     extrude_only: Caps,
     accel_slack: f64,
-    transition_window_s: f64,
+    follow_window_s: f64,
     step_allowance: StepAllowance,
     advance: Option<KernelFreeLinearAdvance>,
 }
@@ -116,13 +126,13 @@ pub enum ExtruderExcess {
         t: f64,
         value: f64,
         bound: f64,
-        phase: ToolheadPhase,
+        command: Commanded,
     },
     Acceleration {
         t: f64,
         value: f64,
         bound: f64,
-        phase: ToolheadPhase,
+        command: Commanded,
         cause: AccelCause,
     },
     VelocityStep {
@@ -180,33 +190,29 @@ impl ExtruderAudit {
 
     fn check(
         &mut self,
-        limits: &ExtruderLimits,
-        (t, phase): (f64, ToolheadPhase),
+        accel_slack: f64,
+        (t, command, caps): (f64, Commanded, Caps),
         velocity: f64,
         accel: f64,
     ) {
         self.peak_velocity = self.peak_velocity.max(velocity);
         self.peak_accel = self.peak_accel.max(accel);
-        let caps = match phase {
-            ToolheadPhase::Moving | ToolheadPhase::RestTransition => limits.moving,
-            ToolheadPhase::Resting => limits.extrude_only,
-        };
         let velocity_bound = caps.velocity * (1.0 + VELOCITY_SLACK);
         if velocity > velocity_bound {
             self.excesses.push(ExtruderExcess::Velocity {
                 t,
                 value: velocity,
                 bound: velocity_bound,
-                phase,
+                command,
             });
         }
-        let accel_bound = caps.accel + limits.accel_slack;
+        let accel_bound = caps.accel + accel_slack;
         if accel > accel_bound {
             self.excesses.push(ExtruderExcess::Acceleration {
                 t,
                 value: accel,
                 bound: accel_bound,
-                phase,
+                command,
                 cause: AccelCause::Unattributed,
             });
         }
@@ -312,12 +318,11 @@ impl LeaderAccelSteps {
     }
 }
 
-impl std::fmt::Display for ToolheadPhase {
+impl std::fmt::Display for Commanded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Moving => "toolhead moving",
-            Self::RestTransition => "rest transition",
-            Self::Resting => "toolhead resting",
+            Self::Following => "e following the toolhead",
+            Self::ExtrudeOnly => "extrude-only move",
         })
     }
 }
@@ -329,21 +334,21 @@ impl std::fmt::Display for ExtruderExcess {
                 t,
                 value,
                 bound,
-                phase,
+                command,
             } => write!(
                 f,
-                "e velocity {value:.3} mm/s at t={t:.4} ({phase}) exceeds {bound:.3}"
+                "e velocity {value:.3} mm/s at t={t:.4} ({command}) exceeds {bound:.3}"
             ),
             Self::Acceleration {
                 t,
                 value,
                 bound,
-                phase,
+                command,
                 cause,
             } => {
                 write!(
                     f,
-                    "e acceleration {value:.1} mm/s² at t={t:.4} ({phase}) exceeds {bound:.1}"
+                    "e acceleration {value:.1} mm/s² at t={t:.4} ({command}) exceeds {bound:.1}"
                 )?;
                 match cause {
                     AccelCause::PathTurning => f.write_str(", asked by the path's turning"),
@@ -440,7 +445,7 @@ fn extruder_limits(config: &Path, ratio_bound: f64) -> Option<ExtruderLimits> {
             moving: Caps::UNLIMITED,
             extrude_only,
             accel_slack: settings.fit_tolerance_accel_mm_s2,
-            transition_window_s: 0.0,
+            follow_window_s: 0.0,
             step_allowance: StepAllowance::Unlimited,
             advance: None,
         });
@@ -460,7 +465,7 @@ fn extruder_limits(config: &Path, ratio_bound: f64) -> Option<ExtruderLimits> {
         moving,
         extrude_only,
         accel_slack: settings.fit_tolerance_accel_mm_s2,
-        transition_window_s: kernel_forward.max(-kernel_back) + geometry::RATIO_RAMP_MAX_TIME_S,
+        follow_window_s: kernel_forward.max(-kernel_back) + geometry::RATIO_RAMP_MAX_TIME_S,
         step_allowance: step_allowance(
             &chains,
             moving,
@@ -502,44 +507,134 @@ fn toolhead_speed(trajectory: &pipeline_snapshot::ExactTrajectory, t: f64) -> f6
         .sqrt()
 }
 
-/// The toolhead's rests, each a maximal run of pieces it holds still over.
-fn toolhead_rests(trajectory: &pipeline_snapshot::ExactTrajectory) -> Vec<(f64, f64)> {
-    let mut rests: Vec<(f64, f64)> = Vec::new();
-    for piece in trajectory.breakpoints().windows(2) {
-        let (t0, t1) = (piece[0], piece[1]);
-        if t1 <= t0 || toolhead_speed(trajectory, 0.5 * (t0 + t1)) > TOOLHEAD_REST_MM_S {
-            continue;
-        }
-        match rests.last_mut() {
-            Some(rest) if rest.1 == t0 => rest.1 = t1,
-            _ => rests.push((t0, t1)),
-        }
-    }
-    rests
-}
-
-struct PhaseMap {
-    rests: Vec<(f64, f64)>,
-    window_s: f64,
+/// An extrude-only move the plan commands: when it runs and the limits the
+/// planner plans it under.
+struct ExtrudeOnlyRun {
     t_start: f64,
     t_end: f64,
+    caps: Caps,
 }
 
-impl PhaseMap {
-    fn at(&self, t: f64) -> ToolheadPhase {
-        let index = self.rests.partition_point(|rest| rest.1 < t);
-        match self.rests.get(index) {
-            Some(&(rest_start, rest_end)) if rest_start <= t => {
-                let after_motion = rest_start > self.t_start && t - rest_start <= self.window_s;
-                let before_motion = rest_end < self.t_end && rest_end - t <= self.window_s;
-                if after_motion || before_motion {
-                    ToolheadPhase::RestTransition
-                } else {
-                    ToolheadPhase::Resting
-                }
-            }
-            _ => ToolheadPhase::Moving,
+/// The commanded moves in time order: the extrude-only runs, and the
+/// toolhead moves that extrude, which the follower moves e for within its
+/// window around them.
+struct CommandMap {
+    extrude_only: Vec<ExtrudeOnlyRun>,
+    extruding_motion: Vec<(f64, f64)>,
+    moving: Caps,
+    follow_window_s: f64,
+}
+
+impl CommandMap {
+    fn new(
+        snapshot: &Snapshot,
+        waypoints: &[Waypoint],
+        config: &Path,
+        limits: &ExtruderLimits,
+    ) -> Self {
+        assert!(
+            !snapshot.commands.is_empty() || snapshot.trajectory.is_empty(),
+            "the audit reads the moves a plan made in process commands, which a serialized \
+             snapshot does not keep"
+        );
+        if let Some(pair) = snapshot
+            .commands
+            .windows(2)
+            .find(|pair| pair[1].t_start < pair[0].t_end)
+        {
+            panic!("the commanded segments run out of order: {pair:?}");
         }
+        let planner = planner("extruder audit", config);
+        let base = live_config::GcodeMoveBase::of(
+            &planner,
+            &live_config::extruder_caps(&planner).expect("the extruder chain compiles"),
+        )
+        .expect("the config's limits build a move base");
+        let steps = pipeline_snapshot::plan_steps(waypoints, base).expect("the gcode plans");
+        let extrude_only_moves: HashMap<u32, &geometry::Move> =
+            pipeline_snapshot::plan_moves(&steps)
+                .filter(|m| m.segment.spatial.is_none())
+                .map(|m| (m.source.start_line, m))
+                .collect();
+        let drives_e = |command: &&SegmentCommand| {
+            command.followers.iter().any(|follower| {
+                follower.axis_index == E_AXIS
+                    && (follower.ratio != 0.0 || follower.ratio_end != 0.0)
+            })
+        };
+        let mut extrude_only = Vec::new();
+        let mut extruding_motion = Vec::new();
+        for command in snapshot.commands.iter().filter(drives_e) {
+            if command.spatial_path {
+                extruding_motion.push((command.t_start, command.t_end));
+                continue;
+            }
+            let commanded = extrude_only_moves
+                .get(&command.source_line)
+                .unwrap_or_else(|| panic!("no extrude-only move runs {command:?}"));
+            let (velocity, accel) = geometry::velocity::extrude_only_move_limits(
+                (
+                    commanded.limits.max_velocity_mm_s,
+                    commanded.limits.accel_mm_s2,
+                ),
+                (limits.extrude_only.velocity, limits.extrude_only.accel),
+            );
+            extrude_only.push(ExtrudeOnlyRun {
+                t_start: command.t_start,
+                t_end: command.t_end,
+                caps: Caps { velocity, accel },
+            });
+        }
+        Self {
+            extrude_only,
+            extruding_motion,
+            moving: limits.moving,
+            follow_window_s: limits.follow_window_s,
+        }
+    }
+
+    /// The move commanded at `t`, read from `side` where two meet, and the
+    /// caps it holds e to: an extrude-only move's own plus, while toolhead
+    /// motion that extrudes is within the follower's window, the
+    /// follower's; the follower's otherwise.
+    fn at(&self, t: f64, side: SampleSide) -> (Commanded, Caps) {
+        let started = self.extrude_only.partition_point(|run| match side {
+            SampleSide::Right => run.t_start <= t,
+            SampleSide::Left => run.t_start < t,
+        });
+        let running = started
+            .checked_sub(1)
+            .map(|index| &self.extrude_only[index])
+            .filter(|run| match side {
+                SampleSide::Right => t < run.t_end,
+                SampleSide::Left => t <= run.t_end,
+            });
+        let Some(run) = running else {
+            return (Commanded::Following, self.moving);
+        };
+        let following = if self.extruding_motion_within_window(t) {
+            self.moving
+        } else {
+            Caps::STILL
+        };
+        (
+            Commanded::ExtrudeOnly,
+            Caps {
+                velocity: run.caps.velocity + following.velocity,
+                accel: run.caps.accel + following.accel,
+            },
+        )
+    }
+
+    /// Whether a toolhead move that extrudes runs within the follower's
+    /// window of `t`: only then may the follower still move e for it.
+    fn extruding_motion_within_window(&self, t: f64) -> bool {
+        let first = self
+            .extruding_motion
+            .partition_point(|&(_, end)| end < t - self.follow_window_s);
+        self.extruding_motion
+            .get(first)
+            .is_some_and(|&(start, _)| start <= t + self.follow_window_s)
     }
 }
 
@@ -551,14 +646,10 @@ pub fn extruder_audit(
     gcode: &str,
     config: &Path,
 ) -> Option<ExtruderAudit> {
-    let limits = extruder_limits(config, extrusion_ratio_bound(&waypoints(gcode, config)))?;
+    let waypoints = waypoints(gcode, config);
+    let limits = extruder_limits(config, extrusion_ratio_bound(&waypoints))?;
     let trajectory = &snapshot.trajectory;
-    let phases = PhaseMap {
-        rests: toolhead_rests(trajectory),
-        window_s: limits.transition_window_s,
-        t_start: trajectory.t_start(),
-        t_end: trajectory.t_end(),
-    };
+    let commands = CommandMap::new(snapshot, &waypoints, config, &limits);
     let leader_steps = LeaderAccelSteps::of(trajectory, limits.step_allowance);
     let mut audit = ExtruderAudit::default();
     let rows = trajectory.rows(E_AXIS);
@@ -582,9 +673,10 @@ pub fn extruder_audit(
                     SampleSide::Right
                 };
                 let probed = state(index, t, side);
+                let (command, caps) = commands.at(t, side);
                 audit.check(
-                    &limits,
-                    (t, phases.at(t)),
+                    limits.accel_slack,
+                    (t, command, caps),
                     probed.velocity.abs(),
                     probed.acceleration.abs(),
                 );
@@ -619,7 +711,7 @@ pub fn extruder_audit(
         for excess in &mut audit.excesses {
             if let ExtruderExcess::Acceleration {
                 t,
-                phase: ToolheadPhase::Moving,
+                command: Commanded::Following,
                 cause,
                 ..
             } = excess
