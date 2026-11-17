@@ -38,9 +38,10 @@ fn a_benchy_infill_run_plans_on_the_bowden_test_config() {
     );
 }
 
-/// Lines 22148-22204: every back-off scaled the first line, read by a
-/// crawl side that held the binding cell but did not bind, until it fell to
-/// the floor while the cell 4.9 s on still asked 2005 mm/s² of 2000.
+/// Lines 22148-22204: with each after side kept at the width it was laid
+/// at, every back-off scaled the first line, read by a crawl side that held
+/// the binding cell but did not bind, until it fell to the floor while the
+/// cell 4.9 s on still asked 2005 mm/s² of 2000.
 #[test]
 fn a_benchy_wall_run_plans_on_the_bowden_test_config() {
     benchy_plans_within_the_extruder_limits(
@@ -58,6 +59,17 @@ fn a_benchy_crawl_beside_a_fast_move_plans_on_the_bowden_test_config() {
     benchy_plans_within_the_extruder_limits(
         "benchy guard side box",
         "rust/motion-core/tests/gcode/benchy_guard_side_box.gcode",
+    );
+}
+
+/// Lines 17878-17923: the cell 0.77 s in asked 2014 mm/s² of 2000 after 68
+/// back-offs of the line at the frozen seam. Its window spanned the 4 s
+/// every crawl side holding the cell reads, binding or not.
+#[test]
+fn a_benchy_crawl_among_wide_sides_plans_on_the_bowden_test_config() {
+    benchy_plans_within_the_extruder_limits(
+        "benchy guard side chase",
+        "rust/motion-core/tests/gcode/benchy_guard_side_chase.gcode",
     );
 }
 
