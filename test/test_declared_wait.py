@@ -2,7 +2,7 @@
 so the pacer brake on the motion queued before it is logged as that wait's
 planned stop instead of a starved producer."""
 
-from fakes import FakeEngine, FakeReactor
+from fakes import FakeEngine, FakePrinter, FakeReactor
 
 from klippy.motion import Motion
 from klippy.printer import Printer
@@ -52,9 +52,12 @@ def test_a_condition_already_met_declares_no_wait():
 
 def _motion(planner_ready, declare_results):
     motion = Motion.__new__(Motion)
+    motion.reactor = FakeReactor()
+    motion.printer = FakePrinter(reactor=motion.reactor)
     motion.engine = FakeEngine(declare_wait=list(declare_results))
     motion._planner_ready = planner_ready
-    motion._submit_paced = lambda submit: submit()
+    motion._last_reactor_yield = 0.0
+    motion._engine_wakeup = None
     return motion
 
 
@@ -62,6 +65,12 @@ def test_a_declared_wait_reaches_the_engine():
     motion = _motion(planner_ready=True, declare_results=[True])
     motion._declare_wait()
     assert motion.engine.calls == [("declare_wait",)]
+
+
+def test_a_declared_wait_waits_out_a_full_pipe_instead_of_dropping():
+    motion = _motion(planner_ready=True, declare_results=[False, False, True])
+    motion._declare_wait()
+    assert motion.engine.calls == [("declare_wait",)] * 3
 
 
 def test_no_wait_is_declared_before_the_planner_runs():

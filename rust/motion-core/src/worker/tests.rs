@@ -2603,7 +2603,10 @@ fn drain_causes_after_falling_silent(silence: ProducerSilence) -> Vec<u8> {
     let idle_brakes = || h.links.pacer_drains.idle.load(Ordering::SeqCst);
     let brakes_while_feeding = idle_brakes();
     if silence == ProducerSilence::Declared {
-        h.declare_wait().unwrap();
+        while let Err(e) = h.declare_wait() {
+            assert!(matches!(e, StreamWorkerError::ChannelFull), "{e}");
+            std::thread::yield_now();
+        }
     }
     let silent = Instant::now();
     while idle_brakes() == brakes_while_feeding {
