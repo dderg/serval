@@ -744,17 +744,18 @@ class Motion:
     def _sync_print_time(self):
         curtime = self.reactor.monotonic()
         est_print_time = self.mcu.estimated_print_time(curtime)
-        frontier = (
-            self.engine.frontier_print_time(self.mcu.get_engine_handle())
-            if self._planner_ready
-            else 0.0
-        )
         self.printer.send_event(
             "toolhead:sync_print_time",
             curtime,
             est_print_time,
-            frontier,
+            self._next_move_time(),
         )
+
+    def _next_move_time(self):
+        if not self._planner_ready:
+            return self._schedule_floor()
+        frontier = self.engine.frontier_print_time(self.mcu.get_engine_handle())
+        return max(frontier, self._schedule_floor())
 
     def set_accel(self, accel):
         if accel is not None and accel > 0.0:
