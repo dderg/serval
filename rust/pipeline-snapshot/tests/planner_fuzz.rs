@@ -316,7 +316,8 @@ fn advanced_printer_strategy() -> impl Strategy<Value = String> {
                  [post_processor shaper_y]\ntype: smooth_zv\nfrequency_hz: {fy}\n\
                  [motor a]\ndrive: stepper\n[motor b]\ndrive: stepper\n\
                  [motor z]\ndrive: stepper\n[motor extruder]\ndrive: stepper\n\
-                 [extruder]\nmax_extrude_only_velocity: 50\nmax_extrude_only_accel: 5000\n"
+                 [extruder]\naxis: e\nmax_extrude_only_velocity: 50\n\
+                 max_extrude_only_accel: 5000\n"
             )
         })
 }
