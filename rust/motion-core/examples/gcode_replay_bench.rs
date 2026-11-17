@@ -22,10 +22,11 @@
 // staged pipeline.
 //
 // Stops at rest (G4, M400, M84, ...) reach the pipeline as the live engine
-// sends them. --mesh activates a bed mesh before the first move, as klippy's
-// `BED_MESH_PROFILE LOAD` does with the toolhead at the origin: the JSON is
-// the request `bed_mesh` hands `set_bed_mesh`, and the G-code starts from
-// the Z the activation renamed. --check fails on any emitted segment that
+// sends them. --mesh activates a bed mesh as klippy's `BED_MESH_PROFILE LOAD`
+// does with the toolhead at the origin: the JSON is the request `bed_mesh`
+// hands `set_bed_mesh`, the G-code starts from the Z the activation renamed,
+// and the plan starts at the first position the G-code names with the mesh
+// active there. --check fails on any emitted segment that
 // does not evaluate to finite positions. Any failure prints one
 // `REPLAY_FAILURE {json}` line for scripts/preflight.py.
 

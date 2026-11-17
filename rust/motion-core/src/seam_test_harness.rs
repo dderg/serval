@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub use geometry::Move;
-use geometry::{CornerFitConfig, GcodePos, MachinePos, SurfaceTransform, VelocityLimits};
+use geometry::{CornerFitConfig, GcodePos, SurfaceTransform, VelocityLimits};
 use pipeline_snapshot::waypoints::WaypointError;
 use pipeline_snapshot::{PlanStep, SnapshotError};
 use trajectory::{AxisChainSet, ClockedMotorSpan, ContinuousSegment};
@@ -202,16 +202,16 @@ impl LiveScript {
         })
     }
 
-    /// The inputs the live host feeds for the steps, `mesh` activated
-    /// before the first move.
+    /// The inputs the live host feeds for the steps, with `mesh` active and
+    /// the toolhead standing where the plan starts, as the live host holds
+    /// it after loading the mesh and moving there.
     pub fn take_inputs(&mut self, mesh: Option<Arc<SurfaceTransform>>) -> Vec<StreamInput> {
         let steps = std::mem::take(&mut self.steps);
         let mut inputs = Vec::with_capacity(steps.len() + 1);
         if let Some(mesh) = mesh {
-            let gcode_z_rebase = MachinePos([0.0; 3]).to_gcode(Some(mesh.as_ref())).z();
             inputs.push(StreamInput::Control(Control::SetMesh {
                 mesh: Some(mesh),
-                gcode_z_rebase,
+                gcode_z_rebase: self.home[2],
             }));
         }
         for step in steps {
