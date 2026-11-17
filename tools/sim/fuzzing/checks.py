@@ -65,6 +65,7 @@ class Check(enum.Enum):
     HARNESS = "harness"
     STUCK = "stuck"
     MEMORY = "memory"
+    PIN_ORDER = "pin_order"
 
 
 ROOT_CAUSES = (Check.PANIC, Check.FATAL_EVENT, Check.UNCOMMANDED_SHUTDOWN)

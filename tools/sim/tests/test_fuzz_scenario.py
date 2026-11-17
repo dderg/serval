@@ -177,3 +177,11 @@ def test_a_panic_signature_carries_its_message():
     violation = checks.Violation(checks.Check.PANIC, panic)
     assert "unavailable history" in checks.signature(violation)
     assert checks.first_panic("klippy starting\n") is None
+
+
+def test_probes_flipped_unwatched_are_counted_not_checked():
+    from tools.sim.fuzzing.driver import probes_to_skip
+
+    assert probes_to_skip(1, paused=False) == 0
+    assert probes_to_skip(1, paused=True) == 1
+    assert probes_to_skip(3, paused=False) == 3

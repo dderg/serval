@@ -74,11 +74,21 @@ def _xyz(position) -> str:
     return " ".join(f"{a}{v:.6f}" for a, v in zip("XYZE", position))
 
 
+def probes_to_skip(unseen: int, paused: bool) -> int:
+    """Probes to count unchecked: every one that flipped while paused, and
+    every one of several that flipped between two looks (a blocking
+    command kept the harness away); a single fresh flip is checked."""
+    if paused or unseen > 1:
+        return unseen
+    return 0
+
+
 @dataclasses.dataclass
 class _Recheck:
     at_ns: int
     steps: dict
     label: str
+    mismatch: Optional[Violation]
 
 
 class _WallMap:
@@ -131,7 +141,8 @@ class Session:
         self.offsets = event_offsets(world.log_dir)
         self.probes: list[program.Probe] = []
         self.next_probe = 0
-        self.mark_level = 0
+        self.edge_base = 0
+        self.paused = False
         self.recheck: Optional[_Recheck] = None
         self.watching = False
         self.print_index = 0
@@ -216,33 +227,68 @@ class Session:
         }
 
     def _check_rest(self, steps: dict, position, label: str) -> None:
+        mismatch = self._rest_mismatch(steps, position, label)
+        if mismatch:
+            raise mismatch
+
+    def _rest_mismatch(
+        self, steps: dict, position, label: str
+    ) -> Optional[Violation]:
         for motor in self._checked():
             allowed = self._allowed(motor, position)
             if steps[motor.name] in allowed:
                 continue
             nearest = min(allowed, key=lambda s: abs(s - steps[motor.name]))
-            raise Violation(
+            return Violation(
                 Check.REST_STEPS,
                 f"{label}: motor {motor.name} rests {steps[motor.name] - nearest:+d} "
                 f"steps off the commanded position ({_xyz(position)}: "
                 f"{steps[motor.name]} steps, allowed {sorted(allowed)})",
             )
+        return None
 
     # ----------------------------------------------------------- probes
 
     def _service_probes(self) -> None:
-        """Reads the mark pin while a print body runs; a cancel, a restart
-        or an e-stop drops the pin to its shutdown value, no probe."""
+        """Counts mark-pin edges while a print body runs; a cancel, a
+        restart or an e-stop drops the pin to its shutdown value, no probe.
+        A probe whose pin flipped while the toolhead was paused, or while
+        a blocking command kept the harness from watching, is counted but
+        not checked: its rest is not where the toolhead stood then."""
         if not self.watching:
             return
         if self.recheck and self._now_ns() >= self.recheck.at_ns:
             self._finish_recheck()
-        level = self.marks.gpio_output(MARK_CHIP, MARK_PIN_LINE)
-        if level != self.mark_level:
-            self._take_probe(level)
+        unseen = self._mark_edges() - self.edge_base - self.next_probe
+        if unseen <= 0:
+            return
+        skipped = probes_to_skip(unseen, self.paused)
+        if skipped:
+            self._skip_probes(skipped)
+            return
+        self._take_probe()
 
-    def _take_probe(self, level: int) -> None:
+    def _mark_edges(self) -> int:
+        return self.marks.gpio_edges(MARK_CHIP, MARK_PIN_LINE)
+
+    def _skip_probes(self, count: int) -> None:
+        first = self.next_probe
+        if first + count > len(self.probes):
+            raise Violation(
+                Check.HARNESS,
+                f"mark pin flipped {first + count} times; the model has "
+                f"{len(self.probes)} probes",
+            )
+        self.notes.append(
+            f"print {self.print_index} probes {first}..{first + count - 1} "
+            f"flipped unwatched (paused={self.paused}): not checked"
+        )
+        self.next_probe += count
+        self.recheck = None
+
+    def _take_probe(self) -> None:
         index = self.next_probe
+        level = self._pin(MARK_PIN_LINE)
         if index >= len(self.probes) or self.probes[index].value != level:
             raise Violation(
                 Check.HARNESS,
@@ -254,11 +300,15 @@ class Session:
             f"print {self.print_index} rest probe {index} "
             f"({self._step_timing()})"
         )
-        self._check_rest(steps, self.probes[index].position, label)
-        self.recheck = _Recheck(
-            self._now_ns() + int(PROBE_RECHECK_S * NS_PER_S), steps, label
+        mismatch = self._rest_mismatch(
+            steps, self.probes[index].position, label
         )
-        self.mark_level = level
+        self.recheck = _Recheck(
+            self._now_ns() + int(PROBE_RECHECK_S * NS_PER_S),
+            steps,
+            label,
+            mismatch,
+        )
         self.next_probe += 1
 
     def _step_timing(self) -> str:
@@ -275,6 +325,11 @@ class Session:
         )
 
     def _finish_recheck(self) -> None:
+        """Motors that move within PROBE_RECHECK_S of the pin, inside the
+        dwell after it, mean the pin flipped after the next move began
+        (#893): the pin, not the rest, is out of order. Motors still for
+        that long at a position other than the commanded one are a rest
+        error."""
         recheck, self.recheck = self.recheck, None
         steps = self._steps()
         moved = {
@@ -284,11 +339,13 @@ class Session:
         }
         if moved:
             raise Violation(
-                Check.REST_STEPS,
+                Check.PIN_ORDER,
                 f"{recheck.label}: motors moved within {PROBE_RECHECK_S} s "
                 f"of the pin, inside the G4 P{program.PROBE_HOLD_MS} after "
                 f"it\nsteps moved: {moved}; now {self._step_timing()}",
             )
+        if recheck.mismatch:
+            raise recheck.mismatch
 
     def _settle_recheck(self) -> None:
         if self.recheck is not None:
@@ -390,7 +447,8 @@ class Session:
         self.probes = model.probes
         self.final_position = tuple(model.position)
         self.next_probe = 0
-        self.mark_level = 0
+        self.edge_base = self._mark_edges()
+        self.paused = False
         self.recheck = None
         self.watching = True
 
@@ -673,6 +731,7 @@ class Session:
 
     def _pause_resume(self, action: Action) -> None:
         start_ns = self._now_ns()
+        self.paused = True
         self._gcode("PAUSE", Check.COMMAND_RESULT)
         self._expect_state("paused", "PAUSE")
         self._hold(float(action.param("hold_s")), "the pause hold")
@@ -684,6 +743,8 @@ class Session:
                 Check.COMMAND_RESULT,
             )
         self._gcode("RESUME", Check.COMMAND_RESULT)
+        self._service_probes()
+        self.paused = False
         state = self._print_state().get("state")
         if state not in ("printing", "complete"):
             raise Violation(
