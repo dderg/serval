@@ -301,6 +301,12 @@ impl StepJoin {
         })
     }
 
+    /// Whether a crossing of it from a stop binds the moves either side
+    /// ([`rest_crossing_accel`]): without a follower kernel.
+    pub(super) fn binds_stop_crossings(&self) -> bool {
+        self.caps.plans_isolated_switches()
+    }
+
     fn of(up: &crate::Move, dn: &crate::Move) -> Option<Self> {
         if up.segment.spatial.is_none() || dn.segment.spatial.is_none() {
             return None;

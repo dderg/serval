@@ -958,6 +958,7 @@ impl Marks {
             return Some(f64::INFINITY);
         }
         let Some(join) = StepJoin::new((up.extruder, down.extruder), [up.ratio_ends, down.ratio_ends])
+            .filter(StepJoin::binds_stop_crossings)
         else {
             return Some(f64::INFINITY);
         };
@@ -1229,8 +1230,10 @@ impl ExtrudingReach {
 /// [`Reach`], which the leaders' kernels and a ratio ramp carry across the
 /// joins however short the moves between, and an extrude-only move's rest
 /// holds. Moves on a stream pass through in order and leave once the moves
-/// after them cover their reach, so a move's budget never depends on how
-/// far the stream had arrived when it was planned.
+/// after them cover their reach, and where a move's end steps the ratio, the
+/// reach of the move after it, whose budget that join reads too; so a
+/// move's budget never depends on how far the stream had arrived when it
+/// was planned.
 #[derive(Debug)]
 pub struct ExtrusionReach {
     marks: Marks,
