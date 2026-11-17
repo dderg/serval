@@ -3,7 +3,8 @@ use std::collections::VecDeque;
 use geometry::{
     ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE,
     RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
-    TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around, valley_reach,
+    TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, crawl_step_window, leader_reach,
+    turns_around, valley_reach,
 };
 
 use super::{
@@ -2229,8 +2230,9 @@ impl RatioSmoothing {
         if reach <= SPAN_MIN_LEN_MM {
             return;
         }
-        if !crossing.needs_valley(rule, peak_ratio_within(tables.0, turn, reach)) {
-            if turn + reach > table_end {
+        let ratios = CrawlRatios::around(tables.0, turn, reach);
+        if !crossing.needs_valley(rule, ratios) {
+            if turn + ratios.decided_within(rule) > table_end {
                 self.waiting_crawls.push((turn, crossing));
             }
             return;
@@ -3883,20 +3885,24 @@ impl Crossing {
 
     /// An advance of `rule`'s slope releases its lead around where the
     /// leaders turn around, or crawl where reading the path speed through
-    /// at `ratio` would ask the follower for more than its acceleration
-    /// limit: `r·(a + k·J)`, `J` the slope of the path's acceleration the
-    /// follower meets ([`Self::advanced_jerk`]). Elsewhere releasing the
-    /// lead over the crawl's short reach would ask more of the follower
-    /// than the crawl. A follower the turning guard holds
-    /// ([`guarded_by_the_turning_guard`]) releases it at every crawl: the
-    /// guard bounds the turning `a⊥²/v` the path speed carries only down to
+    /// at the ratio in reach would ask the follower for more than its
+    /// acceleration limit: `r·(a + k·J)`, `J` the slope of the path's
+    /// acceleration the follower meets ([`Self::advanced_jerk`]). Elsewhere
+    /// releasing the lead over the crawl's short reach would ask more of
+    /// the follower than the crawl. A follower the turning guard holds
+    /// ([`guarded_by_the_turning_guard`]) releases it at every crawl where
+    /// it extrudes ([`CrawlRatios::read`]): the guard bounds the turning
+    /// `a⊥²/v` the path speed carries only down to
     /// [`ADVANCE_VALLEY_SPEED_MM_S`], and leaves room for the rebuild of a
-    /// valley at every crawl it may find.
-    fn needs_valley(self, rule: &RatioRampRule, ratio: f64) -> bool {
+    /// valley at every crawl it may find. Where the advance reads no ratio
+    /// the turning asks nothing of the follower, and neither would the
+    /// valley.
+    fn needs_valley(self, rule: &RatioRampRule, ratios: CrawlRatios) -> bool {
         self.turns_around()
             || (self.crawls()
-                && (guarded_by_the_turning_guard(rule)
-                    || ratio * (self.rate + rule.advance_slope_s * self.advanced_jerk(rule))
+                && ((guarded_by_the_turning_guard(rule) && ratios.read > 0.0)
+                    || ratios.in_reach
+                        * (self.rate + rule.advance_slope_s * self.advanced_jerk(rule))
                         > rule.max_accel_mm_s2))
     }
 
@@ -3914,6 +3920,37 @@ impl Crossing {
     /// The floor a valley here keeps flat ([`crawl_floor`]).
     fn crawl_floor(self) -> f64 {
         crawl_floor(self.speed, self.rate)
+    }
+}
+
+/// The ratios the advance may read around a crawl: the largest of the laid
+/// spans within the leaders' `reach` of it, and within that reach and a
+/// step window past it, as far as a ratio step's ramp reaches the advance
+/// from a step a crawl valley caps there ([`geometry::crawl_step_window`]).
+#[derive(Debug, Clone, Copy)]
+struct CrawlRatios {
+    in_reach: f64,
+    read: f64,
+    reach: f64,
+}
+
+impl CrawlRatios {
+    fn around(spans: &[RatioSpan], turn: f64, reach: f64) -> Self {
+        Self {
+            in_reach: peak_ratio_within(spans, turn, reach),
+            read: peak_ratio_within(spans, turn, reach + crawl_step_window(reach)),
+            reach,
+        }
+    }
+
+    /// How far past the crawl the spans decide whether `rule`'s follower
+    /// needs a valley there ([`Crossing::needs_valley`]).
+    fn decided_within(self, rule: &RatioRampRule) -> f64 {
+        if guarded_by_the_turning_guard(rule) {
+            self.reach + crawl_step_window(self.reach)
+        } else {
+            self.reach
+        }
     }
 }
 
