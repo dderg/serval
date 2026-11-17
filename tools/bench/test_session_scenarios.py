@@ -128,3 +128,20 @@ def test_the_soak_session_pauses_mid_print_then_prints_again_on_the_mesh():
     )
     assert set(scenarios.SOAK_CHECKS) <= set(soak.checks)
     assert ISSUE.match(soak.guards)
+
+
+def test_the_host_restart_print_heats_the_unloaded_heater_then_turns_it_off():
+    scenario = SCENARIO_BY_NAME["host_restart"]
+    lines = scenario.gcode.lines()
+    assert lines[len(run.PREAMBLE)] == scenarios.HEAT_EXTRUDER_TO_FULL_POWER
+    assert lines[-len(run.POSTAMBLE) - 1 :] == [
+        scenarios.HEATERS_OFF,
+        *run.POSTAMBLE,
+    ]
+    verify = scenario.config.text().split("[verify_heater extruder]")[1]
+    assert "check_gain_time: 3600" in verify
+    assert [action.act for action in scenario.timeline] == [
+        Act.START_PRINT,
+        Act.HOST_RESTART,
+        Act.START_PRINT,
+    ]
