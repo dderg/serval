@@ -425,7 +425,7 @@ proptest! {
     #![proptest_config(fresh_seed_config())]
 
     #[test]
-    #[ignore = "#936 #903 #946 #947: a ratio read changing across a join, the turning guard's valley sides, a velocity step near a retract, and a settling retract the audit reads as moving fail on draws of this space"]
+    #[ignore = "#936 #903 #946: a ratio read changing across a join, the turning guard's valley sides and a velocity step near a retract fail on draws of this space"]
     fn an_advanced_extruder_plans_print_like_streams(
         printer in advanced_printer_strategy(),
         ratio in 0.02..0.06_f64,
@@ -441,32 +441,9 @@ proptest! {
         std::fs::write(&config, &printer).expect("temp config");
         let audit = corpus::extruder::extruder_audit(&snapshot.expect("planned"), &gcode, &config)
             .expect("the strategy limits the extruder");
-        let counted: Vec<String> = audit
-            .excesses
-            .iter()
-            .filter(|excess| counts_against_the_plan(excess))
-            .map(ToString::to_string)
-            .collect();
-        prop_assert!(counted.is_empty(), "{gcode}\n{printer}\n{}: {counted:?}", audit.summary());
+        let excesses: Vec<String> = audit.excesses.iter().map(ToString::to_string).collect();
+        prop_assert!(excesses.is_empty(), "{gcode}\n{printer}\n{}: {excesses:?}", audit.summary());
     }
-}
-
-/// Whether an excess counts against the plan as the corpus pins them
-/// (`corpus::known_extruder_excesses`): an acceleration excess while the
-/// toolhead rests or settles is an extrude-only move's, planned under its
-/// own caps.
-fn counts_against_the_plan(excess: &corpus::extruder::ExtruderExcess) -> bool {
-    use corpus::extruder::{ExtruderExcess, ToolheadPhase};
-    !matches!(
-        excess,
-        ExtruderExcess::Acceleration {
-            phase: ToolheadPhase::RestTransition | ToolheadPhase::Resting,
-            ..
-        } | ExtruderExcess::Velocity {
-            phase: ToolheadPhase::Resting,
-            ..
-        }
-    )
 }
 
 /// Found by `hard_invariants_hold`: under a tiny square-corner velocity
