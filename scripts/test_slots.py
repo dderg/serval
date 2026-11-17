@@ -221,3 +221,71 @@ def test_a_dead_waiter_is_dropped_from_the_queue(tmp_path, monkeypatch):
     (tmp_path / "slots" / "queue").write_text(f"{gone.pid}\n")
     lease = slots.acquire(timeout=5)
     lease.release()
+
+
+def test_a_nested_slot_in_the_holding_process_takes_no_second_slot(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SERVAL_SLOTS_DIR", str(tmp_path / "slots"))
+    monkeypatch.setenv("SERVAL_SLOTS", "1")
+    monkeypatch.delenv("SERVAL_SLOT_HELD", raising=False)
+    with slots.slot(timeout=5):
+        with slots.slot(timeout=0.3):
+            pass
+
+
+def test_an_exclusive_slot_inside_a_held_slot_fails_at_once(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SERVAL_SLOTS_DIR", str(tmp_path / "slots"))
+    monkeypatch.delenv("SERVAL_SLOT_HELD", raising=False)
+    with slots.slot(timeout=5):
+        with pytest.raises(slots.NestedExclusive):
+            with slots.slot(exclusive=True, timeout=5):
+                pass
+
+
+BUILD_HOLDER = (
+    "import pathlib, sys, time\n"
+    "import pending_baselines as pending, slots\n"
+    "ready, go = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
+    "with slots.slot(label='bench_compare build'):\n"
+    "    ready.touch()\n"
+    "    while not go.exists():\n"
+    "        time.sleep(0.05)\n"
+    "    pending.run(['make', '--version'])\n"
+)
+
+
+def queued_pids(tmp_path) -> list[int]:
+    path = tmp_path / "slots" / "queue"
+    return [int(x) for x in path.read_text().split()] if path.exists() else []
+
+
+def wait_for(condition, seconds=10.0):
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "condition never held"
+        time.sleep(0.05)
+
+
+def test_a_build_holder_and_an_exclusive_queue_head_do_not_deadlock(
+    tmp_path,
+):
+    ready, go = tmp_path / "ready", tmp_path / "go"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", BUILD_HOLDER, str(ready), str(go)],
+        env={**env(tmp_path, 3), "PYTHONPATH": str(SCRIPT.parent)},
+    )
+    exclusive = None
+    try:
+        wait_for(ready.exists)
+        exclusive = start(tmp_path, 3, "x", "--exclusive")
+        wait_for(lambda: exclusive.pid in queued_pids(tmp_path))
+        go.touch()
+        assert holder.wait(timeout=30) == 0
+        assert exclusive.wait(timeout=30) == 0
+    finally:
+        for process in (holder, exclusive):
+            if process is not None and process.poll() is None:
+                process.kill()
