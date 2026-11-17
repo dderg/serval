@@ -22,7 +22,7 @@ mod variation;
 use screen::{MoveSummary, Read, ShapedBox};
 use shadow::{
     AdvanceDemand, CellMotion, FollowerKernels, GridMemo, GridSample, PlannedGrid, Ride,
-    ShapedSample, shaped_at,
+    ShapedSample, cells_read, shaped_at,
 };
 use valley::{CellBounds, CellTrack, Crawl, FitMiss, RunScan, TrackView};
 use variation::{PhaseSpan, phase_spans, variation_over};
@@ -296,9 +296,8 @@ impl CellCheck<'_> {
         valley_cell: i64,
     ) -> Option<Check> {
         let h = kernels.h;
-        let (back, ahead) = kernels.sample_span();
         let motion = CellMotion::between(kernels, from, to);
-        let read = ((n - back) as f64 * h, (n + 1 + ahead) as f64 * h);
+        let read = kernels.cells_read((n, n));
         let reach = Read::over(
             self.caps.axis_index,
             self.nearby
@@ -807,7 +806,6 @@ impl TurningGuard {
     /// would, it fails loudly.
     fn close_run(&mut self, start: i64, end: i64) -> Option<Binding> {
         let h = self.h();
-        let (back, ahead) = self.span;
         let fit = self.valleys.fit;
         let (from, to) = (start as f64 * h, (end + 1) as f64 * h);
         let timing = &self.entries.timing;
@@ -843,10 +841,11 @@ impl TurningGuard {
                     }
                     .fail();
                 }
+                let read = cells_read(self.span, h, (start, end));
                 Some(Binding {
                     cell: from,
-                    from: from - back as f64 * h,
-                    to: to + ahead as f64 * h,
+                    from: read.0,
+                    to: read.1,
                     demand: overreach.width,
                     max_accel: overreach.covered,
                     asked: Asked::ValleySide,
@@ -909,11 +908,11 @@ impl TurningGuard {
             .then(|| self.reservations(&caps, (first, last - 1)))
             .unwrap_or_default();
         let window = (timing.t0 - back as f64 * h, timing.t1() + ahead as f64 * h);
-        let nearby: Vec<MoveSummary> = self.summaries_over(window).collect();
+        let screened: Vec<MoveSummary> = self.summaries_over(window).collect();
         if reserves.is_empty()
             && screen::passes(
                 &follower.coarse,
-                nearby.iter().copied(),
+                screened.iter().copied(),
                 &demand,
                 |axes| caps.path_jerk_gain(axes),
                 caps.max_accel_mm_s2,
@@ -923,6 +922,9 @@ impl TurningGuard {
         }
         let bounds = |n: i64| self.tracked_bounds(n);
         let track = TrackView::new(&self.valleys.track, &bounds, (h, self.valleys.fit));
+        let nearby: Vec<MoveSummary> = self
+            .summaries_over(cells_read(self.span, h, (first, last - 1)))
+            .collect();
         let cell = CellCheck {
             demand,
             caps: &caps,
@@ -1331,7 +1333,6 @@ impl TurningGuard {
         (from, to): (i64, i64),
     ) -> Vec<Reservation<'_>> {
         let h = self.h();
-        let (back, ahead) = self.span;
         self.valleys
             .crawls
             .iter()
@@ -1339,10 +1340,7 @@ impl TurningGuard {
             .flat_map(|crawl| std::iter::once(&crawl.before).chain(crawl.after.as_ref()))
             .filter(|side| side.cells.0 <= to && from <= side.cells.1)
             .map(|side| {
-                let window = (
-                    (side.cells.0 - back) as f64 * h,
-                    (side.cells.1 + 1 + ahead) as f64 * h,
-                );
+                let window = cells_read(self.span, h, side.cells);
                 let ratio = self
                     .summaries_over(window)
                     .filter_map(|summary| summary.ratio)
