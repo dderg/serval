@@ -127,13 +127,13 @@ pub fn build_endpoint(
     cfg: &McuAxisConfig,
     host_io: Weak<McuHostIo>,
     pump_control: Sender<PumpMsg>,
-    measured_clock_freq: f64,
+    nominal_clock_freq: f64,
     clock_of: ClockSource,
 ) -> Result<StepcompressEndpoint, String> {
-    if !measured_clock_freq.is_finite() || measured_clock_freq <= 0.0 {
+    if !nominal_clock_freq.is_finite() || nominal_clock_freq <= 0.0 {
         return Err(format!(
-            "stepcompress mcu {}: clock estimate {measured_clock_freq} Hz is not a positive \
-             rate; every span is clocked on the slope the host projects starts with",
+            "stepcompress mcu {}: nominal clock {nominal_clock_freq} Hz is not a positive \
+             rate",
             cfg.mcu_id
         ));
     }
@@ -145,19 +145,19 @@ pub fn build_endpoint(
         ));
     }
     let budget = cfg.hw.move_queue_slots - MOVE_SLOT_RESERVE;
-    let cycles_per_second = measured_clock_freq;
+    let cycles_per_second = nominal_clock_freq;
     let classic_encoder = if cfg
         .stepcompress_encoders
         .contains(&StepcompressEncoder::Classic)
     {
-        let max_error_ticks = (cfg.hw.stepcompress_max_error_secs * measured_clock_freq).round();
+        let max_error_ticks = (cfg.hw.stepcompress_max_error_secs * nominal_clock_freq).round();
         if !max_error_ticks.is_finite()
             || max_error_ticks < 1.0
             || max_error_ticks > u32::MAX as f64
         {
             return Err(format!(
                 "stepcompress mcu {}: classic encoder max_error {} s at \
-                 {measured_clock_freq} Hz does not resolve to a tick budget in [1, {}]",
+                 {nominal_clock_freq} Hz does not resolve to a tick budget in [1, {}]",
                 cfg.mcu_id,
                 cfg.hw.stepcompress_max_error_secs,
                 u32::MAX
@@ -262,7 +262,7 @@ pub fn build_endpoint(
         endpoint.attach_tap(StepTap::open(
             std::path::Path::new(&dir),
             cfg.mcu_id,
-            measured_clock_freq,
+            nominal_clock_freq,
             &tap_lanes(cfg),
             clock_of,
         )?);

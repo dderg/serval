@@ -458,7 +458,6 @@ def init_planner(motion):
         if handle in mcu_by_handle:
             motion._axis_mcus[axis_name] = mcu_by_handle[handle]
 
-    motion.await_clock_sync()
     try:
         motion.engine.init_planner(
             motion._motion_config_text, topology, step_benchmarks

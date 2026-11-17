@@ -100,19 +100,20 @@ fn host_io_sample_position_query(
 /// Build the sample endpoint for one mcu's phase lanes. The rate is the
 /// firmware's own `MOTION_SAMPLE_RATE_HZ`, carried on the topology, and the
 /// lane's position quantum is its microstep distance — the LUT phase quantum
-/// the mcu's phase executor counts in. `measured_clock_freq` is the same
-/// measured estimate the pulse lanes' shim uses, so two lane kinds on one board
-/// cannot disagree about the clock.
+/// the mcu's phase executor counts in. `nominal_clock_freq` is the same
+/// nominal rate the pulse lanes' shim starts on, so two lane kinds on one
+/// board cannot disagree about the clock; each fresh epoch moves both onto
+/// its converged slope.
 pub fn build_sample_endpoint(
     cfg: &crate::mcu_config::McuAxisConfig,
     host_io: std::sync::Weak<host_rt::host_io::McuHostIo>,
     pump_control: Sender<PumpMsg>,
-    measured_clock_freq: f64,
+    nominal_clock_freq: f64,
     clock_of: ClockSource,
 ) -> Result<SampleEndpoint, String> {
-    if !measured_clock_freq.is_finite() || measured_clock_freq <= 0.0 {
+    if !nominal_clock_freq.is_finite() || nominal_clock_freq <= 0.0 {
         return Err(format!(
-            "sample mcu {}: clock estimate {measured_clock_freq} Hz is not a positive rate",
+            "sample mcu {}: nominal clock {nominal_clock_freq} Hz is not a positive rate",
             cfg.mcu_id
         ));
     }
@@ -160,7 +161,7 @@ pub fn build_sample_endpoint(
         lanes.push(SampleLaneConfig {
             axis: axis as u8,
             oid: cfg.hw.stepper_oids[motor],
-            cycles_per_second: measured_clock_freq,
+            cycles_per_second: nominal_clock_freq,
             sample_rate_hz,
             position_quantum_mm: quantum as f32,
             max_units_per_sample,

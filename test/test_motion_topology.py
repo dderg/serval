@@ -166,9 +166,10 @@ def test_init_planner_records_axis_mcu_ownership(monkeypatch):
     assert motion.get_axis_mcu("e") is toolboard
 
 
-def test_init_planner_waits_for_clock_sync_before_the_engine_reads_it(
-    monkeypatch,
-):
+def test_init_planner_leaves_clock_sync_to_the_first_motion(monkeypatch):
+    """#987: the engine builds its endpoints from the MCU's nominal clock and
+    clocks every span on a converged epoch slope, so connect, and with it
+    `ready`, does not wait for convergence; the first motion does."""
     calls = []
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
     motion._motion_config_text = (
@@ -192,7 +193,7 @@ def test_init_planner_waits_for_clock_sync_before_the_engine_reads_it(
 
     motion_setup.init_planner(motion)
 
-    assert calls == ["await_clock_sync", "engine.init_planner"]
+    assert calls == ["engine.init_planner"]
 
 
 def test_cartesian_topology_tag_is_cartesian():
