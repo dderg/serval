@@ -349,7 +349,11 @@ fn a_waiting_crawl_keeps_its_path_untaken() {
     let config =
         std::env::temp_dir().join(format!("waiting_crawl_printer_{}.cfg", std::process::id()));
     std::fs::write(&config, WAITING_CRAWL_PRINTER).expect("temp config");
-    plans_within_the_extruder_limits("crawl_waiting_past_a_hop", CRAWL_WAITING_PAST_A_HOP, &config);
+    plans_within_the_extruder_limits(
+        "crawl_waiting_past_a_hop",
+        CRAWL_WAITING_PAST_A_HOP,
+        &config,
+    );
 }
 
 /// #897: a corexy with a kernel-free advance limited to 6359 mm/s² and
@@ -417,10 +421,13 @@ G1 X145.159 Y142.668 F14889
 
 #[test]
 fn a_crawl_valley_widens_far_owned_steps_to_fit_their_flow() {
-    let config =
-        std::env::temp_dir().join(format!("far_steps_printer_{}.cfg", std::process::id()));
+    let config = std::env::temp_dir().join(format!("far_steps_printer_{}.cfg", std::process::id()));
     std::fs::write(&config, FAR_STEPS_PRINTER).expect("temp config");
-    plans_within_the_extruder_limits("steps_far_past_a_reversal", STEPS_FAR_PAST_A_REVERSAL, &config);
+    plans_within_the_extruder_limits(
+        "steps_far_past_a_reversal",
+        STEPS_FAR_PAST_A_REVERSAL,
+        &config,
+    );
 }
 
 /// #895: a corexy with a kernel-free advance limited to 12492 mm/s², drawn
@@ -491,7 +498,11 @@ fn a_crawl_side_reads_a_sliver_legs_jerk_across_the_node_spacing() {
     let config =
         std::env::temp_dir().join(format!("sliver_leg_printer_{}.cfg", std::process::id()));
     std::fs::write(&config, SLIVER_LEG_PRINTER).expect("temp config");
-    plans_within_the_extruder_limits("sliver_legs_into_a_crawl", SLIVER_LEGS_INTO_A_CRAWL, &config);
+    plans_within_the_extruder_limits(
+        "sliver_legs_into_a_crawl",
+        SLIVER_LEGS_INTO_A_CRAWL,
+        &config,
+    );
 }
 
 /// #895: `voron_first_layers_zhop.gcode` cut to an extrusion, a hop, a
@@ -510,7 +521,11 @@ G1 X103.45 Y126.414 E.6089
 #[test]
 fn a_bowden_crawl_side_after_a_prime_fits_its_limit() {
     let config = corpus::repo().join("rust/motion-core/tests/configs/p1_bowden_ramp.cfg");
-    plans_within_the_extruder_limits("bowden_hop_prime_and_back", BOWDEN_HOP_PRIME_AND_BACK, &config);
+    plans_within_the_extruder_limits(
+        "bowden_hop_prime_and_back",
+        BOWDEN_HOP_PRIME_AND_BACK,
+        &config,
+    );
 }
 
 /// #895: a corexy with 30 Hz shapers and a kernel-free advance limited to
@@ -650,7 +665,10 @@ G1 X160.259 Y164.980 E0.26930 F6423
 
 #[test]
 fn a_crawl_valley_widened_past_a_retract_holds_zero_on_untaken_path() {
-    let config = printer_from("reversal_past_a_retract_printer", REVERSAL_PAST_A_RETRACT_PRINTER);
+    let config = printer_from(
+        "reversal_past_a_retract_printer",
+        REVERSAL_PAST_A_RETRACT_PRINTER,
+    );
     plans_within_the_extruder_limits("reversal_past_a_retract", REVERSAL_PAST_A_RETRACT, &config);
 }
 

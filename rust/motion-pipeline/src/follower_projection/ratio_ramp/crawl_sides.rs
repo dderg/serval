@@ -85,7 +85,10 @@ impl SideTrail {
     /// a crawl valley at `s` reaches back past it. `None` where the trail
     /// does not cover that long.
     pub(super) fn lead_budget_back_from(&self, s: f64) -> Option<f64> {
-        let at = self.probes.partition_point(|probe| probe.s <= s).checked_sub(1)?;
+        let at = self
+            .probes
+            .partition_point(|probe| probe.s <= s)
+            .checked_sub(1)?;
         let since = self.probes[at].t - VALLEY_LEAD_BUDGET_S;
         let index = self.probes.partition_point(|probe| probe.t <= since);
         (index > 0).then(|| self.probes[index - 1].s)
@@ -691,19 +694,18 @@ impl StepWindows {
         let zero = self.zero_stretch();
         let (turn, window) = (self.turn, self.window);
         let far = move |owner: &OwnedStep| (owner.s - turn).abs() > 2.0 * window;
-        let (near_flow, far_steps) = self.laid_steps(laid).fold(
-            (0.0, 0.0),
-            |(near_flow, far_steps), (owner, s, step)| {
-                if far(owner) {
-                    (near_flow, far_steps + step)
-                } else {
-                    (
-                        near_flow + self.step_flow(path_accel, s, step, owner.half_width),
-                        far_steps,
-                    )
-                }
-            },
-        );
+        let (near_flow, far_steps) =
+            self.laid_steps(laid)
+                .fold((0.0, 0.0), |(near_flow, far_steps), (owner, s, step)| {
+                    if far(owner) {
+                        (near_flow, far_steps + step)
+                    } else {
+                        (
+                            near_flow + self.step_flow(path_accel, s, step, owner.half_width),
+                            far_steps,
+                        )
+                    }
+                });
         let left = FAR_STEP_FLOW_SHARE
             * (rule.max_accel_mm_s2
                 - smoothing.peak_ratio_in(Table::Laid, laid, zero.0, zero.1) * path_accel
@@ -734,8 +736,7 @@ impl StepWindows {
             let share = left * steps / far_steps;
             let half_width = moment / (share - 1.5 * path_accel * steps);
             let opens_at = owner.extent().0 - half_width;
-            if half_width <= owner.half_width || (owner.s < self.turn && !leaves_a_side(opens_at))
-            {
+            if half_width <= owner.half_width || (owner.s < self.turn && !leaves_a_side(opens_at)) {
                 continue;
             }
             self.owned[index].half_width = half_width;
