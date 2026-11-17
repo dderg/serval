@@ -593,9 +593,7 @@ impl RuntimeLimits {
 
     fn set_corner(&mut self, corner: Option<CornerBudget>) -> Result<(), RuntimeLimitError> {
         if let Some(budget) = corner {
-            budget
-                .validate()
-                .map_err(RuntimeLimitError::InvalidCornerBudget)?;
+            check_corner(budget).map_err(RuntimeLimitError::InvalidCornerBudget)?;
         }
         self.corner = corner;
         Ok(())
@@ -679,7 +677,7 @@ impl CartesianLimits {
         if !(self.max_jerk > 0.0) {
             return Err("[printer] max_jerk must be positive (infinity disables jerk limiting)");
         }
-        self.corner.validate()?;
+        check_corner(self.corner)?;
         Ok(())
     }
 }
@@ -714,8 +712,23 @@ pub fn corner_budget_from_parts(kind: &str, value: f64) -> Result<CornerBudget, 
             ));
         }
     };
-    corner.validate()?;
+    check_corner(corner)?;
     Ok(corner)
+}
+
+/// [`CornerBudget::validate`], and a `corner_deviation` above 0: an X or Y
+/// kernel rounds even a corner stopped at by its floor, `∝ accel·σ²`, so a
+/// 0 mm budget has no acceleration to plan the corner at.
+fn check_corner(corner: CornerBudget) -> Result<(), &'static str> {
+    corner.validate()?;
+    if corner == CornerBudget::Shaped(0.0) {
+        return Err(
+            "corner_deviation must be above 0: an input shaper rounds every corner it stops \
+             at, so no acceleration keeps a 0 mm budget (square_corner_velocity: 0 asks for \
+             the sharpest corners the shapers allow)",
+        );
+    }
+    Ok(())
 }
 
 impl PlannerConfig {

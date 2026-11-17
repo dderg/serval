@@ -3601,10 +3601,12 @@ impl<'a> FollowerSignal<'a> {
                 + weighted_curvature * rate * rate * rate,
         );
         if weight > 0.0 && weight < 1.0 {
+            let ramp_and_rebuild =
+                3.0 * weighted_slope * rate * rate_deriv + weighted_curvature * rate * rate * rate;
             self.state.smoothing.assert_ramp_in_a_crawl_side_fits(
                 self.advance_table(),
                 s,
-                (flow_accel, read.2),
+                (flow_accel, ramp_and_rebuild),
             );
         }
         read

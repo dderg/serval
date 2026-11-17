@@ -308,7 +308,7 @@ def main() -> None:
     args = parser.parse_args()
     scenario = SCENARIO_BY_NAME[args.scenario]
     if scenario in SOAK_SCENARIOS:
-        soak_gcode.ensure()
+        soak_gcode.ensure_all()
     with lock.bench_lock(args.lock_timeout):
         print(run_scenario(scenario, args.runs_dir.expanduser()))
 

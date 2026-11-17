@@ -8,7 +8,7 @@ predictions falls below its floor, unless the Pi itself measured the tree,
 and holds a config FLOOR_SHORTFALLS pins to the Pi's window on PINNED_CORES:
 a PR may measure it, qualification (scripts/qualify.py) always does. This
 script takes both measurements.
-Under tools/bench/lock.py it syncs the committed measured trees to the bench
+It syncs the committed measured trees to the bench
 Pi, builds the replay there, and runs the full dense print of every gated
 config PI_RUNS times under `taskset -c LIVE_CORES`, and of every pinned
 config, plus every config `--pin` names (one about to be pinned), PI_RUNS
@@ -17,51 +17,162 @@ scripts/throughput_recheck.py measures its points. It writes each config's
 worst windows (`worst_x`, and `pinned_cores_worst_x` for the pinned ones),
 with the git trees they were measured on, to tools/bench/pi_window.json;
 the gate credits them only while the checkout's measured trees are exactly
-those. Commit the file with the change it measured. `timing` in the file
-says where the bench time went: wall seconds of the sync, the build on the
-Pi, the cooldown, and of every replay (its stream and wall seconds as the
-replay reports them, and the ssh call around it).
+those. Commit the file with the change it measured.
+
+It takes the bench lock (tools/bench/lock.py) once per hold and releases it
+in between, so it refuses to run inside a hold; each hold is planned the way
+throughput_recheck.py plans its own. A build hold: deploy.py settle, sync,
+cargo build, then IDENTITY next to the binary (the trees and the binary's
+sha256); skipped when the Pi's IDENTITY already names these trees and the
+binary beside it. Then a measure hold: deploy.py settle, the identity
+verified (a binary another run rebuilt is built again in a new build hold
+and the measure hold retried), the cooldown, no throttling and no capped
+cpufreq policy, the replays, no throttling again. A rerun after a lost hold
+starts again from the hold it lost. `timing.holds` in the file says where
+the bench time went, per hold: its lock wait and held seconds, what settle
+undid, and for a build the sync and build seconds, for a measure the
+cpufreq policies, the cooldown and every replay (its stream and wall
+seconds as the replay reports them, and the ssh call around it).
 """
 
 from __future__ import annotations
 
 import argparse
-import datetime
 import json
 import re
+import shlex
 import sys
 import time
-from collections.abc import Callable
 from pathlib import Path
 
 import throughput_gate as gate
 import throughput_recheck as recheck
 from throughput_gate import GateError
+from throughput_recheck import HoldKind
 
 PI_DIR = "throughput-pi"
+RELEASE_BENCH = "lab/target/release/examples/gcode_replay_bench"
+BINARY = f"{PI_DIR}/{RELEASE_BENCH}"
+IDENTITY = f"{BINARY}.identity.json"
 WALL_SECS = re.compile(r"\bwall_secs=([0-9.]+)")
 
 
-def held(pinning: list[str]) -> None:
+def measure(pinning: list[str]) -> None:
+    recheck.refuse_nested_hold()
+    trees = committed_trees()
+    replays = recheck.PI_RUNS * (len(gate.CONFIGS) + len(pinned(pinning)))
+    recheck.require_fits(HoldKind.BUILD, recheck.build_plan_s())
+    recheck.require_fits(HoldKind.MEASURE, recheck.measure_plan_s(replays))
+    holds = []
+    for _ in range(recheck.STALE_ATTEMPTS):
+        if not built_on_pi(trees):
+            holds.append(take(HoldKind.BUILD, pinning, trees))
+        hold = take(HoldKind.MEASURE, pinning, trees)
+        holds.append(hold)
+        if "stale" not in hold:
+            write_window(trees, pinning, holds)
+            return
+        print(
+            f"{BINARY} changed under the measure hold: rebuilding",
+            file=sys.stderr,
+            flush=True,
+        )
+    raise GateError(
+        f"{BINARY} changed on the Pi under {recheck.STALE_ATTEMPTS} measure "
+        "holds: is another throughput_pi.py building there?"
+    )
+
+
+def committed_trees() -> dict[str, str]:
     trees = gate.measured_trees()
     if trees is None:
         raise GateError(
             "the measured trees have uncommitted changes: commit them, so the "
             "measurement names the code it measured"
         )
-    sync_s = timed(sync_to_pi)
+    return trees
+
+
+def pinned(pinning: list[str]) -> list[str]:
+    return sorted({*gate.FLOOR_SHORTFALLS, *pinning})
+
+
+def take(kind: HoldKind, pinning: list[str], trees: dict[str, str]) -> dict:
+    hold = recheck.take_hold(
+        kind,
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--hold",
+            kind.value,
+            *[arg for config in pinning for arg in ("--pin", config)],
+        ],
+    )
+    if hold.pop("trees") != trees:
+        raise GateError(
+            f"the measured trees changed during the {kind.value} hold: rerun "
+            "on a checkout nobody commits to meanwhile"
+        )
+    return hold
+
+
+def built_on_pi(trees: dict[str, str]) -> bool:
+    recorded = recheck.ssh(f"cat {IDENTITY} 2>/dev/null || true").strip()
+    if not recorded:
+        return False
+    return json.loads(recorded) == {"trees": trees, "sha256": binary_sha256()}
+
+
+def binary_sha256() -> str:
+    listing = recheck.ssh(f"sha256sum {BINARY} 2>/dev/null || true").split()
+    return listing[0] if listing else ""
+
+
+def build_held(result: Path) -> None:
+    started = time.time()
+    restored = recheck.settle_bench()
+    trees = committed_trees()
+    recheck.ssh(f"rm -f {IDENTITY}")
+    sync_s = recheck.timed(sync_to_pi)
     print("building on the Pi", file=sys.stderr, flush=True)
-    build_s = timed(build_on_pi)
+    build_s = recheck.timed(build_on_pi)
+    sha256 = binary_sha256()
+    if not sha256:
+        raise GateError(f"the Pi build left no {BINARY}")
+    identity = json.dumps({"trees": trees, "sha256": sha256})
+    recheck.ssh(f"printf '%s\\n' {shlex.quote(identity)} > {IDENTITY}")
+    recheck.write_result(
+        result,
+        started,
+        {
+            "trees": trees,
+            "restored": restored,
+            "sync_s": sync_s,
+            "build_s": build_s,
+            "sha256": sha256,
+        },
+    )
+
+
+def measure_held(pinning: list[str], result: Path) -> None:
+    started = time.time()
+    restored = recheck.settle_bench()
+    trees = committed_trees()
+    if not built_on_pi(trees):
+        recheck.write_result(
+            result,
+            started,
+            {"trees": trees, "restored": restored, "stale": True},
+        )
+        return
     time.sleep(recheck.PI_COOLDOWN_SECS)
     if recheck.pi_throttled_now():
         raise GateError("the Pi is throttling before the runs")
-    measured_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
-        timespec="seconds"
-    )
-    pinned = sorted({*gate.FLOOR_SHORTFALLS, *pinning})
+    governors = recheck.governors()
+    measured_at = recheck.utc_now()
     measured = [
         *((config, gate.LIVE_CORES) for config in gate.CONFIGS),
-        *((config, gate.PINNED_CORES) for config in pinned),
+        *((config, gate.PINNED_CORES) for config in pinned(pinning)),
     ]
     replays = [
         replay(config, cores, run)
@@ -72,11 +183,29 @@ def held(pinning: list[str]) -> None:
         raise GateError(
             "the Pi throttled during the runs: their windows are void"
         )
+    recheck.write_result(
+        result,
+        started,
+        {
+            "trees": trees,
+            "restored": restored,
+            "governors": governors,
+            "cooldown_s": recheck.PI_COOLDOWN_SECS,
+            "measured_at": measured_at,
+            "replays": replays,
+        },
+    )
+
+
+def write_window(
+    trees: dict[str, str], pinning: list[str], holds: list[dict]
+) -> None:
+    measured_at = holds[-1].pop("measured_at")
+    replays = holds[-1]["replays"]
     timing = {
-        "sync_s": sync_s,
-        "build_s": build_s,
-        "cooldown_s": recheck.PI_COOLDOWN_SECS,
-        "replays": replays,
+        "holds": [
+            {"index": index, **hold} for index, hold in enumerate(holds, 1)
+        ]
     }
     gate.PI_WINDOW.write_text(
         json.dumps(
@@ -86,7 +215,7 @@ def held(pinning: list[str]) -> None:
                 "worst_x": windows(replays, gate.CONFIGS, gate.LIVE_CORES),
                 "pinned_cores": gate.PINNED_CORES,
                 "pinned_cores_worst_x": windows(
-                    replays, pinned, gate.PINNED_CORES
+                    replays, pinned(pinning), gate.PINNED_CORES
                 ),
                 "timing": timing,
             },
@@ -95,19 +224,30 @@ def held(pinning: list[str]) -> None:
         + "\n"
     )
     print(f"wrote {gate.PI_WINDOW.relative_to(gate.ROOT)}")
-    for config, runs in windows(replays, pinned, gate.PINNED_CORES).items():
+    pinned_windows = windows(replays, pinned(pinning), gate.PINNED_CORES)
+    for config, runs in pinned_windows.items():
         print(f"{config} on cores {gate.PINNED_CORES}: {min(runs):.2f}x")
-    replays_s = sum(record["call_s"] for record in replays)
-    print(
-        f"timing: sync {sync_s:.1f} s, build {build_s:.1f} s, cooldown "
-        f"{recheck.PI_COOLDOWN_SECS} s, {len(replays)} replays {replays_s:.1f} s"
+    for hold in timing["holds"]:
+        print(timing_line(hold))
+
+
+def timing_line(hold: dict) -> str:
+    spent = (
+        f"timing: {hold['kind']} hold {hold['index']}: lock wait "
+        f"{hold['wait_s']:.1f} s, held {hold['held_s']:.1f} s"
     )
-
-
-def timed(step: Callable[[], None]) -> float:
-    started = time.monotonic()
-    step()
-    return round(time.monotonic() - started, 1)
+    if "stale" in hold:
+        return f"{spent}, binary stale"
+    if hold["kind"] == HoldKind.BUILD.value:
+        return (
+            f"{spent}: sync {hold['sync_s']:.1f} s, build "
+            f"{hold['build_s']:.1f} s"
+        )
+    replays_s = sum(record["call_s"] for record in hold["replays"])
+    return (
+        f"{spent}: cooldown {hold['cooldown_s']} s, "
+        f"{len(hold['replays'])} replays {replays_s:.1f} s"
+    )
 
 
 def sync_to_pi() -> None:
@@ -161,8 +301,7 @@ def windows(
 def replay(config: str, cores: str, run: int) -> dict:
     started = time.monotonic()
     out = recheck.ssh(
-        f"cd {PI_DIR} && taskset -c {cores} "
-        "lab/target/release/examples/gcode_replay_bench "
+        f"cd {PI_DIR} && taskset -c {cores} {RELEASE_BENCH} "
         f"tree/{gate.GCODE} --config tree/{config}"
     )
     call_s = round(time.monotonic() - started, 2)
@@ -195,7 +334,12 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--held", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--hold",
+        choices=[kind.value for kind in HoldKind],
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--result", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--pin",
         action="append",
@@ -210,25 +354,12 @@ def main() -> int:
             f"--pin names ungated configs {sorted(unknown)}: name one of "
             f"{list(gate.CONFIGS)}"
         )
-    if args.held:
-        held(args.pin)
-        return 0
-    recheck.stream(
-        [
-            "uv",
-            "run",
-            "python",
-            str(gate.ROOT / "tools" / "bench" / "lock.py"),
-            "hold",
-            "--lock-timeout",
-            str(recheck.PI_LOCK_TIMEOUT_SECS),
-            "--",
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--held",
-            *[arg for config in args.pin for arg in ("--pin", config)],
-        ]
-    )
+    if args.hold == HoldKind.BUILD.value:
+        build_held(args.result)
+    elif args.hold == HoldKind.MEASURE.value:
+        measure_held(args.pin, args.result)
+    else:
+        measure(args.pin)
     return 0
 
 

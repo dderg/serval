@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -70,10 +71,10 @@ def _wait_for_pid(pid_file: Path) -> int:
 
 def _alive(pid: int) -> bool:
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
         return False
-    return True
+    return stat.rpartition(")")[2].split()[0] != lock.ZOMBIE
 
 
 def _assert_still_held(path: Path) -> None:
@@ -169,3 +170,110 @@ def test_a_waiter_gives_up_after_its_timeout_naming_the_holder(tmp_path):
     assert time.monotonic() - started >= SHORT_TIMEOUT_S
     os.kill(child, signal.SIGKILL)
     holder.wait()
+
+
+CAP_S = 2.0
+GRACE_S = 1.0
+
+
+def _capped_hold(home: Path, command: list[str]) -> subprocess.Popen:
+    program = (
+        f"import sys, lock; lock.MAX_HOLD_S = {CAP_S}; "
+        f"lock.KILL_GRACE_S = {GRACE_S}; "
+        f"sys.exit(lock.hold({HOLD_TIMEOUT_S}, {command!r}))"
+    )
+    env = {**os.environ, "HOME": str(home)}
+    env.pop(lock.TOKEN_ENV, None)
+    env.pop("BENCH_LOCK_FD", None)
+    return subprocess.Popen(
+        _python(program), env=env, cwd=BENCH, stderr=subprocess.PIPE, text=True
+    )
+
+
+def _wait_dead(pid: int) -> None:
+    deadline = time.monotonic() + WAIT_S
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(pid), f"pid {pid} outlived the hold"
+
+
+def _reentrant(pid_file: Path, remaining_file: Path) -> str:
+    return (
+        "import os, time, lock; lock.MAX_HOLD_S = 600; "
+        f"ctx = lock.bench_lock({SHORT_TIMEOUT_S}); ctx.__enter__(); "
+        f"open({str(remaining_file)!r}, 'w').write(str(lock.remaining_s())); "
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+        f"time.sleep({CHILD_LIFETIME_S})"
+    )
+
+
+def test_a_hold_past_its_cap_is_killed_and_names_its_command(tmp_path):
+    pid_file = tmp_path / "child.pid"
+    command = _python(_sleeper(pid_file))
+    started = time.monotonic()
+    holder = _capped_hold(tmp_path, command)
+    child = _wait_for_pid(pid_file)
+    _, stderr = holder.communicate(timeout=WAIT_S)
+    assert holder.returncode == lock.HOLD_EXPIRED_EXIT
+    assert time.monotonic() - started >= CAP_S
+    assert f"the hold of `{' '.join(command)}` reached MAX_HOLD_S = 2 s" in (
+        stderr
+    )
+    assert re.search(r"after \d+ s; killing pid \d+", stderr)
+    _wait_dead(child)
+    _assert_free(_lock_path(tmp_path))
+
+
+def test_a_command_ignoring_sigterm_is_killed_after_the_grace(tmp_path):
+    pid_file = tmp_path / "child.pid"
+    stubborn = (
+        "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        + _sleeper(pid_file)
+    )
+    holder = _capped_hold(tmp_path, _python(stubborn))
+    child = _wait_for_pid(pid_file)
+    holder.communicate(timeout=WAIT_S)
+    assert holder.returncode == lock.HOLD_EXPIRED_EXIT
+    _wait_dead(child)
+    _assert_free(_lock_path(tmp_path))
+
+
+def test_a_background_child_outliving_the_command_ends_at_the_cap(tmp_path):
+    pid_file = tmp_path / "child.pid"
+    detached = f"sleep {CHILD_LIFETIME_S} & echo $! > {pid_file}"
+    started = time.monotonic()
+    holder = _capped_hold(tmp_path, ["bash", "-c", detached])
+    child = _wait_for_pid(pid_file)
+    holder.communicate(timeout=WAIT_S)
+    assert holder.returncode == lock.HOLD_EXPIRED_EXIT
+    assert time.monotonic() - started >= CAP_S
+    _wait_dead(child)
+    _assert_free(_lock_path(tmp_path))
+
+
+def test_a_nested_hold_shares_the_outer_deadline(tmp_path):
+    pid_file, remaining = tmp_path / "inner.pid", tmp_path / "remaining"
+    holder = _capped_hold(tmp_path, _python(_reentrant(pid_file, remaining)))
+    inner = _wait_for_pid(pid_file)
+    assert 0 < float(remaining.read_text()) <= CAP_S
+    holder.communicate(timeout=WAIT_S)
+    assert holder.returncode == lock.HOLD_EXPIRED_EXIT
+    _wait_dead(inner)
+
+
+def test_a_reentrant_tool_ends_at_the_deadline_after_its_holder_dies(
+    tmp_path,
+):
+    pid_file, remaining = tmp_path / "inner.pid", tmp_path / "remaining"
+    holder = _capped_hold(tmp_path, _python(_reentrant(pid_file, remaining)))
+    inner = _wait_for_pid(pid_file)
+    holder.kill()
+    holder.wait()
+    assert _alive(inner)
+    _wait_dead(inner)
+    _assert_free(_lock_path(tmp_path))
+
+
+def test_remaining_time_is_refused_outside_a_hold(tmp_path):
+    with pytest.raises(lock.pi.BenchError, match="outside a hold"):
+        lock.remaining_s(_lock_path(tmp_path))

@@ -211,6 +211,40 @@ def test_a_planner_panic_fails_with_the_print_line(
     assert "last segment emitted: line 3, ending at stream 1.250 s" in out
 
 
+REPORTED_PANIC_EXIT = 70
+ABORT_SIGNAL_RETURNCODE = -6
+PANIC_RECORD = preflight.FAILURE_PREFIX + json.dumps(
+    {
+        "kind": "panic",
+        "message": "shaper: follower seam weld",
+        "location": "rust/motion-pipeline/src/shaper.rs:853:29",
+        "fed_line": 5,
+        "emitted_line": 3,
+        "stream_t": 1.25,
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "returncode", [REPORTED_PANIC_EXIT, ABORT_SIGNAL_RETURNCODE]
+)
+def test_a_panic_record_is_the_failure_whatever_ended_the_process(returncode):
+    run = preflight.BenchRun(returncode, PANIC_RECORD + "\n", "panicked")
+    failure = preflight.replay_failure(run)
+    assert failure.kind == "panic"
+    assert failure.fed_line == 5
+
+
+@pytest.mark.parametrize(
+    "returncode", [REPORTED_PANIC_EXIT, ABORT_SIGNAL_RETURNCODE]
+)
+def test_an_exit_without_a_record_is_a_crash(returncode):
+    run = preflight.BenchRun(returncode, "", "double free")
+    failure = preflight.replay_failure(run)
+    assert failure.kind == "crash"
+    assert failure.message == "double free"
+
+
 def test_a_gcode_error_names_the_print_line(tmp_path):
     front = FrontEnd(printer_cfg(tmp_path, MACROS))
     front.expand("G1 X1 F600\nSTART\n")
@@ -258,3 +292,31 @@ def test_every_command_the_live_host_refuses_is_refused_by_the_planner():
 
 def test_a_curve_the_live_host_runs_is_not_reported_as_dropped():
     assert treatment("G5") == Treatment.CURVE
+
+
+class CheckedBench(FailingBench):
+    """The bench as it passes the planner check; timing must not run."""
+
+    def check(self, arguments):
+        return preflight.BenchRun(0, "", "")
+
+
+def test_verdict_only_skips_the_exclusive_timing_pass(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(
+        preflight.engine_build_id, "tree_build_id", lambda root: "tree"
+    )
+    gcode = tmp_path / "print.gcode"
+    gcode.write_text("G90\nG1 X1 F600\nG1 X2\n")
+    verdict = preflight.main(
+        [
+            str(gcode),
+            "--config",
+            str(printer_cfg(tmp_path, MACROS)),
+            "--verdict-only",
+        ],
+        bench_factory=lambda: CheckedBench({}),
+    )
+    assert verdict != preflight.Verdict.FAIL
+    assert "VERDICT" in capsys.readouterr().out

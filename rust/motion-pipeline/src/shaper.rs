@@ -931,14 +931,9 @@ fn materialize_source_axis(
             })?);
         }
     }
-    let convolved = chains
-        .chains
-        .get(axis)
-        .is_some_and(|chain| chain.kernel().is_some());
-    let seam_continuity = if convolved {
-        SeamContinuity::Position
-    } else {
-        crate::follower_projection::leader_seam_continuity(chains, axis)
+    let seam_continuity = match chains.chains.get(axis) {
+        Some(chain) if chain.kernel().is_some() => convolved_source_seams(chain),
+        _ => crate::follower_projection::leader_seam_continuity(chains, axis),
     };
     let mut curve = fit_axis_from_signal(
         AxisFit {
@@ -970,6 +965,41 @@ fn materialize_source_axis(
         }
     }
     Ok(ContinuousAxis::Spline(Arc::new(curve)))
+}
+
+/// The share of `1/width²` a kernel's slope at a support edge stays under
+/// where it vanishes but for its construction's rounding: the bell's
+/// measures ~1e-15 of it, the ZV, MZV and triangle kernels' 4 and more.
+const EDGE_SLOPE_ROUNDING_SHARE: f64 = 1e-6;
+
+/// What every seam of a convolved source's fit carries: velocity under a
+/// motor-side acceleration gain `k2` after a kernel whose support edges
+/// have a slope `k'`, which turns a source velocity step `Δv` at `b` into a
+/// motor-command velocity step `k2·Δv·k'` where an edge passes `b`;
+/// position otherwise.
+fn convolved_source_seams(chain: &CompiledChain) -> SeamContinuity {
+    let accel_gain = matches!(
+        chain.trailing_transform(),
+        Some(ChainStage::DerivativeGains { k2, .. }) if *k2 != 0.0
+    );
+    if accel_gain && chain.kernel().is_some_and(edges_have_slope) {
+        SeamContinuity::Velocity
+    } else {
+        SeamContinuity::Position
+    }
+}
+
+fn edges_have_slope(kernel: &nurbs::algebra::PiecewisePolynomialKernel) -> bool {
+    let (lo, hi) = kernel.support();
+    let rounding = EDGE_SLOPE_ROUNDING_SHARE / ((hi - lo) * (hi - lo));
+    let slope_at = |piece: &BezierPiece, u: f64| {
+        let dx = u - piece.u_start;
+        (1..piece.coeffs.len())
+            .rev()
+            .fold(0.0, |acc, k| acc * dx + k as f64 * piece.coeffs[k])
+    };
+    let (first, last) = (&kernel.pieces[0], &kernel.pieces[kernel.pieces.len() - 1]);
+    slope_at(first, lo).abs() > rounding || slope_at(last, hi).abs() > rounding
 }
 
 /// Fits the changed sources of every segment in `segments` on the calling
@@ -5804,11 +5834,27 @@ pub(crate) fn nonlinear_advance_models(
     models
 }
 
-/// How far a reciprocal advance's unit velocity may reach past zero onto
-/// the branch opposite the one its window is modelled on. Within it the
-/// branches `u/(1 ± u)` differ from `u/(1 + |u|)` by at most `3S²`, their
-/// slopes by `5S` and their curvatures by `4.1`.
-const RECIPROCAL_BRANCH_SLACK: f64 = 1e-9;
+/// How many roundings [`reciprocal_branch_miss`] takes, at most, to each
+/// of its bounds.
+const BRANCH_MISS_ROUNDINGS: usize = 8;
+
+/// How far `u/(1 + u)`, its slope and its curvature, which a window
+/// modelled on the positive branch reads, miss the reciprocal shape
+/// `u/(1 − u)` on `u ∈ [−reach, 0]`: `2u²/(1 − u²)`, `4|u|/(1 − u²)²` and
+/// `2/(1 − u)³ + 2/(1 + u)³`, each at most its value at `u = −reach`; the
+/// shape is odd, so the negative branch misses as much.
+fn reciprocal_branch_miss(reach: f64) -> [f64; 3] {
+    let near = (1.0 - reach) * (1.0 + reach);
+    let bound = |value: f64| {
+        let ball = Ball::rounded(value, BRANCH_MISS_ROUNDINGS);
+        taylor::upper(ball.mid + ball.rad)
+    };
+    [
+        bound(2.0 * reach * reach / near),
+        bound(4.0 * reach / (near * near)),
+        bound(2.0 + 2.0 / (1.0 - reach).powi(3)),
+    ]
+}
 
 /// The unit-scaled advance shape `s(u)`, `s'(u)`, `s''(u)` of a velocity's
 /// model, and how far each may miss the shape where the model's range
@@ -5836,15 +5882,11 @@ impl AdvanceShape {
             }
             trajectory::AdvanceModel::Reciprocal => {
                 let (centre, spread) = unit.spread();
-                let subtraction = f64::EPSILON * (centre.abs() + spread);
-                let sign = if centre - spread >= -RECIPROCAL_BRANCH_SLACK {
-                    1.0
-                } else if centre + spread <= RECIPROCAL_BRANCH_SLACK {
-                    -1.0
-                } else {
+                let sign = if centre >= 0.0 { 1.0 } else { -1.0 };
+                let past_zero = spread + f64::EPSILON * (centre.abs() + spread) - sign * centre;
+                if past_zero >= 1.0 {
                     return None;
-                };
-                let reaches_other_branch = sign * centre - spread - subtraction < 0.0;
+                }
                 let reciprocal = unit
                     .scale(Ball::exact(sign))
                     .add_ball(Ball::exact(1.0))
@@ -5858,12 +5900,8 @@ impl AdvanceShape {
                     },
                     curvature: slope.mul(&reciprocal).scale(Ball::exact(-2.0 * sign)),
                     slope,
-                    branch_miss: if reaches_other_branch {
-                        [
-                            3.0 * RECIPROCAL_BRANCH_SLACK * RECIPROCAL_BRANCH_SLACK,
-                            5.0 * RECIPROCAL_BRANCH_SLACK,
-                            4.1,
-                        ]
+                    branch_miss: if past_zero > 0.0 {
+                        reciprocal_branch_miss(past_zero)
                     } else {
                         [0.0; 3]
                     },
