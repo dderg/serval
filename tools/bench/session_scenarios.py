@@ -21,6 +21,7 @@ PRINTER_CFG = BENCH / "printer.cfg"
 CONFIG_FRAGMENTS = BENCH / "config_fragments"
 PRINT_MACROS = CONFIG_FRAGMENTS / "print_macros.cfg"
 BED_MESH_WAVY = CONFIG_FRAGMENTS / "bed_mesh_wavy.cfg"
+HEATER_WITHOUT_LOAD = CONFIG_FRAGMENTS / "heater_without_load.cfg"
 FIRST_LAYERS = REPO / "tools" / "sim" / "gcode" / "voron_first_layers.gcode"
 AUTOSAVE_PREFIX = "#*#"
 
@@ -29,6 +30,10 @@ DENSE_PREFIX_LINES = 200
 ZIGZAG_STROKES = 120
 LOAD_WAVY_MESH = "BED_MESH_PROFILE LOAD=wavy"
 DWELL_LINE = "G4 P1"
+HEAT_EXTRUDER_TO_FULL_POWER = (
+    "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=100"
+)
+HEATERS_OFF = "TURN_OFF_HEATERS"
 
 INTERRUPT_AFTER_S = 20.0
 NEXT_PRINT_AFTER_S = 5.0
@@ -73,6 +78,7 @@ RESERVE_RATCHET = Bound(1.5, "#843", Unit.RATIO)
 PAUSE_CANCEL_STOP_S_UNTIL_860 = Bound(12.0, "#860")
 PAUSE_CANCEL_STOP_S_AFTER_860 = Bound(6.0, "#860")
 FIRMWARE_RESTART_STOP_S = Bound(6.0, "#844")
+HOST_RESTART_DRAINS_QUEUED_MOTION_S = Bound(35.0, "#939")
 EMERGENCY_STOP_S = Bound(0.1, "#406")
 STATS_GAP_S = Bound(2.0, "#406")
 PACER_ISSUE = "#843"
@@ -85,13 +91,14 @@ class Act(enum.Enum):
     RESUME = "resume"
     CANCEL = "cancel"
     FIRMWARE_RESTART = "firmware_restart"
+    HOST_RESTART = "host_restart"
     EMERGENCY_STOP = "emergency_stop"
     GCODE = "gcode"
     WAIT = "wait"
 
 
 TERMINATING_ACTS = frozenset(
-    {Act.CANCEL, Act.FIRMWARE_RESTART, Act.EMERGENCY_STOP}
+    {Act.CANCEL, Act.FIRMWARE_RESTART, Act.HOST_RESTART, Act.EMERGENCY_STOP}
 )
 
 
@@ -246,6 +253,12 @@ MESH_CONFIG = Config(fragments=(PRINT_MACROS, BED_MESH_WAVY))
 MESH_PRINT = Gcode(setup=(LOAD_WAVY_MESH,))
 SHORT_PRINT = Gcode(limit=SHORT_PRINT_LINES)
 SPARSE_PRINT = Gcode(limit=len(run.PREAMBLE), tail=zigzag_moves())
+HEATED_SHORT_PRINT = Gcode(
+    limit=SHORT_PRINT_LINES,
+    setup=(HEAT_EXTRUDER_TO_FULL_POWER,),
+    ending=(HEATERS_OFF, *run.POSTAMBLE),
+)
+HEATER_WITHOUT_LOAD_CONFIG = Config(fragments=(HEATER_WITHOUT_LOAD,))
 START = Action(Act.START_PRINT)
 NEXT_PRINT = Action(Act.START_PRINT, NEXT_PRINT_AFTER_S, After.PRINT_END)
 ESTOP_RECOVERY = (
@@ -382,6 +395,18 @@ SCENARIOS = (
         (Outcome.RESET,),
         NotAnalyzed.INTERRUPTED,
         checks=(StopsWithin(Act.FIRMWARE_RESTART, FIRMWARE_RESTART_STOP_S),),
+    ),
+    Scenario(
+        "host_restart",
+        "#939",
+        HEATED_SHORT_PRINT,
+        (START, Action(Act.HOST_RESTART, INTERRUPT_AFTER_S), NEXT_PRINT),
+        (Outcome.RESET, Outcome.COMPLETE),
+        NotAnalyzed.SEVERAL_PRINTS,
+        HEATER_WITHOUT_LOAD_CONFIG,
+        checks=(
+            StopsWithin(Act.HOST_RESTART, HOST_RESTART_DRAINS_QUEUED_MOTION_S),
+        ),
     ),
     Scenario(
         "estop",
