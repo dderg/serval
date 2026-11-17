@@ -75,7 +75,7 @@ Run one test: `tools/sim/run.sh test -k my_scenario`.
 
 ## Scenario fuzzer
 
-One integer seed draws a printer, one or two print programs and a timeline of user actions (`tools/sim/fuzzing/`). With a bed mesh, the programs also get seam moves: across the probed area's edges, along grid lines, through nodes and through the fade band. The driver holds each run to every check in `fuzzing/checks.py`. Reference: `tools/sim/README.md` "Scenario fuzzer".
+One integer seed draws a printer, one or two print programs and a timeline of user actions (`tools/sim/fuzzing/`). With a bed mesh, the programs also get seam moves: across the probed area's edges, along grid lines, through nodes and through the fade band. First-print extras come from streams of their own: heat-up waits (M109, TEMPERATURE_WAIT) on a hotend thermal model, object labels and EXCLUDE_OBJECT, a filament runout pause, M220/M221/SET_VELOCITY_LIMIT from the console, an idle gap and SDCARD_RESET_FILE before a print. The driver holds each run to every check in `fuzzing/checks.py`. Reference: `tools/sim/README.md` "Scenario fuzzer".
 
 ```bash
 tools/sim/run.sh fuzz --seeds 1000..1199          # a range, 8 worlds at a time; failures kept in .sim-fuzz/<run>/seed-N/
@@ -93,7 +93,7 @@ Checks (the failing check names the `FAIL` line):
 | `uncommanded_shutdown` | a shutdown no timeline action asked for |
 | `rest_steps` | at a rest probe (M400, mark pin, G4) a motor stands still off its commanded step lattice |
 | `pin_order` | motors moved within 0.3 s of the mark pin, inside the dwell after it: the pin was not ordered after the M400 (#893) |
-| `pacer_brake` | `pipe_drain` outside a commanded stop |
+| `pacer_brake` | `pipe_drain` outside a commanded stop; one idle brake (`RunwayExhausted`) per heat wait of a print is allowed, since M109 sends no moves |
 | `print_outcome`, `stop_state`, `recovery`, `command_result`, `estop_latency`, `idle_timeout` | the print or a user action did not end as commanded |
 | `session_repeat` | the same program printed twice in a session moved differently |
 | `reactor_stall`, `wedge`, `memory`, `stuck` | klippy's reactor late; virtual clock frozen; klippy RSS > 2 GB; worker over budget |

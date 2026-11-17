@@ -5,9 +5,11 @@ in tools/sim/fuzzing/checks.py. Fresh seeds run in `ci.sh sim-fuzz`.
 Both MCU topologies, flat/wavy/steep meshes (with the seam moves
 fuzzing/mesh_paths.py draws across them), PAUSE/RESUME, CANCEL_PRINT,
 RESTART, e-stop + FIRMWARE_RESTART, link faults, SET_PRESSURE_ADVANCE and
-the refused SET_INPUT_SHAPER. Left out while their bugs are open: a
-FIRMWARE_RESTART landing in an M400 (#892) and a host RESTART with heaters
-on (#939; seed 18 hit it)."""
+the refused SET_INPUT_SHAPER; the first-print extras: heat-up waits on
+the hotend model, object labels and EXCLUDE_OBJECT, a filament runout
+(12029), M220 (12083), M221, SET_VELOCITY_LIMIT, idle gaps and
+SDCARD_RESET_FILE. Left out while their bugs are open: a heater command
+after a long idle gap before a later print, with an idle timeout (#993)."""
 
 import pytest
 
@@ -15,19 +17,19 @@ from tools.sim.fuzzing import execute, scenario
 
 pytestmark = pytest.mark.needs_elf
 
-THREE_PRINTS_SEED = 27
-THREE_PRINTS_EXPECTED_S = 100
+LONG_SEED_EXPECTED_S = 150
 SMOKE_SEEDS = (
     10,
     11,
-    20,
-    pytest.param(
-        THREE_PRINTS_SEED,
-        marks=pytest.mark.expected_seconds(THREE_PRINTS_EXPECTED_S),
-    ),
     35,
-    41,
     63,
+    12083,
+    *(
+        pytest.param(
+            seed, marks=pytest.mark.expected_seconds(LONG_SEED_EXPECTED_S)
+        )
+        for seed in (20, 27, 41, 12029)
+    ),
 )
 
 

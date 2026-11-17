@@ -22,6 +22,10 @@ MAX_JOG_MM = 10.0
 MAX_JOG_Z_MM = 5.0
 MAX_FAULT_S = 0.1
 FAULT_COMMAND = "get_clock"
+EXTRA_ACTIONS_PER_PRINT = ((0, 50), (1, 35), (2, 15))
+SPEED_PERCENT = (50, 200)
+EXTRUDE_PERCENT = (80, 120)
+RUNOUT_HOLD_S = (0.5, 5.0)
 
 
 class Act(enum.Enum):
@@ -37,6 +41,11 @@ class Act(enum.Enum):
     MESH_CLEAR = "mesh_clear"
     HEATER = "heater"
     LINK_FAULT = "link_fault"
+    SPEED_FACTOR = "speed_factor"
+    EXTRUDE_FACTOR = "extrude_factor"
+    VELOCITY_LIMIT = "velocity_limit"
+    RUNOUT = "runout"
+    EXCLUDE_OBJECT = "exclude_object"
 
 
 ENDS_PRINT = (
@@ -46,12 +55,15 @@ ENDS_PRINT = (
     Act.ESTOP_RESTART,
 )
 RESTARTS = (Act.FIRMWARE_RESTART, Act.HOST_RESTART, Act.ESTOP_RESTART)
-STOPS_MOTION = ENDS_PRINT + (Act.PAUSE_RESUME,)
+STOPS_MOTION = ENDS_PRINT + (Act.PAUSE_RESUME, Act.RUNOUT)
 CHANGES_STATE = (
     Act.SET_PA,
     Act.SET_POST_PROCESSOR,
     Act.MESH_LOAD,
     Act.MESH_CLEAR,
+    Act.SPEED_FACTOR,
+    Act.EXTRUDE_FACTOR,
+    Act.VELOCITY_LIMIT,
 )
 
 
@@ -217,4 +229,61 @@ def draw_print_actions(
         actions.append(Action(print_index, round(at_s, 3), act, acts[act](rng)))
         if act in ENDS_PRINT:
             break
+    return actions
+
+
+def _velocity_limit_params(rng: random.Random, spec: PrinterSpec) -> tuple:
+    """The console twin of program._limits: what a user types mid-print."""
+    choices = (
+        lambda: (
+            ("velocity", str(round(rng.uniform(50, spec.max_velocity)))),
+            ("accel", str(round(rng.uniform(500, 40000)))),
+        ),
+        lambda: (("square_corner_velocity", _fmt(rng.uniform(1, 20), 1)),),
+        lambda: (("corner_deviation", _fmt(rng.uniform(0.01, 0.5))),),
+        lambda: (("reset", "1"),),
+    )
+    return rng.choice(choices)()
+
+
+def _extra_candidates(spec: PrinterSpec, objects: list[str]) -> dict:
+    """Acts drawn from their own stream (draw_extra_actions), so the
+    timeline `draw_print_actions` draws is unchanged."""
+    acts = {
+        Act.SPEED_FACTOR: lambda rng: (
+            ("percent", str(rng.randint(*SPEED_PERCENT))),
+        ),
+        Act.EXTRUDE_FACTOR: lambda rng: (
+            ("percent", str(rng.randint(*EXTRUDE_PERCENT))),
+        ),
+        Act.VELOCITY_LIMIT: lambda rng: _velocity_limit_params(rng, spec),
+    }
+    if spec.runout_sensor:
+        acts[Act.RUNOUT] = lambda rng: (
+            ("hold_s", _fmt(rng.uniform(*RUNOUT_HOLD_S), 2)),
+        )
+    if objects:
+        acts[Act.EXCLUDE_OBJECT] = lambda rng: (("name", rng.choice(objects)),)
+    return acts
+
+
+def draw_extra_actions(
+    rng: random.Random,
+    spec: PrinterSpec,
+    objects: list[str],
+    print_index: int,
+    duration_s: float,
+) -> list[Action]:
+    acts = _extra_candidates(spec, objects)
+    counts, weights = zip(*EXTRA_ACTIONS_PER_PRINT)
+    latest = max(EARLIEST_MARK_S, LATEST_MARK_FRACTION * duration_s)
+    marks = sorted(
+        rng.uniform(EARLIEST_MARK_S, latest)
+        for _ in range(rng.choices(counts, weights)[0])
+    )
+    ordered = sorted(acts, key=lambda a: a.value)
+    actions = []
+    for at_s in marks:
+        act = rng.choice(ordered)
+        actions.append(Action(print_index, round(at_s, 3), act, acts[act](rng)))
     return actions
