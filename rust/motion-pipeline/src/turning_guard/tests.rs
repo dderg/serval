@@ -18,15 +18,19 @@ fn guard_from_home(lines: &[crate::live_config::GcodeLine]) {
 }
 
 #[test]
-#[should_panic(expected = "turning guard: discontinuous move at line 1: starts at [10.0, 0.0, 0.2] \
-                           but the toolhead is at [0.0, 0.0, 0.0]")]
+#[should_panic(
+    expected = "turning guard: discontinuous move at line 1: starts at [10.0, 0.0, 0.2] \
+                           but the toolhead is at [0.0, 0.0, 0.0]"
+)]
 fn a_move_starting_off_the_toolhead_fails_as_a_discontinuity() {
     guard_from_home(&[line(1, AWAY, STROKE_END, STROKE_E_MM, FEED_MM_S)]);
 }
 
 #[test]
-#[should_panic(expected = "turning guard: discontinuous move at line 2: starts at [10.0, 0.0, 0.2] \
-                           but the toolhead is at [0.0, 0.0, 0.0]")]
+#[should_panic(
+    expected = "turning guard: discontinuous move at line 2: starts at [10.0, 0.0, 0.2] \
+                           but the toolhead is at [0.0, 0.0, 0.0]"
+)]
 fn a_move_off_the_toolhead_after_a_prime_fails_as_a_discontinuity() {
     guard_from_home(&[
         line(1, HOME, HOME, PRIME_MM, FEED_MM_S),
