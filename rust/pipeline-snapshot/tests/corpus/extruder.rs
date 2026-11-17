@@ -3,8 +3,8 @@
 //! it, never the shaped toolhead's motion: while e follows the toolhead,
 //! its spill included, the `[axis e]` `max_velocity` / `max_accel` its
 //! advance and ratio ramps are planned within; through an extrude-only
-//! move, the caps the planner plans it under
-//! ([`geometry::velocity::extrude_only_move_caps`]) plus the follower's
+//! move, the limits the planner plans it under below its feed
+//! ([`geometry::velocity::extrude_only_move_limits`]) plus the follower's
 //! while toolhead motion that extrudes is within its window. Its
 //! acceleration may leave those caps by the fit's acceleration tolerance
 //! only, and its velocity steps only by rounding, bar the steps a
@@ -507,7 +507,7 @@ fn toolhead_speed(trajectory: &pipeline_snapshot::ExactTrajectory, t: f64) -> f6
         .sqrt()
 }
 
-/// An extrude-only move the plan commands: when it runs and the caps the
+/// An extrude-only move the plan commands: when it runs and the limits the
 /// planner plans it under.
 struct ExtrudeOnlyRun {
     t_start: f64,
@@ -570,8 +570,7 @@ impl CommandMap {
             let commanded = extrude_only_moves
                 .get(&command.source_line)
                 .unwrap_or_else(|| panic!("no extrude-only move runs {command:?}"));
-            let (velocity, accel) = geometry::velocity::extrude_only_move_caps(
-                commanded.feedrate_mm_s,
+            let (velocity, accel) = geometry::velocity::extrude_only_move_limits(
                 (
                     commanded.limits.max_velocity_mm_s,
                     commanded.limits.accel_mm_s2,
