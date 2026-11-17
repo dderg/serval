@@ -147,12 +147,21 @@ def _event_name(line: str) -> str:
         return ""
 
 
-def _first_panic(logs: Logs) -> Optional[str]:
-    for text in (logs.stdout, logs.events):
-        found = _lines_with(text, (PANIC,))
-        if found:
-            return found[0].strip()
+def first_panic(text: str) -> Optional[str]:
+    """`<location> -- <message>`: Rust prints the message on the line after
+    `thread '...' panicked at <file>:<line>:<col>:`, and the message tells
+    apart panics sharing one site (shaper.rs:853 carries several)."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if PANIC not in line:
+            continue
+        message = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        return f"{line.strip()} -- {message}"
     return None
+
+
+def _first_panic(logs: Logs) -> Optional[str]:
+    return first_panic(logs.stdout) or first_panic(logs.events)
 
 
 def _fatal_events(logs: Logs) -> list[str]:

@@ -163,3 +163,17 @@ def test_the_minimizer_keeps_only_what_the_failure_needs():
     assert smallest.prints == ("A",)
     assert not smallest.programs[0].end_print
     assert all(size <= 4 for size in calls)
+
+
+def test_a_panic_signature_carries_its_message():
+    stdout = (
+        "klippy starting\n"
+        "thread 'kalico-shaper' panicked at /kalico/rust/motion-pipeline/"
+        "src/shaper.rs:853:29:\n"
+        "shaper: axis 3: shaping window needs unavailable history at t=11.1\n"
+    )
+    panic = checks.first_panic(stdout)
+    assert panic.endswith("shaping window needs unavailable history at t=11.1")
+    violation = checks.Violation(checks.Check.PANIC, panic)
+    assert "unavailable history" in checks.signature(violation)
+    assert checks.first_panic("klippy starting\n") is None

@@ -23,6 +23,7 @@ from tools.sim.fuzzing.checks import (
     ESTOP_REASON,
     MOTION_STILL_S,
     PACER_BRAKE,
+    first_panic,
     Check,
     Violation,
     event_offsets,
@@ -134,6 +135,7 @@ class Session:
         self.recheck: Optional[_Recheck] = None
         self.watching = False
         self.print_index = 0
+        self.stdout_offset = 0
 
     # ------------------------------------------------------------ clock
 
@@ -442,6 +444,7 @@ class Session:
     def _check_printing(self, deadline_ns: int) -> None:
         if self.world.klippy_proc.poll() is not None:
             raise Violation(Check.KLIPPY_EXIT, "klippy exited during the print")
+        self._check_no_panic()
         stats = self._print_state()
         if stats.get("state") in ("error", "cancelled"):
             raise Violation(
@@ -454,6 +457,18 @@ class Session:
                 Check.PRINT_OUTCOME,
                 f"print still running after {PRINT_TIMEOUT_S} s",
             )
+
+    def _check_no_panic(self) -> None:
+        """A panicked engine thread can leave klippy up and the print
+        never ending: stop at the panic instead of the print timeout."""
+        stdout = self.world.log_dir / "klippy.stdout"
+        with stdout.open("rb") as stream:
+            stream.seek(self.stdout_offset)
+            appended = stream.read()
+        panic = first_panic(appended.decode(errors="replace"))
+        if panic:
+            raise Violation(Check.PANIC, panic)
+        self.stdout_offset += appended.rfind(b"\n") + 1
 
     def _finish_print(self, index: int, start_ns: int) -> None:
         """The body ended (done pin): END_PRINT, if any, runs to the end of
