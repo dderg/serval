@@ -1504,6 +1504,52 @@ fn a_drain_declares_the_park_after_its_last_segment() {
     );
 }
 
+#[test]
+fn a_chain_swap_after_a_drain_leaves_the_stream_parked() {
+    let pa_with_kernel = |k| AxisChainSet {
+        chains: vec![
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            e_chain(Some(k), 0.005),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+    let mut pipeline = Pipeline::new(cfg(), pa_with_kernel(0.05), vec![0.0; 4], 0.0);
+    let mut items = Vec::new();
+    let mut collect = |item| {
+        items.push(item);
+        true
+    };
+    for input in [
+        line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0).into(),
+        StreamInput::Drain,
+        StreamInput::Control(Control::SetAxisChains(pa_with_kernel(0.04))),
+    ] {
+        assert!(pipeline.feed(input, &mut collect));
+    }
+
+    let last_segment = items
+        .iter()
+        .rposition(|item| matches!(item, TrajectoryItem::Seg(_)))
+        .expect("the move dispatched segments");
+    assert!(
+        items[last_segment..]
+            .iter()
+            .any(|item| matches!(item, TrajectoryItem::Parked)),
+        "the swap's settle hold must end parked, or the move after an idle gap \
+         underruns (#929): {:?}",
+        items[last_segment..]
+            .iter()
+            .map(|item| match item {
+                TrajectoryItem::Seg(seg) => format!("Seg[{:.6}, {:.6}]", seg.t_start, seg.t_end),
+                TrajectoryItem::Parked => "Parked".to_string(),
+                TrajectoryItem::Control(_) => "Control".to_string(),
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
 fn sampled_planar_path_length(segs: &[ContinuousSegment]) -> f64 {
     const SAMPLES_PER_SEG: usize = 2000;
     let mut length = 0.0;
