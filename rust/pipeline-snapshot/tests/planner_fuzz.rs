@@ -415,7 +415,7 @@ proptest! {
     #![proptest_config(fresh_seed_config())]
 
     #[test]
-    #[ignore = "#895 #896 #897 #898 #885: crawl valley sides and steps, and follower sources, fail on draws of this space"]
+    #[ignore = "#895 #885: crawl sides past the guard's bound, and follower sources, fail on draws of this space"]
     fn an_advanced_extruder_plans_print_like_streams(
         printer in advanced_printer_strategy(),
         ratio in 0.02..0.06_f64,
