@@ -339,13 +339,16 @@ impl CellTrack {
         }
         self.stored(n - 1)
             .map(|cell| cell.anchor_next(n - 1))
-            .or_else(|| {
-                let index = self.anchors.partition_point(|anchor| anchor.cell < n);
-                self.anchors
-                    .get(index)
-                    .filter(|anchor| anchor.cell == n)
-                    .copied()
-            })
+            .or_else(|| self.kept_anchor(n))
+    }
+
+    /// The anchor kept at cell `n`, where the scan anchored one.
+    fn kept_anchor(&self, n: i64) -> Option<Anchor> {
+        let index = self.anchors.partition_point(|anchor| anchor.cell < n);
+        self.anchors
+            .get(index)
+            .filter(|anchor| anchor.cell == n)
+            .copied()
     }
 
     /// The last anchor at or before cell `n`.
@@ -414,9 +417,13 @@ impl<'a> TrackView<'a> {
 
     fn fast(&self, n: i64) -> bool {
         self.assert_tracked(n);
-        self.track
-            .stored(n)
-            .map_or_else(|| self.replayed(n).fast, |cell| cell.fast)
+        if let Some(cell) = self.track.stored(n) {
+            return cell.fast;
+        }
+        if let Some(anchor) = self.track.kept_anchor(n + 1) {
+            return anchor.fast_before;
+        }
+        self.replayed(n).fast
     }
 
     /// The sums through the cell before `n`, a tracked cell or the one

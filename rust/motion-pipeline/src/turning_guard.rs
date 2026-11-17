@@ -54,6 +54,12 @@ const BACKOFF_AIM: f64 = 0.98;
 /// stands even with every held move at it ([`TurningGuard::emittable`]).
 const SCALE_FLOOR: f64 = 1.0 / 32.0;
 const Z_AXIS: usize = 2;
+/// How many of [`window_cells`] the memos of shaped samples and shadows
+/// keep: a back-off re-checks its moves from their start and rescans from
+/// the move before, and on a zigzag of 0.8 s strokes that reads up to 5 s
+/// of held motion again, which the memos then hold instead of convolving
+/// it anew.
+const MEMO_WINDOWS: i64 = 16;
 
 /// Holds the advance's turning demand within the extruder's acceleration
 /// limit on kernel-free followers, slowing only where it binds.
@@ -387,7 +393,7 @@ impl TurningGuard {
         let h = grid_step(&followers);
         let window = window_cells(span, h);
         for (_, follower) in &mut followers {
-            *follower.samples.get_mut() = GridMemo::within(window);
+            *follower.samples.get_mut() = GridMemo::within(MEMO_WINDOWS * window);
         }
         Self {
             valleys: Valleys {
@@ -405,7 +411,7 @@ impl TurningGuard {
             history: VecDeque::new(),
             emitted: VecDeque::new(),
             grid: RefCell::new(PlannedGrid::new(h)),
-            shadows: RefCell::new(GridMemo::within(window)),
+            shadows: RefCell::new(GridMemo::within(MEMO_WINDOWS * window)),
             fine_grids: std::array::from_fn(|level| {
                 RefCell::new(PlannedGrid::new(h / zoom_scale(level) as f64))
             }),
@@ -651,7 +657,9 @@ impl TurningGuard {
             };
             let fit = self.valleys.fit;
             let rests = bounds.speed.1 == 0.0;
-            if bounds.speed.0 < crawl_speed && !rests {
+            let crawling = bounds.speed.0 < crawl_speed && !rests;
+            let bounds_a_run = crawling != self.valleys.run.is_some();
+            if crawling {
                 if self.valleys.run.is_none() {
                     self.valleys.run = Some(n);
                     self.valleys.run_scan = RunScan::default();
@@ -662,8 +670,9 @@ impl TurningGuard {
                     return Some(binding);
                 }
             }
+            let anchored = bounds_a_run || n.rem_euclid(window) == 0;
             let track = &mut self.valleys.track;
-            track.push(n, bounds, (h, fit), n.rem_euclid(window) == 0);
+            track.push(n, bounds, (h, fit), anchored);
             track.store_last(window);
             self.valleys.scanned += 1;
         }
@@ -1562,12 +1571,12 @@ impl TurningGuard {
             emitted_before + entries.timing.partition_point(|timing| timing.t1() < from)
         };
         let lo = before_from.saturating_sub(1);
+        let tail = self.emitted.len();
         let mut spans = self
             .emitted
-            .iter()
+            .range(lo.min(tail)..)
             .map(|emitted| &emitted.spans)
-            .chain(&entries.spans)
-            .skip(lo);
+            .chain(&entries.spans[lo.saturating_sub(tail)..]);
         let head = spans
             .next()
             .expect("a cell after the first move's start reads a move");
@@ -1596,12 +1605,13 @@ impl TurningGuard {
             .iter()
             .take_while(|timing| timing.t0 < to)
             .map(|timing| timing.accel);
+        let emitted_from = self
+            .history
+            .partition_point(|summary| summary.t1 <= from);
         let emitted = self
             .history
-            .iter()
-            .rev()
-            .take_while(|summary| summary.t1 > from)
-            .filter(|summary| summary.t0 < to)
+            .range(emitted_from..)
+            .take_while(|summary| summary.t0 < to)
             .map(|summary| summary.accel);
         held.chain(emitted).fold([0.0; 3], |acc, accel| {
             std::array::from_fn(|axis| acc[axis].max(accel[axis]))
