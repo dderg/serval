@@ -35,14 +35,25 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
 
-# Heavy jobs queue for one of SERVAL_SLOTS machine-wide slots (scripts/slots.py):
-# agents sharing the box stacked builds and tests to load 25-60, which timed out
-# nextest and distorted benchmarks. Cheap invocations and CI runners skip it.
+# Heavy jobs queue for one of SERVAL_SLOTS machine-wide slots (scripts/slots.py)
+# and run in their own memory-capped systemd user scope: agents sharing the box
+# stacked builds and tests to load 25-60, which timed out nextest and distorted
+# benchmarks, and a runaway job in the login session scope got the whole session
+# killed by systemd-oomd. Cheap invocations and CI runners skip it.
+slot_kind() {
+    case "$1" in
+        rust-fuzz) echo sweep ;;
+        sim-e2e) echo sim ;;
+        *) echo build ;;
+    esac
+}
 case "${1:-}" in
     install-hooks|-h|--help|help) ;;
     *)
         if [ -z "${SERVAL_SLOT_HELD:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI_NO_SLOT:-}" ]; then
-            exec python3 "$ROOT/scripts/slots.py" run -- "$0" "$@"
+            job_name="${1:-all}"
+            case "$job_name" in -v|--verbose) job_name="${2:-all}" ;; esac
+            exec python3 "$ROOT/scripts/slots.py" run --kind "$(slot_kind "$job_name")" -- "$0" "$@"
         fi
         ;;
 esac
