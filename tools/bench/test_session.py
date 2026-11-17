@@ -46,12 +46,19 @@ class InlineRequests:
 
 class Printer:
     def __init__(
-        self, clock: Clock, file_size: int, print_s: float, read_ahead: float
+        self,
+        clock: Clock,
+        file_size: int,
+        print_s: float,
+        read_ahead: float,
+        reconnect_s: float,
     ):
         self.clock = clock
         self.file_size = file_size
         self.print_s = print_s
         self.read_ahead = read_ahead
+        self.reconnect_s = reconnect_s
+        self.ready_at = START
         self.klippy = "ready"
         self.state = "standby"
         self.started = 0.0
@@ -59,6 +66,8 @@ class Printer:
 
     def perform(self, action, _remote_name) -> None:
         self.performed.append((action.act, self.clock.now))
+        if action.act is Act.START_PRINT and self.klippy != "ready":
+            raise urllib.error.URLError(f"HTTP 400: klippy {self.klippy}")
         transitions = {
             Act.START_PRINT: ("ready", "printing"),
             Act.PAUSE: ("ready", "paused"),
@@ -66,15 +75,20 @@ class Printer:
             Act.CANCEL: ("ready", "cancelled"),
             Act.EMERGENCY_STOP: ("shutdown", "error"),
             Act.FIRMWARE_RESTART: ("ready", "standby"),
+            Act.HOST_RESTART: ("startup", "standby"),
         }
         self.klippy, self.state = transitions[action.act]
         if action.act is Act.START_PRINT:
             self.started = self.clock.now
+        if action.act is Act.HOST_RESTART:
+            self.ready_at = self.clock.now + self.reconnect_s
 
     def sample(self) -> dict:
         elapsed = self.clock.now - self.started
         if self.state == "printing" and elapsed >= self.print_s:
             self.state = "complete"
+        if self.klippy == "startup" and self.clock.now >= self.ready_at:
+            self.klippy = "ready"
         printing = self.state == "printing"
         read = min(1.0, self.read_ahead * elapsed / self.print_s)
         read = read if printing else 0
@@ -111,11 +125,12 @@ def bench(monkeypatch):
         print_s: float = PRINT_S,
         perform=None,
         read_ahead: float = READ_AHEAD,
+        reconnect_s: float = 0.0,
     ):
         scenario = SCENARIO_BY_NAME[name]
         lines = scenario.gcode.lines()
         size = len(("\n".join(lines) + "\n").encode())
-        printer = Printer(clock, size, print_s, read_ahead)
+        printer = Printer(clock, size, print_s, read_ahead, reconnect_s)
         monkeypatch.setattr(session, "perform", perform or printer.perform)
         monkeypatch.setattr(session, "sample", printer.sample)
         markers = session.marker_offsets(scenario, lines)
@@ -148,7 +163,7 @@ def test_a_scenario_run_keeps_its_session_in_run_json(
 ):
     scenario = SCENARIO_BY_NAME["cancel_plain"]
     size = len(("\n".join(scenario.gcode.lines()) + "\n").encode())
-    printer = Printer(bench.clock, size, PRINT_S, READ_AHEAD)
+    printer = Printer(bench.clock, size, PRINT_S, READ_AHEAD, 0.0)
     monkeypatch.setattr(session, "perform", printer.perform)
     monkeypatch.setattr(session, "sample", printer.sample)
     run_dir = tmp_path / "run"
@@ -187,6 +202,33 @@ def test_the_next_print_starts_after_the_first_ends(bench):
         "error": None,
     }
     assert bench.scripts == list(session.POST_CHECK)
+
+
+BENCH_RECONNECT_S = 19.6
+
+
+def test_the_next_print_after_a_host_restart_waits_for_klippy_ready(bench):
+    record, printer, _ = bench("host_restart", reconnect_s=BENCH_RECONNECT_S)
+    _, second = printer.times(Act.START_PRINT)
+    (restarted,) = printer.times(Act.HOST_RESTART)
+    ready = next(
+        s["t"]
+        for s in record["samples"]
+        if s["t"] > restarted and s["klippy"] == "ready"
+    )
+    assert ready >= restarted + BENCH_RECONNECT_S
+    assert second == ready + NEXT_PRINT_AFTER_S
+    assert all(action["ok"] for action in record["actions"])
+
+
+def test_klippy_not_ready_within_its_bound_after_a_print_end_fails(bench):
+    bound = session_scenarios.KLIPPY_READY_AFTER_PRINT_END_S
+    with pytest.raises(run.BenchError, match="klippy ready after the print"):
+        bench("host_restart", reconnect_s=bound.limit + 1.0)
+    assert [a["act"] for a in bench.record["actions"]] == [
+        "start_print",
+        "host_restart",
+    ]
 
 
 def test_actions_after_the_previous_one_wait_their_delay(bench):
