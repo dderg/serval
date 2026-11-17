@@ -115,6 +115,7 @@ def test_only_event_logs_written_since_the_start_are_listed(
         f"{pi.PI_EVENTS}/host-rust.jsonl.1",
     ]
 
+
 def test_an_ssh_that_never_reached_the_pi_is_retried(monkeypatch):
     run, calls = _ssh_results((255, UNRESOLVED), (0, ""))
     monkeypatch.setattr(pi.subprocess, "run", run)

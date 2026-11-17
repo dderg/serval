@@ -182,6 +182,7 @@ def test_a_run_no_event_log_was_written_in_gets_an_empty_events_dir(
     assert copied == []
     assert (tmp_path / "events").is_dir()
 
+
 def test_each_requested_recording_gets_its_own_pi_directory():
     assert run.recordings(tap=False, dispatch_record=False) == {}
     assert run.recordings(tap=True, dispatch_record=True) == {
