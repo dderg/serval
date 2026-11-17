@@ -12,7 +12,9 @@
 #   SIM_IMAGE_ARCHIVE=f.tar.zst ./run.sh test         # load it instead of building
 #   ./run.sh serve                    # long-lived printer for Moonraker
 #   ./run.sh shell                    # bash inside the image
-#   ./run.sh --branch main            # build+run a specific branch
+#   ./run.sh --branch main            # build+run a specific branch, its own tools/sim included
+#   ./run.sh test --branch main --overlay-sim-tools
+#                                     # main with this worktree's tools/sim (named in banner, summary, tag)
 #   ./run.sh --no-cache               # force a full rebuild
 #   ./run.sh --privileged             # SCHED_FIFO for jitter-sensitive runs
 #   SIM_JITTER=3 ./run.sh test        # share a cpuset with 3 bursty CPU burners
@@ -93,6 +95,7 @@ while True:
 DOCKER_BUILD_ARGS=()
 KEEP_LOGS=""
 VERBOSE=""
+OVERLAY_SIM_TOOLS=""
 
 case "${1:-}" in
     test|serve|shell|save-image|fuzz)
@@ -114,6 +117,10 @@ while [[ $# -gt 0 ]]; do
         --branch|-b)
             BRANCH="$2"
             shift 2
+            ;;
+        --overlay-sim-tools)
+            OVERLAY_SIM_TOOLS=1
+            shift
             ;;
         --gcode|-g)
             GCODE="$2"
@@ -152,11 +159,44 @@ done
 BUILD_BRANCH="${BRANCH:-$(basename "$REPO_ROOT")}"
 IMAGE_TAG="kalico-sim-$(echo "${BUILD_BRANCH//\//-}" | tr '[:upper:]' '[:lower:]')"
 
+if [[ -n "$OVERLAY_SIM_TOOLS" && -z "$BRANCH" ]]; then
+    echo "run.sh: --overlay-sim-tools puts this worktree's tools/sim on --branch's tree; it needs --branch" >&2
+    exit 2
+fi
+
+# A run quoted as "X fails" must have run X's harness, shims and tests: #934
+# reported main failing on another branch's libvtime, overlaid unannounced.
+SIM_TOOLS_SOURCE=""
+SIM_TOOLS_DIFF=()
+if [[ -n "$BRANCH" ]]; then
+    BRANCH_SHA="$(git -C "$MAIN_REPO" rev-parse --short "$BRANCH^{commit}")"
+    SIM_TOOLS_SOURCE="$BRANCH @ $BRANCH_SHA"
+fi
+if [[ -n "$OVERLAY_SIM_TOOLS" ]]; then
+    sim_head="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+    [[ -n "$(git -C "$REPO_ROOT" status --porcelain -- tools/sim)" ]] && sim_head+=" +dirty"
+    mapfile -t SIM_TOOLS_DIFF < <(
+        git -C "$REPO_ROOT" diff --name-only "$BRANCH" -- tools/sim
+        git -C "$REPO_ROOT" ls-files --others --exclude-standard -- tools/sim
+    )
+    differ="${#SIM_TOOLS_DIFF[@]} files differ"
+    [[ ${#SIM_TOOLS_DIFF[@]} -eq 1 ]] && differ="1 file differs"
+    SIM_TOOLS_SOURCE="OVERLAID from $REPO_ROOT @ $sim_head, $differ from $BRANCH"
+    IMAGE_TAG+=".sim-tools-$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]')"
+fi
+report_sim_tools() {
+    [[ -z "$SIM_TOOLS_SOURCE" ]] || echo "${1:-}tools/sim: $SIM_TOOLS_SOURCE"
+}
+
 echo "=== Kalico Simulator ==="
 echo "  Mode:      $MODE"
 echo "  Branch:    ${BUILD_BRANCH}"
 echo "  Image:     $IMAGE_TAG"
 [[ -n "$KEEP_LOGS" ]] && echo "  Logs:      $KEEP_LOGS"
+report_sim_tools "  "
+for file in ${SIM_TOOLS_DIFF[@]+"${SIM_TOOLS_DIFF[@]}"}; do
+    echo "             $file"
+done
 echo ""
 
 if [[ -z "$BRANCH" ]]; then
@@ -220,10 +260,9 @@ if [[ -n "$BRANCH" ]]; then
     BUILD_CTX="$(mktemp -d "${TMPDIR:-/tmp}/kalico-sim-ctx.XXXXXX")"
     echo "Extracting branch '$BRANCH' to $BUILD_CTX ..."
     (cd "$MAIN_REPO" && git archive "$BRANCH") | tar -x -C "$BUILD_CTX"
-    # Overlay current simulator tools from the worktree so local edits to
-    # run.sh / Dockerfile / configs are tested without committing.
-    mkdir -p "$BUILD_CTX/tools/sim"
-    cp -a "$SCRIPT_DIR"/. "$BUILD_CTX/tools/sim/"
+    if [[ -n "$OVERLAY_SIM_TOOLS" ]]; then
+        cp -a "$SCRIPT_DIR"/. "$BUILD_CTX/tools/sim/"
+    fi
     provide_image "$BUILD_CTX" "$BUILD_CTX/tools/sim/Dockerfile"
 else
     provide_image "$REPO_ROOT" "$SCRIPT_DIR/Dockerfile"
@@ -281,6 +320,7 @@ case "$MODE" in
             docker run --rm -v "$KEEP_LOGS:/sim-logs" --entrypoint chown \
                 "$IMAGE_TAG" -R "$(id -u):$(id -g)" /sim-logs >/dev/null 2>&1 || true
         fi
+        report_sim_tools
         exit "$rc"
         ;;
     fuzz)
@@ -305,6 +345,7 @@ case "$MODE" in
             docker run --rm -v "$FUZZ_ROOT:$FUZZ_ROOT" --entrypoint chown \
                 "$IMAGE_TAG" -R "$(id -u):$(id -g)" "$FUZZ_ROOT" >/dev/null 2>&1 || true
         fi
+        report_sim_tools
         exit "$rc"
         ;;
     serve)
