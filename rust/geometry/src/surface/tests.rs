@@ -577,7 +577,11 @@ fn the_fade_leaves_and_reaches_its_band_edges_flat() {
     let fade = Fade::new(1.0, 10.0, 0.15).unwrap();
     let inside = 1e-9;
     for z in [1.0 + inside, 10.0 - inside] {
-        assert!(fade.dfactor(z).abs() < 1e-9, "dfactor({z}) = {}", fade.dfactor(z));
+        assert!(
+            fade.dfactor(z).abs() < 1e-9,
+            "dfactor({z}) = {}",
+            fade.dfactor(z)
+        );
     }
     let steepest = fade.dfactor(5.5);
     assert!(

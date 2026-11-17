@@ -45,8 +45,7 @@ pub use step_capacity::{FollowerStepLoad, McuStepLoad, StepCapacity, StepCapacit
 pub use space::{GcodePos, MachinePos};
 pub use surface::{
     FADE_FACTOR_IN_BAND, Fade, MeshActivationError, MeshGrid, MeshGridSpec, MeshPatch, PatchAxis,
-    ProbedMesh,
-    SurfaceBounds, SurfaceContinuity, SurfaceError, SurfaceSample, SurfaceTransform,
+    ProbedMesh, SurfaceBounds, SurfaceContinuity, SurfaceError, SurfaceSample, SurfaceTransform,
     SurfaceTransition, SurfaceTransitionError,
 };
 pub use velocity::{

@@ -43,6 +43,7 @@ def _fade_factor(z):
         return 1.0 - t * t * (3.0 - 2.0 * t)
     return 1.0
 
+
 def _gcode_z_in_band(machine_z, mesh_z):
     """The gcode Z inside the fade band whose warp `z + fade(z)*mesh_z`
     lands on `machine_z`, by bisection: the C1 fade has no closed-form
@@ -56,7 +57,6 @@ def _gcode_z_in_band(machine_z, mesh_z):
             below = middle
         else:
             above = middle
-
 
 
 def _settled_steps(world):

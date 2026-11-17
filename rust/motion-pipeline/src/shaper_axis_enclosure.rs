@@ -18,9 +18,8 @@ use std::ops::{Add, Mul, Neg};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Arc as PathArc, Clothoid, Segment};
 use geometry::{
-    FADE_FACTOR_IN_BAND, FollowerDemand, LawSegment, MeshPatch, PatchAxis, RailPair,
-    RailPairShape, ScalarLaw,
-    SurfaceTransform,
+    FADE_FACTOR_IN_BAND, FollowerDemand, LawSegment, MeshPatch, PatchAxis, RailPair, RailPairShape,
+    ScalarLaw, SurfaceTransform,
 };
 use nurbs::bezier::BezierPiece;
 use nurbs::bezier::extract_bezier_pieces;
@@ -642,12 +641,10 @@ fn fade_band_models(
     let inverse_band = Ball::rounded(1.0 / (end - start), 2);
     let progress = z.add_ball(Ball::exact(-start)).scale(inverse_band);
     let horner = |coefficients: &[f64]| {
-        coefficients
-            .iter()
-            .rev()
-            .fold(TaylorModel::constant(Ball::exact(0.0)), |sum, &coefficient| {
-                sum.mul(&progress).add_ball(Ball::exact(coefficient))
-            })
+        coefficients.iter().rev().fold(
+            TaylorModel::constant(Ball::exact(0.0)),
+            |sum, &coefficient| sum.mul(&progress).add_ball(Ball::exact(coefficient)),
+        )
     };
     let [c0, c1, c2, c3] = FADE_FACTOR_IN_BAND;
     (

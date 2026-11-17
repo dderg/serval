@@ -53,11 +53,9 @@ fn scenario_file(seed: u32, name: &str) -> String {
 }
 
 fn replays_over_its_mesh(seed: u32) {
-    let planner = planner_config::from_doc::planner_config_from_text(&scenario_file(
-        seed,
-        "printer.cfg",
-    ))
-    .expect("the scenario's planner config");
+    let planner =
+        planner_config::from_doc::planner_config_from_text(&scenario_file(seed, "printer.cfg"))
+            .expect("the scenario's planner config");
     let request: BedMesh = serde_json::from_str(&scenario_file(seed, "bed_mesh.json"))
         .expect("the scenario's mesh parses");
     let mesh = Arc::new(request.activate());
@@ -79,7 +77,10 @@ fn replays_over_its_mesh(seed: u32) {
         true
     };
     for input in inputs {
-        assert!(pipeline.feed(input, &mut count), "the pipeline refused an input");
+        assert!(
+            pipeline.feed(input, &mut count),
+            "the pipeline refused an input"
+        );
     }
     assert!(pipeline.finish(&mut count), "the pipeline failed to drain");
     assert!(emitted > 0, "the replay emitted no motion");
