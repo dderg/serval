@@ -144,3 +144,21 @@ fn an_unshaped_travel_into_a_reversal_plans() {
     std::fs::write(&config, UNSHAPED_PRINTER).expect("temp config");
     plans_within_the_extruder_limits("travel into a reversal", TRAVEL_INTO_A_REVERSAL, &config);
 }
+
+/// Lines 3597-3723 of the dense print on the Trident ramp profile: the
+/// first extrusion after a prime at rest. The prime's rest valley rebuilt
+/// the lead over a 0.154 mm after side, asking 4.1 kmm/s² of the extruder
+/// on top of the 17.5 kmm/s² the leaders' own turning asked there: 20250
+/// against 20050.
+#[test]
+fn an_extrusion_after_a_prime_plans_on_the_trident_ramp_profile() {
+    let gcode = std::fs::read_to_string(source_tree::repo_file(
+        "rust/motion-core/tests/gcode/dense_prime_rest_side.gcode",
+    ))
+    .expect("the dense print stretch");
+    plans_within_the_extruder_limits(
+        "dense prime rest side",
+        &gcode,
+        &source_tree::repo_file("tools/bench/configs/trident_ramp.cfg"),
+    );
+}
