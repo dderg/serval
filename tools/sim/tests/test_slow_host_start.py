@@ -16,6 +16,7 @@ import pathlib
 import pytest
 
 from tools.sim import configs
+from tools.sim.world import SimError
 
 pytestmark = pytest.mark.needs_elf
 
@@ -142,6 +143,11 @@ def _events(world) -> list[dict]:
     return events
 
 
+def _fatal(world) -> list[str]:
+    names = {event.get("event") for event in _events(world)}
+    return [name for name in FATAL_EVENTS if name in names]
+
+
 def _first_step_after(control, issued_s: float) -> float:
     """Seconds from `issued_s` to the first X/Y motor step since the step
     counters were reset."""
@@ -185,17 +191,26 @@ def test_a_slow_section_starts_on_a_pi(sim_world, monkeypatch, row):
 
     issued_s = world.vclock.now_ns() / NS_PER_S
     world.gcode_ok(f"SDCARD_PRINT_FILE FILENAME={gcode.name}")
-    world.wait_until(
-        lambda: (
-            world.shutdown_line() is not None
-            or _played_since_first_step(control, world.vclock.now_ns())
-            >= played_s
-        ),
-        timeout=FIRST_STEP_TIMEOUT_S + played_s,
-        what=f"{played_s:.1f}s of the print played",
-        poll=SHUTDOWN_POLL_S,
-    )
+    try:
+        world.wait_until(
+            lambda: (
+                world.klippy_proc.poll() is not None
+                or world.shutdown_line() is not None
+                or _played_since_first_step(control, world.vclock.now_ns())
+                >= played_s
+            ),
+            timeout=FIRST_STEP_TIMEOUT_S + played_s,
+            what=f"{played_s:.1f}s of the print played",
+            poll=SHUTDOWN_POLL_S,
+        )
+    except SimError:
+        assert not _fatal(world), world.log_tail()[-3000:]
+        raise
 
+    assert not _fatal(world), world.log_tail()[-3000:]
+    assert world.shutdown_line() is None, world.log_tail()[-3000:]
+    names = [event.get("event") for event in _events(world)]
+    assert "host_compute_charged" in names, "the pipeline ran uncharged"
     with (world.log_dir / "start_latency.jsonl").open("a") as stream:
         stream.write(
             json.dumps(
@@ -206,11 +221,6 @@ def test_a_slow_section_starts_on_a_pi(sim_world, monkeypatch, row):
             )
             + "\n"
         )
-    names = [event.get("event") for event in _events(world)]
-    assert "host_compute_charged" in names, "the pipeline ran uncharged"
-    fatal = [name for name in FATAL_EVENTS if name in names]
-    assert not fatal, world.log_tail()[-3000:]
-    assert world.shutdown_line() is None, world.log_tail()[-3000:]
     state = world.status({"print_stats": None})["print_stats"]["state"]
     assert state == "printing", state
     world.gcode_ok("CANCEL_PRINT", timeout=PRINT_TIMEOUT_S)
