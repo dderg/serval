@@ -967,15 +967,39 @@ fn materialize_source_axis(
     Ok(ContinuousAxis::Spline(Arc::new(curve)))
 }
 
+/// The share of `1/width²` a kernel's slope at a support edge stays under
+/// where it vanishes but for its construction's rounding: the bell's
+/// measures ~1e-15 of it, the ZV, MZV and triangle kernels' 4 and more.
+const EDGE_SLOPE_ROUNDING_SHARE: f64 = 1e-6;
+
 /// What every seam of a convolved source's fit carries: velocity under a
-/// motor-side acceleration gain `k2`, which turns a source velocity step
-/// `Δv` at `b` into a motor-command velocity step `k2·Δv·k'` where a kernel
-/// edge of slope `k'` passes `b`; position otherwise.
+/// motor-side acceleration gain `k2` after a kernel whose support edges
+/// have a slope `k'`, which turns a source velocity step `Δv` at `b` into a
+/// motor-command velocity step `k2·Δv·k'` where an edge passes `b`;
+/// position otherwise.
 fn convolved_source_seams(chain: &CompiledChain) -> SeamContinuity {
-    match chain.trailing_transform() {
-        Some(ChainStage::DerivativeGains { k2, .. }) if *k2 != 0.0 => SeamContinuity::Velocity,
-        _ => SeamContinuity::Position,
+    let accel_gain = matches!(
+        chain.trailing_transform(),
+        Some(ChainStage::DerivativeGains { k2, .. }) if *k2 != 0.0
+    );
+    if accel_gain && chain.kernel().is_some_and(edges_have_slope) {
+        SeamContinuity::Velocity
+    } else {
+        SeamContinuity::Position
     }
+}
+
+fn edges_have_slope(kernel: &nurbs::algebra::PiecewisePolynomialKernel) -> bool {
+    let (lo, hi) = kernel.support();
+    let rounding = EDGE_SLOPE_ROUNDING_SHARE / ((hi - lo) * (hi - lo));
+    let slope_at = |piece: &BezierPiece, u: f64| {
+        let dx = u - piece.u_start;
+        (1..piece.coeffs.len())
+            .rev()
+            .fold(0.0, |acc, k| acc * dx + k as f64 * piece.coeffs[k])
+    };
+    let (first, last) = (&kernel.pieces[0], &kernel.pieces[kernel.pieces.len() - 1]);
+    slope_at(first, lo).abs() > rounding || slope_at(last, hi).abs() > rounding
 }
 
 /// Fits the changed sources of every segment in `segments` on the calling
