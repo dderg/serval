@@ -507,12 +507,13 @@ impl Ingress {
     /// materialize the brake-to-rest and the drained trajectory beats the
     /// playhead to the pump.
     fn drain_or_runway(&mut self, _: InboxFoundEmpty) -> Option<Duration> {
+        let now = Instant::now();
         let (runway_s, at_rest) = {
             let anchor = self.timeline.anchor.lock_ok();
             (self.timeline.frontier.runway_secs(), anchor.is_parked())
         };
-        if let IdleVerdict::Wait(wait) = self.pacer.idle_verdict(runway_s, at_rest, Instant::now())
-        {
+        let ahead_s = self.links.ahead_secs(runway_s, now);
+        if let IdleVerdict::Wait(wait) = self.pacer.idle_verdict(ahead_s, at_rest, now) {
             return Some(wait);
         }
         #[cfg(test)]

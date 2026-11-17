@@ -142,11 +142,8 @@ impl IntakeGate {
     /// on later moves.
     fn queued_secs(&self) -> f64 {
         let inbox_s = self.inbox_ns.load(Ordering::Acquire) as f64 / NS_PER_S;
-        let held_s = self
-            .links
-            .set_off_hold()
-            .map_or(0.0, |hold| hold.ahead_secs(Instant::now()));
-        self.frontier.runway_secs() + held_s + inbox_s
+        let runway_s = self.frontier.runway_secs();
+        self.links.ahead_secs(runway_s, Instant::now()) + inbox_s
     }
 
     /// Planned motion the pump has not taken yet: it plays once the

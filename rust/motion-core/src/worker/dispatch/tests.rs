@@ -261,3 +261,27 @@ fn a_held_set_off_counts_against_the_intake_cap() {
         "a set-off {PRIMED_START:?} from starting held {REST_HOLD_S}s the intake did not count"
     );
 }
+
+/// A stream parked on a stop it has not reached sets off again from where
+/// its committed runway ends: that wait is the runway itself, counted once.
+#[test]
+fn a_set_off_behind_a_playing_runway_counts_that_runway_once() {
+    const PARKED_RUNWAY: Duration = Duration::from_millis(1000);
+    let (mut dispatcher, links) = dispatcher();
+    let frontier = Arc::new(super::super::CommittedFrontier::default());
+    frontier.advance_to(Instant::now() + PARKED_RUNWAY);
+    let intake = super::super::intake_gate::IntakeGate::new(frontier, Arc::clone(&links));
+    let room_s = intake.cap_secs() - PARKED_RUNWAY.as_secs_f64() - REST_HOLD_S;
+    intake.enter(((room_s - 0.1) * 1e9) as u64);
+
+    let mut sink = Recorder {
+        starts_in: PARKED_RUNWAY,
+        ..Recorder::default()
+    };
+    dispatcher.feed(TrajectoryItem::Seg(segment(0.0, REST_HOLD_S)), &mut sink);
+
+    assert!(
+        intake.admits(),
+        "the {PARKED_RUNWAY:?} runway a held set-off waits behind was counted twice"
+    );
+}

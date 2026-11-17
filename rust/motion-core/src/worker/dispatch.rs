@@ -104,9 +104,13 @@ pub(crate) struct SetOffHold {
 }
 
 impl SetOffHold {
-    /// The held motion that stands ahead of the playhead at `now`.
-    pub(crate) fn ahead_secs(&self, now: Instant) -> f64 {
-        self.starts.saturating_duration_since(now).as_secs_f64() + self.held_s
+    /// The motion standing ahead of the playhead at `now` once the held
+    /// motion counts: it starts at `starts`, behind any committed `runway_s`
+    /// still playing (a stream parked on a stop it has not reached yet sets
+    /// off again from its end), and runs `held_s`.
+    pub(crate) fn ahead_secs(&self, runway_s: f64, now: Instant) -> f64 {
+        let starts_in_s = self.starts.saturating_duration_since(now).as_secs_f64();
+        runway_s.max(starts_in_s) + self.held_s
     }
 }
 
@@ -146,6 +150,15 @@ impl WorkerLinks {
 
     pub(crate) fn set_off_hold(&self) -> Option<SetOffHold> {
         *self.set_off_hold.lock_ok()
+    }
+
+    /// The motion standing ahead of the playhead at `now`: the committed
+    /// `runway_s` and a held set-off. The intake bounds it and the pacer
+    /// waits on it alike, or the intake would refuse moves to a front the
+    /// pacer brakes for want of them.
+    pub(crate) fn ahead_secs(&self, runway_s: f64, now: Instant) -> f64 {
+        self.set_off_hold()
+            .map_or(runway_s, |hold| hold.ahead_secs(runway_s, now))
     }
 }
 
