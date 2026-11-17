@@ -286,7 +286,8 @@ impl CellCheck<'_> {
     /// advance reads `Φ·σ⃛` with the weight `Φ` anywhere in `[0, 1]`, and
     /// the room the side's rebuild needs is added; a binding there backs
     /// off the moves the side reads too, whose acceleration the rebuild
-    /// grows with.
+    /// grows with. A side whose rebuild keeps the cell within the limit
+    /// adds none of its moves: scaling them cannot lower the demand.
     fn asks(
         &self,
         kernels: &FollowerKernels,
@@ -329,14 +330,16 @@ impl CellCheck<'_> {
                     0.0,
                 );
                 let shaped = (motion.speed_ceiling, motion.accel_ceiling);
-                let binding = side.binding_ask(
+                let Some(binding) = side.binding_ask(
                     (weighted, shaped),
                     valley_cell,
                     self.caps.max_accel_mm_s2,
                     self.track,
-                );
+                ) else {
+                    return (asked, window);
+                };
                 (
-                    binding.map_or(asked, |binding| asked.max(binding)),
+                    asked.max(binding),
                     (window.0.min(side.window.0), window.1.max(side.window.1)),
                 )
             },
