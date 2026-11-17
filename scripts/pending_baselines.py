@@ -85,7 +85,7 @@ def run(args: list[str], cwd: Path = ROOT, env: dict | None = None) -> str:
             *args[1:],
         ]
     heavy = (
-        slots.slot(label=" ".join(args)[:80])
+        slots.slot(slots.Kind.BUILD, label=" ".join(args)[:80])
         if args[0] in HEAVY
         else nullcontext()
     )
@@ -216,7 +216,7 @@ def sample_commit(sha: str) -> Path:
         return out
     ensure_commit(sha)
     with (
-        slots.slot(label=f"engine sample {short(sha)}"),
+        slots.slot(slots.Kind.BUILD, label=f"engine sample {short(sha)}"),
         commit_lock(SCRATCH_TREE),
     ):
         if (out / "meta.json").exists():

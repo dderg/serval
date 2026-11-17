@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import enum
 import fcntl
 import json
 import os
@@ -38,6 +39,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import job_scope
+from job_scope import Caps, CoreDumps
+
 DEFAULT_SLOTS = 3
 DEFAULT_TIMEOUT_SECONDS = 7200.0
 POLL_SECONDS = 1.0
@@ -46,6 +50,21 @@ STALL_SECONDS = 300.0
 ENV_SLOTS = "SERVAL_SLOTS"
 ENV_DIR = "SERVAL_SLOTS_DIR"
 ENV_HELD = "SERVAL_SLOT_HELD"
+MEMORY_CAP_EXIT = 99
+SESSION_RESERVE_GIB = 10
+
+
+class Kind(enum.Enum):
+    BUILD = "build"
+    SIM = "sim"
+    SWEEP = "sweep"
+
+
+CAPS = {
+    Kind.BUILD: Caps(high_gib=8, max_gib=12, swap_gib=2, cores=CoreDumps.KEEP),
+    Kind.SIM: Caps(high_gib=1, max_gib=2, swap_gib=1, cores=CoreDumps.KEEP),
+    Kind.SWEEP: Caps(high_gib=12, max_gib=14, swap_gib=2, cores=CoreDumps.DROP),
+}
 
 
 class SlotTimeout(RuntimeError):
@@ -68,7 +87,23 @@ def slot_count() -> int:
     count = int(os.environ.get(ENV_SLOTS, DEFAULT_SLOTS))
     if count < 1:
         raise ValueError(f"{ENV_SLOTS} must be at least 1, got {count}")
+    if not os.environ.get(job_scope.ENV_UNCAPPED):
+        check_caps_fit(count, ram_gib())
     return count
+
+
+def ram_gib() -> float:
+    pages = os.sysconf("SC_PHYS_PAGES")
+    return os.sysconf("SC_PAGE_SIZE") * pages / job_scope.GIB
+
+
+def check_caps_fit(count: int, ram: float) -> None:
+    worst = max(caps.max_gib + caps.swap_gib for caps in CAPS.values())
+    if count * worst > ram - SESSION_RESERVE_GIB:
+        raise ValueError(
+            f"{count} slots x {worst} GiB caps exceed {ram:.0f} GiB RAM less "
+            f"{SESSION_RESERVE_GIB} GiB for the session: lower {ENV_SLOTS}"
+        )
 
 
 def slots_dir() -> Path:
@@ -390,6 +425,7 @@ def acquire(
 
 @contextlib.contextmanager
 def slot(
+    kind: Kind,
     exclusive: bool = False,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     label: str = "",
@@ -405,16 +441,16 @@ def slot(
     lease = acquire(exclusive=exclusive, timeout=timeout, label=label)
     os.environ[ENV_HELD] = "1"
     try:
-        yield
+        with job_scope.capped(label or kind.value, CAPS[kind]):
+            yield
     finally:
         del os.environ[ENV_HELD]
         lease.release()
 
 
-def run(command: list[str], exclusive: bool, timeout: float) -> int:
-    with slot(
-        exclusive=exclusive, timeout=timeout, label=" ".join(command)[:80]
-    ):
+def run(command: list[str], kind: Kind, exclusive: bool, timeout: float) -> int:
+    label = " ".join(command)[:80]
+    with slot(kind, exclusive=exclusive, timeout=timeout, label=label):
         return subprocess.run(command).returncode
 
 
@@ -425,6 +461,9 @@ def main() -> int:
     )
     sub = parser.add_subparsers(dest="mode", required=True)
     runner = sub.add_parser("run")
+    runner.add_argument(
+        "--kind", required=True, choices=[kind.value for kind in Kind]
+    )
     runner.add_argument("--exclusive", action="store_true")
     runner.add_argument(
         "--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS
@@ -440,11 +479,25 @@ def main() -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("run needs a command after --")
-    return run(command, args.exclusive, args.timeout)
+    return run(command, Kind(args.kind), args.exclusive, args.timeout)
+
+
+def cli() -> int:
+    try:
+        return main()
+    except job_scope.MemoryCapKill as exc:
+        print(f"slots: {exc}", file=sys.stderr)
+        return MEMORY_CAP_EXIT
+    except (
+        SlotTimeout,
+        NestedExclusive,
+        NestedSlot,
+        SlotStall,
+        job_scope.NoUserManager,
+    ) as exc:
+        print(f"slots: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except (SlotTimeout, NestedExclusive, NestedSlot, SlotStall) as exc:
-        sys.exit(f"slots: {exc}")
+    sys.exit(cli())

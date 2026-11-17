@@ -403,7 +403,10 @@ def fit_audit(sha: str) -> dict | None:
     cached = AUDIT_DIR / f"{sha}.json"
     if cached.exists():
         return json.loads(cached.read_text())
-    with slots.slot(label="fit audit"), pending.commit_lock("audit-scratch"):
+    with (
+        slots.slot(slots.Kind.BUILD, label="fit audit"),
+        pending.commit_lock("audit-scratch"),
+    ):
         return fit_audit_locked(sha)
 
 

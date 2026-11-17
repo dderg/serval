@@ -20,6 +20,11 @@ JOB = (
 )
 
 
+@pytest.fixture(autouse=True)
+def uncapped(monkeypatch):
+    monkeypatch.setenv("SERVAL_SLOT_UNCAPPED", "1")
+
+
 def env(tmp_path, count):
     return {
         **os.environ,
@@ -35,6 +40,8 @@ def start(tmp_path, count, name, *flags, hold=HOLD_SECONDS):
             sys.executable,
             str(SCRIPT),
             "run",
+            "--kind",
+            "build",
             *flags,
             "--",
             sys.executable,
@@ -96,6 +103,8 @@ def test_the_commands_exit_status_is_returned(tmp_path):
             sys.executable,
             str(SCRIPT),
             "run",
+            "--kind",
+            "build",
             "--",
             sys.executable,
             "-c",
@@ -112,6 +121,8 @@ def test_waiting_past_the_timeout_fails_loudly(tmp_path):
             sys.executable,
             str(SCRIPT),
             "run",
+            "--kind",
+            "build",
             "--",
             sys.executable,
             "-c",
@@ -125,6 +136,8 @@ def test_waiting_past_the_timeout_fails_loudly(tmp_path):
             sys.executable,
             str(SCRIPT),
             "run",
+            "--kind",
+            "build",
             "--timeout",
             "0.3",
             "--",
@@ -150,7 +163,7 @@ def test_a_nested_job_inside_a_held_slot_does_not_take_another(
     monkeypatch.setenv("SERVAL_SLOTS_DIR", str(tmp_path / "slots"))
     monkeypatch.setenv("SERVAL_SLOTS", "1")
     monkeypatch.setenv("SERVAL_SLOT_HELD", "1")
-    with slots.slot(timeout=0.2):
+    with slots.slot(slots.Kind.BUILD, timeout=0.2):
         pass
 
 
@@ -160,6 +173,8 @@ def test_a_crashed_holder_frees_its_slot(tmp_path):
             sys.executable,
             str(SCRIPT),
             "run",
+            "--kind",
+            "build",
             "--",
             sys.executable,
             "-c",
@@ -175,6 +190,8 @@ def test_a_crashed_holder_frees_its_slot(tmp_path):
             sys.executable,
             str(SCRIPT),
             "run",
+            "--kind",
+            "build",
             "--timeout",
             "10",
             "--",
@@ -230,8 +247,8 @@ def test_a_nested_slot_in_the_holding_process_takes_no_second_slot(
     monkeypatch.setenv("SERVAL_SLOTS_DIR", str(tmp_path / "slots"))
     monkeypatch.setenv("SERVAL_SLOTS", "1")
     monkeypatch.delenv("SERVAL_SLOT_HELD", raising=False)
-    with slots.slot(timeout=5):
-        with slots.slot(timeout=0.3):
+    with slots.slot(slots.Kind.BUILD, timeout=5):
+        with slots.slot(slots.Kind.BUILD, timeout=0.3):
             pass
 
 
@@ -240,9 +257,9 @@ def test_an_exclusive_slot_inside_a_held_slot_fails_at_once(
 ):
     monkeypatch.setenv("SERVAL_SLOTS_DIR", str(tmp_path / "slots"))
     monkeypatch.delenv("SERVAL_SLOT_HELD", raising=False)
-    with slots.slot(timeout=5):
+    with slots.slot(slots.Kind.BUILD, timeout=5):
         with pytest.raises(slots.NestedExclusive):
-            with slots.slot(exclusive=True, timeout=5):
+            with slots.slot(slots.Kind.SWEEP, exclusive=True, timeout=5):
                 pass
 
 
@@ -250,7 +267,7 @@ BUILD_HOLDER = (
     "import pathlib, sys, time\n"
     "import pending_baselines as pending, slots\n"
     "ready, go = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
-    "with slots.slot(label='bench_compare build'):\n"
+    "with slots.slot(slots.Kind.BUILD, label='bench_compare build'):\n"
     "    ready.touch()\n"
     "    while not go.exists():\n"
     "        time.sleep(0.05)\n"
@@ -347,8 +364,8 @@ def test_a_child_that_lost_the_held_marker_fails_instead_of_queueing(tmp_path):
     inner = (
         "import os, subprocess, sys\n"
         "env = {k: v for k, v in os.environ.items() if k != 'SERVAL_SLOT_HELD'}\n"
-        f"cmd = [sys.executable, {str(SCRIPT)!r}, 'run', '--timeout', '5',\n"
-        "       '--', sys.executable, '-c', 'pass']\n"
+        f"cmd = [sys.executable, {str(SCRIPT)!r}, 'run', '--kind', 'build',\n"
+        "       '--timeout', '5', '--', sys.executable, '-c', 'pass']\n"
         "done = subprocess.run(cmd, env=env, capture_output=True, text=True)\n"
         "sys.stderr.write(done.stderr)\n"
         "sys.exit(done.returncode)\n"
@@ -358,6 +375,8 @@ def test_a_child_that_lost_the_held_marker_fails_instead_of_queueing(tmp_path):
             sys.executable,
             str(SCRIPT),
             "run",
+            "--kind",
+            "build",
             "--",
             sys.executable,
             "-c",
@@ -413,7 +432,7 @@ def test_the_engine_sample_takes_its_slot_before_the_scratch_lock(
 
     monkeypatch.setattr(pending, "CACHE", tmp_path)
     monkeypatch.setattr(pending, "ensure_commit", lambda sha: None)
-    monkeypatch.setattr(slots, "slot", lambda **_: record("slot"))
+    monkeypatch.setattr(slots, "slot", lambda *_, **__: record("slot"))
     monkeypatch.setattr(pending, "commit_lock", lambda name: record("lock"))
     monkeypatch.setattr(
         pending, "sample_commit_locked", lambda sha, out: order.append("work")
