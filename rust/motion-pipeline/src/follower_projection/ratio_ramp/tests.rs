@@ -1614,12 +1614,11 @@ fn a_crawl_lays_a_valley_where_the_guard_holds_the_follower_or_the_advance_would
     assert!(turnaround.needs_valley(&no_advance, read_ratio(0.0337)));
 }
 
-/// The ratios a crawl reads all at `ratio`, within its reach and past it.
+/// The ratios a crawl reads all at `ratio`, within its reach and smoothed.
 fn read_ratio(ratio: f64) -> CrawlRatios {
     CrawlRatios {
         in_reach: ratio,
         read: ratio,
-        reach: 1.0,
     }
 }
 
@@ -1650,27 +1649,21 @@ fn a_guarded_follower_lays_no_crawl_valley_where_it_extrudes_nothing() {
     assert!(turnaround.needs_valley(&guarded, read_ratio(0.0)));
 }
 
-/// #903: whether a guarded follower extrudes at a crawl reads the laid
-/// spans within the leaders' reach and a step window past it, as far as a
-/// capped step's ramp reaches the advance from.
+/// #903: whether a guarded follower extrudes at a crawl reads the ratio
+/// the smoothed advance table holds within the leaders' reach: an
+/// extrusion ending in a travel 1.2 mm before the crawl, its step ramped
+/// over 1 mm either side, still reaches a 0.3 mm reach, though no laid
+/// span within it extrudes; 1.5 mm past the step it does not.
 #[test]
-fn a_crawl_reads_the_ratio_a_step_window_past_its_reach() {
-    let (turn, reach) = (10.0, 1.2);
-    let window = geometry::crawl_step_window(reach);
-    let travel_then = |extrudes_from: f64| {
-        [(0.0, extrudes_from, 0.0), (extrudes_from, 20.0, 0.04)].map(|(s0, s1, ratio)| RatioSpan {
-            s0,
-            s1,
-            r0: ratio,
-            r1: ratio,
-            e0: 0.0,
-        })
-    };
-    let near = CrawlRatios::around(&travel_then(turn + reach + 0.5 * window), turn, reach);
+fn a_crawl_reads_the_ratio_a_ramp_carries_into_its_reach() {
+    let table: Table = vec![(10.0, 0.04, 0.04), (10.0, 0.0, 0.0)];
+    let state = smoothed(&table, cruise(length(&table)));
+    let tables = (state.spans.as_slice(), state.advance_spans.as_slice());
+    let near = CrawlRatios::around(&state.smoothing, tables, 11.2, 0.3);
     assert_eq!(near.in_reach, 0.0);
-    assert_eq!(near.read, 0.04);
-    let far = CrawlRatios::around(&travel_then(turn + reach + 1.5 * window), turn, reach);
-    assert_eq!(far.read, 0.0);
+    assert!(near.read > 0.0, "{near:?}");
+    let far = CrawlRatios::around(&state.smoothing, tables, 11.5, 0.3);
+    assert_eq!(far.read, 0.0, "{far:?}");
 }
 
 /// The P1 bowden kernel crawl of `voron_first_layers` at t≈63.92 s: read

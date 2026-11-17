@@ -3,8 +3,7 @@ use std::collections::VecDeque;
 use geometry::{
     ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE,
     RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
-    TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, crawl_step_window, leader_reach,
-    turns_around, valley_reach,
+    TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around, valley_reach,
 };
 
 use super::{
@@ -2230,9 +2229,15 @@ impl RatioSmoothing {
         if reach <= SPAN_MIN_LEN_MM {
             return;
         }
-        let ratios = CrawlRatios::around(tables.0, turn, reach);
+        self.refresh_clusters();
+        let ratios = CrawlRatios::around(self, tables, turn, reach);
         if !crossing.needs_valley(rule, ratios) {
-            if turn + ratios.decided_within(rule) > table_end {
+            let undecided = if guarded_by_the_turning_guard(rule) {
+                !self.reads_within(Table::Advance, turn + reach, table_end)
+            } else {
+                turn + reach > table_end
+            };
+            if undecided {
                 self.waiting_crawls.push((turn, crossing));
             }
             return;
@@ -3923,33 +3928,27 @@ impl Crossing {
     }
 }
 
-/// The ratios the advance may read around a crawl: the largest of the laid
-/// spans within the leaders' `reach` of it, and within that reach and a
-/// step window past it, as far as a ratio step's ramp reaches the advance
-/// from a step a crawl valley caps there ([`geometry::crawl_step_window`]).
+/// The ratios around a crawl: the largest of the laid spans within the
+/// leaders' `reach` of it, and the largest the smoothed advance table
+/// reads there ([`RatioSmoothing::peak_ratio_in`]), which a ratio step's
+/// ramp reaches from as far as its window: an extrusion ending in a
+/// travel just before a crawl still ramps its ratio across it.
 #[derive(Debug, Clone, Copy)]
 struct CrawlRatios {
     in_reach: f64,
     read: f64,
-    reach: f64,
 }
 
 impl CrawlRatios {
-    fn around(spans: &[RatioSpan], turn: f64, reach: f64) -> Self {
+    fn around(
+        smoothing: &RatioSmoothing,
+        (laid, advance): (&[RatioSpan], &[RatioSpan]),
+        turn: f64,
+        reach: f64,
+    ) -> Self {
         Self {
-            in_reach: peak_ratio_within(spans, turn, reach),
-            read: peak_ratio_within(spans, turn, reach + crawl_step_window(reach)),
-            reach,
-        }
-    }
-
-    /// How far past the crawl the spans decide whether `rule`'s follower
-    /// needs a valley there ([`Crossing::needs_valley`]).
-    fn decided_within(self, rule: &RatioRampRule) -> f64 {
-        if guarded_by_the_turning_guard(rule) {
-            self.reach + crawl_step_window(self.reach)
-        } else {
-            self.reach
+            in_reach: peak_ratio_within(laid, turn, reach),
+            read: smoothing.peak_ratio_in(Table::Advance, advance, turn - reach, turn + reach),
         }
     }
 }
