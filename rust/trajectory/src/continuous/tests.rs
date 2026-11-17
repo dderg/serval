@@ -2826,3 +2826,36 @@ fn a_surface_seam_lies_where_the_warped_z_leaves_the_mesh() {
 fn a_surface_seam_reads_the_phases_past_the_span_distance_origin() {
     assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(150.0));
 }
+
+#[test]
+fn a_surface_seam_in_the_rounding_gap_between_two_phases_is_located() {
+    let line = Segment::Line(Line::try_new([240.0, 150.0, 0.2], [300.0, 150.0, 0.2]).unwrap());
+    let edge_distance = 50.0;
+    let accel = 10_000.0;
+    let speed_up_dt = next_toward(0.1, 0.0);
+    let speed_up = LawSegment::new(0.0, speed_up_dt, 0.0, 0.0, ScalarLaw::ConstAccel { a0: accel });
+    let gap = edge_distance - speed_up.end_distance();
+    assert!(gap > 0.0, "the speed-up reaches {}", speed_up.end_distance());
+    let cruise_start = edge_distance + gap;
+    let cruise_speed = accel * speed_up_dt;
+    let cruise_dt = (60.0 - cruise_start) / cruise_speed;
+    let cruise = LawSegment::new(
+        speed_up_dt,
+        cruise_dt,
+        cruise_start,
+        cruise_speed,
+        ScalarLaw::ConstAccel { a0: 0.0 },
+    );
+    let span = AnalyticMoveSpan::try_new(
+        move_with(line, vec![]),
+        Arc::from([speed_up, cruise]),
+        0.0,
+        0.0,
+        speed_up_dt + cruise_dt,
+        Arc::from([240.0, 150.0, 0.2, 0.0]),
+        SurfaceMode::Variable(steep_mesh()),
+    )
+    .unwrap();
+
+    assert_one_seam_where_the_warped_z_steps(&span);
+}
