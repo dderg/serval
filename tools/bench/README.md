@@ -160,6 +160,25 @@ Until 2026-11-16 both rows printed one 21-min file (8 blocks, Z to 82 mm): the s
 
 Run-wide checks (`SOAK_CHECKS`, evidence over the whole run window): `pacer_brakes` fails on any `pipe_drain` outside a commanded stop (from a pause, cancel, FIRMWARE_RESTART or e-stop to the next action), `pacer_reserve` on any reserve above 2 s (#843) and lists every raise (time, reserve, cost kind), `klippy_stats` when klippy's Stats lines (host-py mirror; klippy writes them only while active) leave a gap > 2 s inside a print outside a commanded pause, or come from more than one klippy session (#406); its detail carries memavail and klippy cputime over the run. A plain run also gets the journal, shutdown and reactor checks. `pacer_reserve_ratchet` (session rows with two prints) fails when the last print's highest reserve exceeds the first's by more than 1.5×: #843's ratchet multiplied it 3.6× (`main-print_twice`) and 137× (`main-cancel_then_print`) print over print, while a measured raise within a print moved it 1.06× (0.419 → 0.444 s, soak run 11-16). A single raise from a measured planning step is the pacer working (#876), not a failure.
 
+## Crawl rows (`suite.py --group crawl`)
+
+`crawl_gcode.py` generates five prints (never committed). Each has a 2.3 s lead-in at 100 mm/s ending in a reversal, then `M220 S<n>` and 120 s of extruding square laps in 2 s pieces with no rest, then `M220 S100` and a lead-out. Each row is a matrix row on printer.cfg, judged by the analyzer and the run-wide checks.
+
+| row | slow section | before it | expected |
+|---|---|---|---|
+| crawl_s1 | 1 mm/s (`M220 S1`, F6000) | lead-in | fails until #983 |
+| crawl_s5 | 2.5 mm/s (`M220 S5`, F3000) | lead-in | fails until #983 |
+| crawl_s10 | 10 mm/s (`M220 S10`, F6000) | lead-in | fails until #983 |
+| crawl_s20 | 20 mm/s (`M220 S20`, F6000, 12 sides) | lead-in | fails until #983 |
+| crawl_s5_rest | 2.5 mm/s | lead-in, `G4 P500` | passes |
+
+On b122baafe (suites `20261117-170051`, `-182929`):
+- crawl_s1, crawl_s5 and crawl_s10 aborted klippy within 3 s of the print start. The first anchor committed an 8.4 ms segment, and the next one came 0.56–0.83 s later (`anchor_underrun`).
+- crawl_s20 completed, but with a `RunwayExhausted` pacer brake at +81 s.
+- crawl_s5_rest completed with no brake.
+
+A row's `fails_until` (suite.py) makes its failure expected, naming the issue. A marked row that passes is `XPASS` and fails the suite, so the fix PR removes the mark. The group is not part of the full suite, so it does not gate qualification.
+
 ## Qualification (`scripts/qualify.py`)
 
 PRs land on CI alone; a qualification gates a tag. `qualify.py run [REV]` checks REV (default origin/main) out clean in `~/.cache/pending-baselines/qualify/run` (cargo target `targets/run-*-qualify`), builds its engine and its F401 image, then runs resumable units, each one or more holds of at most 30 min that the unit's tool takes and releases itself (`run` never holds the lock and refuses to run inside a hold): `deploy` (one hold, planned ≤ 11 min: settle, `deploy.py sync`, `ensure-target`; the F401 must report REV's firmware build id), `suite-1` … `suite-4` (the full suite's `hold_plan.plan`, each `suite.py --row … --tree REV`), `soak-soak_mesh_session` and `soak-soak_throttled` (one hold each), `pi` (`throughput_pi.py`, one or two holds, judged by `throughput_gate.py --qualify pi-window`: every unpinned config's 2-core window and every pinned one's on `PINNED_CORES` at or above 2.0×) and `calibration` (`--qualify calibration`, no hold while fresh; past 10 days `throughput_recheck.py` refits it in its own holds and qualify commits the baseline on a local `qualify-calibration-<rev>` branch to ship as a normal PR). It stops at the first failed unit. `--expect-fail ROW=ISSUE` is the only tolerance.

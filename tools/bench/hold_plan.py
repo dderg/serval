@@ -57,6 +57,11 @@ EXPECTED_ROW_S = {
     "estop_g4": 130,
     "soak_mesh_session": SOAK_SESSION_ROW_S,
     "soak_throttled": SOAK_LONG_ROW_S,
+    "crawl_s1": 200,
+    "crawl_s5": 200,
+    "crawl_s10": 200,
+    "crawl_s20": 200,
+    "crawl_s5_rest": 210,
 }
 
 

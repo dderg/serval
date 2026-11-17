@@ -319,6 +319,64 @@ def test_a_soak_row_expected_to_fail_is_not_in_the_full_suite(
     assert summary is None
 
 
+def _crawl_hold(failing: set[str]):
+    def hold(index, rows, **extra):
+        result = _hold_result(index, rows, **extra)
+        for row in result["rows"]:
+            if row["name"] in failing:
+                row["error"] = "run.py: klippy aborted"
+        return result
+
+    return hold
+
+
+def _crawl_suite(monkeypatch, tmp_path, failing: set[str]):
+    monkeypatch.setattr(suite.crawl_gcode, "ensure_all", lambda: None)
+    return _run_suite(
+        monkeypatch, tmp_path, ["--group", "crawl"], _crawl_hold(failing)
+    )
+
+
+def test_the_crawl_group_marks_every_row_but_the_rest_one_failing_until_983():
+    marks = {row.name: row.fails_until for row in suite.CRAWL_MATRIX}
+    assert marks == {
+        "crawl_s1": "#983",
+        "crawl_s5": "#983",
+        "crawl_s10": "#983",
+        "crawl_s20": "#983",
+        "crawl_s5_rest": "",
+    }
+    assert not any(row in suite.CRAWL_MATRIX for row in suite.ROWS)
+
+
+def test_marked_crawl_rows_that_fail_are_expected_failures(
+    monkeypatch, tmp_path
+):
+    marked = {row.name for row in suite.CRAWL_MATRIX if row.fails_until}
+    events, summary = _crawl_suite(monkeypatch, tmp_path, marked)
+    assert events[-1] == 0
+    verdicts = {
+        row["name"]: (row["passed"], row["expected_fail"], row["fails_until"])
+        for row in summary["rows"]
+    }
+    assert verdicts["crawl_s5"] == (False, True, "#983")
+    assert verdicts["crawl_s5_rest"] == (True, False, "")
+
+
+def test_a_marked_crawl_row_that_passes_fails_the_suite(monkeypatch, tmp_path):
+    still_failing = {"crawl_s1", "crawl_s10", "crawl_s20"}
+    events, summary = _crawl_suite(monkeypatch, tmp_path, still_failing)
+    assert events[-1] == 1
+    fixed = next(row for row in summary["rows"] if row["name"] == "crawl_s5")
+    assert fixed["passed"] and fixed["expected_fail"]
+
+
+def test_the_rest_crawl_row_failing_fails_the_suite(monkeypatch, tmp_path):
+    marked = {row.name for row in suite.CRAWL_MATRIX if row.fails_until}
+    events, _ = _crawl_suite(monkeypatch, tmp_path, {*marked, "crawl_s5_rest"})
+    assert events[-1] == 1
+
+
 def test_a_throttled_soak_print_also_needs_its_run_wide_checks():
     [row] = suite.SOAK_MATRIX
     analyzed = {"error": None, "print_state": "complete", "analyzer_ok": True}
