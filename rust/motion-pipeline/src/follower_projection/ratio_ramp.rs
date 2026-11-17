@@ -3500,6 +3500,18 @@ impl<'l, 'a> LegSpeed<'l, 'a> {
             .is_some_and(|floor| floor > rest_speed)
     }
 
+    /// The probe a descent from the end probe `end` inward bottoms out
+    /// at: the first one the next probe in does not undercut.
+    fn descent_foot(&self, end: usize) -> usize {
+        let far_end = self.probes.len() - 1 - end;
+        let inward = |index: usize| if end == 0 { index + 1 } else { index - 1 };
+        let mut foot = end;
+        while foot != far_end && self.at(self.probes[inward(foot)]) < self.at(self.probes[foot]) {
+            foot = inward(foot);
+        }
+        foot
+    }
+
     fn path_at(&self, t: f64) -> f64 {
         let leg_end = self.path.grid[self.path.grid.len() - 1];
         if t >= leg_end {
@@ -3590,12 +3602,14 @@ fn ratio_steps_within(spans: &[RatioSpan], from: f64, to: f64) -> Option<(f64, f
 /// launches, the shaped velocity passes through zero off the raw seam,
 /// inside either move, where the seam's crossing does not see it; where the
 /// axes are shaped unlike each other it passes a hair beside zero instead.
-/// Such a crawl can hide in the probe interval next to a seam the leaders
-/// cross too fast to crawl there, so that interval is searched as well as
-/// the slowest probe's, however the leg's two seam speeds compare: mirrored
-/// seams tie to rounding, which the clock offset decides. A leg whose every
-/// knot interval, or every searched probe, provably stays faster has none,
-/// and one slowest at an end leaves it to that seam's crossing.
+/// Such a crawl can hide off a seam the leaders cross too fast to crawl
+/// there, as far in as their braking from it takes, past the next probe
+/// when they brake for longer than a probe interval, so the foot of that
+/// descent is searched as well as the slowest probe, however the leg's two
+/// seam speeds compare: mirrored seams tie to rounding, which the clock
+/// offset decides. A leg whose every knot interval, or every searched
+/// probe, provably stays faster has none, and one slowest at an end leaves
+/// it to that seam's crossing.
 fn slowest_crawl(
     leaders: &ShapedLeaders,
     leg: &RampLeg,
@@ -3617,7 +3631,8 @@ fn slowest_crawl(
     let last_probe = speed.probes.len() - 1;
     let next_to_a_fast_seam = [0, last_probe]
         .into_iter()
-        .filter(|&end| end != slowest_probe && probe_speed(end) >= ADVANCE_VALLEY_SPEED_MM_S);
+        .filter(|&end| end != slowest_probe && probe_speed(end) >= ADVANCE_VALLEY_SPEED_MM_S)
+        .map(|end| speed.descent_foot(end));
     let (turn, _) = std::iter::once(slowest_probe)
         .chain(next_to_a_fast_seam)
         .filter_map(|index| {
