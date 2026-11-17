@@ -31,9 +31,14 @@ mcu_demux_output_t mcu_demux_feed_byte(uint8_t b);
 
 void mcu_demux_consume(void);
 
+// Feeds buf to the demuxer, dispatching every frame it completes, and counts
+// the bytes fed in *fed. A dispatch that shuts the MCU down longjmps out of
+// here with *fed ending at the frame that shut it down: the caller feeds the
+// rest on its next pass, or it loses e.g. the config_reset klippy sends right
+// behind emergency_stop (#879).
 // Bootloader-request sentinel detection runs inside this on the OUT_KLIPPER
 // branch (gated on CONFIG_HAVE_BOOTLOADER_REQUEST); callers need not check.
-void mcu_demux_pump(const uint8_t *buf, uint16_t len);
+void mcu_demux_pump(const uint8_t *buf, uint16_t len, uint16_t *fed);
 
 const uint8_t *mcu_demux_klipper_buf(void);
 uint8_t        mcu_demux_klipper_len(void);

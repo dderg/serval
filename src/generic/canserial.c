@@ -345,18 +345,18 @@ canserial_process_data(struct canbus_msg *msg)
     }
 }
 
+static uint16_t receive_fed;
+
 static void
-rebase_receive_buf_against_rx_irq(receive_pos_t consumed)
+rebase_receive_buf_against_rx_irq(void)
 {
+    if (!receive_fed)
+        return;
     irqstatus_t flag = irq_save();
-    receive_pos_t now = read_receive_pos(&CanData.receive_pos);
-    if (now == consumed) {
-        CanData.receive_pos = 0;
-    } else {
-        receive_pos_t tail = now - consumed;
-        memmove(CanData.receive_buf, &CanData.receive_buf[consumed], tail);
-        CanData.receive_pos = tail;
-    }
+    receive_pos_t tail = read_receive_pos(&CanData.receive_pos) - receive_fed;
+    memmove(CanData.receive_buf, &CanData.receive_buf[receive_fed], tail);
+    CanData.receive_pos = tail;
+    receive_fed = 0;
     irq_restore(flag);
 }
 
@@ -383,9 +383,12 @@ canserial_rx_task(void)
         CanData.admin_pull_pos = pullp + 1;
     }
 
-    receive_pos_t rpos = read_receive_pos(&CanData.receive_pos);
-    mcu_demux_pump(CanData.receive_buf, rpos);
-    rebase_receive_buf_against_rx_irq(rpos);
+    // A dispatch that shut the MCU down longjmped out of the last pump
+    // before its rebase; the bytes behind its frame are still to be fed.
+    rebase_receive_buf_against_rx_irq();
+    mcu_demux_pump(CanData.receive_buf,
+                   read_receive_pos(&CanData.receive_pos), &receive_fed);
+    rebase_receive_buf_against_rx_irq();
 }
 DECL_TASK(canserial_rx_task);
 

@@ -130,7 +130,7 @@ console_setup(char *name, mode_t mode, gid_t group)
 
 static struct task_wake console_wake;
 static uint8_t receive_buf[4096];
-static int receive_pos;
+static uint16_t receive_len, receive_fed;
 
 uint64_t console_rx_bytes, console_tx_bytes, console_tx_drops;
 
@@ -163,9 +163,15 @@ console_task(void)
         return;
 #endif
 
+    // A dispatch that shut the MCU down longjmped out of the last pump;
+    // the bytes behind its frame go first.
+    receive_len -= receive_fed;
+    memmove(receive_buf, &receive_buf[receive_fed], receive_len);
+    receive_fed = 0;
+
     // Read data
-    int ret = read(main_pfd[MP_TTY_IDX].fd, &receive_buf[receive_pos]
-                   , sizeof(receive_buf) - receive_pos);
+    int ret = read(main_pfd[MP_TTY_IDX].fd, &receive_buf[receive_len]
+                   , sizeof(receive_buf) - receive_len);
     if (ret < 0) {
         if (errno == EWOULDBLOCK) {
             ret = 0;
@@ -174,17 +180,24 @@ console_task(void)
             return;
         }
     }
-    if (ret == 15 && receive_buf[receive_pos+14] == '\n'
-        && memcmp(&receive_buf[receive_pos], "FORCE_SHUTDOWN\n", 15) == 0)
+    if (ret == 15 && receive_buf[receive_len+14] == '\n'
+        && memcmp(&receive_buf[receive_len], "FORCE_SHUTDOWN\n", 15) == 0)
         shutdown("Force shutdown command");
 
-    if (ret > 0)
-        mcu_demux_pump(&receive_buf[receive_pos], (uint16_t)ret);
-    if (ret > 0)
-        console_rx_bytes += (uint64_t)ret;
-    receive_pos = 0;
+    console_rx_bytes += (uint64_t)ret;
+    receive_len += ret;
+    mcu_demux_pump(receive_buf, receive_len, &receive_fed);
 }
 DECL_TASK(console_task);
+
+// Unfed bytes a shutdown left have no new input to wake console_task.
+void
+console_shutdown(void)
+{
+    if (receive_fed < receive_len)
+        sched_wake_task(&console_wake);
+}
+DECL_SHUTDOWN(console_shutdown);
 
 // Encode and transmit a "response" message
 void

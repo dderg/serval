@@ -181,8 +181,9 @@ mcu_demux_mcu_channel(void)
 static uint32_t last_byte_time;
 
 void
-mcu_demux_pump(const uint8_t *buf, uint16_t len)
+mcu_demux_pump(const uint8_t *buf, uint16_t len, uint16_t *fed)
 {
+    *fed = 0;
     if (len == 0)
         return;
     uint32_t now = timer_read_time();
@@ -203,6 +204,7 @@ mcu_demux_pump(const uint8_t *buf, uint16_t len)
     uint32_t msg_count = 0;
     for (uint16_t i = 0; i < len; i++) {
         mcu_demux_output_t out = mcu_demux_feed_byte(buf[i]);
+        *fed = i + 1;
         switch (out) {
         case MCU_DEMUX_OUT_NONE:
             break;
