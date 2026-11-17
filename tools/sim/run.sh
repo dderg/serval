@@ -32,7 +32,7 @@ MODE="run"
 BRANCH=""
 GCODE=""
 EXTRA_ARGS=()
-DOCKER_ARGS=(--rm --ulimit memlock=-1:-1)
+DOCKER_ARGS=(--rm --ulimit memlock=-1:-1 --ulimit core=0)
 # SIM_DOCKER_CPUS=N caps the container's CPU quota — the lever for
 # reproducing starvation-class failures (transport wedge, clocksync skew)
 # deterministically instead of waiting for ambient host load.

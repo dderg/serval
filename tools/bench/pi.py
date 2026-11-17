@@ -29,6 +29,7 @@ SSH = ("ssh", *PI_ADDRESS, PI_SSH)
 MOONRAKER = f"http://{PI_HOST}:7125"
 PI_CONFIG = "printer_data/config/printer.cfg"
 PI_LOGS = "printer_data/logs"
+PI_EVENTS = f"{PI_LOGS}/events"
 REPO_CFG = Path(__file__).with_name("printer.cfg")
 READY_TIMEOUT_S = 60.0
 HTTP_TIMEOUT_S = 30.0
@@ -286,12 +287,26 @@ def scp_to_pi(local: Path, remote: str) -> None:
     _scp(["scp", "-q", *PI_ADDRESS, str(local), f"{PI_SSH}:{remote}"])
 
 
-def scp_from_pi(remote: str, local: Path, recursive: bool = False) -> None:
+def scp_from_pi(remote: str, local: Path) -> None:
+    scp_files_from_pi([remote], local)
+
+
+def scp_files_from_pi(remotes: list[str], local: Path) -> None:
     _scp(
         ["scp", "-q", *PI_ADDRESS]
-        + (["-r"] if recursive else [])
-        + [f"{PI_SSH}:{remote}", str(local)]
+        + [f"{PI_SSH}:{remote}" for remote in remotes]
+        + [str(local)]
     )
+
+
+def events_written_since(since_wall_s: float) -> list[str]:
+    """The Pi's event logs (current and rotated) written to at or after
+    `since_wall_s`: the only ones that can hold a record from then on."""
+    listing = ssh(
+        f"find {PI_EVENTS} -maxdepth 1 -type f "
+        f"-newermt @{since_wall_s:.3f} | sort"
+    )
+    return listing.split()
 
 
 def is_input_pin_key(section: str, key: str) -> bool:

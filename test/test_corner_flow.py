@@ -12,7 +12,8 @@ C45_AT_50 = ("tau", "", 0, 50.0, 0.02, (0.4, 0.2, 1.75))
 
 def test_a_case_whose_engine_aborts_fails_alone_with_the_panic_message():
     abort = (
-        "import os, sys; "
+        "import os, resource, sys; "
+        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0)); "
         "sys.stderr.write(\"thread 'kalico-shaper' panicked at a.rs:1:1:\\n"
         'shaper: boom\\nnote: run with RUST_BACKTRACE=1\\n"); '
         "sys.stderr.flush(); os.abort()"

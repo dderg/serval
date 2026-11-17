@@ -49,6 +49,7 @@ use ethercat_endpoint::{
     verify_sample_grid,
 };
 use motion_caps::{drip_cohort_participants, require_events_dir_for_mcu_transport};
+use pipeline_request::{PendingRequest, PipelineRequest};
 #[cfg(test)]
 use runtime_caps::place_motor_response;
 use runtime_caps::{
@@ -699,6 +700,30 @@ impl PyMotionEngine {
 
     fn handle_endstop_trip(&self, event_mcu: u32, endstop_id: u8, trip_clock: u64) {
         dispatch_endstop_trip(&self.trip_deps(), event_mcu, endstop_id, trip_clock);
+    }
+
+    /// Stages `request` for `pipeline_request_poll`. A mesh swap with no
+    /// planner behind it has nothing to drain and is served at once.
+    fn stage_request(&self, request: PipelineRequest) -> PyResult<()> {
+        let has_planner = self.planner.lock_ok().is_some();
+        let pending = match (&request, has_planner) {
+            (_, true) => PendingRequest::unsent(request),
+            (PipelineRequest::SwapMesh(_), false) => PendingRequest::served(request),
+            (_, false) => {
+                return Err(PyRuntimeError::new_err(
+                    "planner not initialized — call init_planner first",
+                ));
+            }
+        };
+        let mut slot = self.flush.pending_request.lock_ok();
+        if slot.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "a pipeline request is already staged — poll it to completion with \
+                 pipeline_request_poll before staging another",
+            ));
+        }
+        *slot = Some(pending);
+        Ok(())
     }
 }
 

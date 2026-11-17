@@ -423,7 +423,10 @@ pub fn brake_move(
 /// rails give ([`BrakeMove::entry_speed`]), reaches at least the seam's
 /// speed. Any lowering of the plan at or past the far end then leaves every
 /// seam up to it standing, the plan before a seam reading only that seam's
-/// speed. `None` where no seam of `moves` stands clear.
+/// speed. A re-plan from a seam keeps the move before it whole
+/// ([`replan_span`] reads the seam's speed and the moves after it), so the
+/// seam's own ceiling, which reads that move, bounds the envelope only on
+/// its way to earlier seams. `None` where no seam of `moves` stands clear.
 pub fn brake_horizon(
     moves: &[BrakeMove],
     entry_speeds: impl DoubleEndedIterator<Item = f64> + ExactSizeIterator,
@@ -432,20 +435,19 @@ pub fn brake_horizon(
     let mut brake = 0.0_f64;
     for (k, (brake_move, seam_speed)) in moves.iter().zip(entry_speeds).enumerate().rev() {
         let entry = brake_move.entry_speed(brake);
-        brake = if k == 0 {
-            entry
-        } else {
-            let ceiling = brake_move.entry_ceiling.unwrap_or_else(|| {
-                panic!(
-                    "brake horizon: line {} starts a span inside one",
-                    brake_move.line_no
-                )
-            });
-            entry.min(ceiling)
-        };
-        if seam_speed <= brake {
+        if seam_speed <= entry {
             return Some(k);
         }
+        if k == 0 {
+            return None;
+        }
+        let ceiling = brake_move.entry_ceiling.unwrap_or_else(|| {
+            panic!(
+                "brake horizon: line {} starts a span inside one",
+                brake_move.line_no
+            )
+        });
+        brake = entry.min(ceiling);
     }
     None
 }

@@ -647,9 +647,10 @@ impl StreamWorkerHandle {
         Ok(result)
     }
 
-    /// Queue one buzz request behind everything already submitted. The
-    /// receiver yields the pump's single verdict: a token covering every
-    /// route, or the first route that failed validation with nothing armed.
+    /// Queue one buzz request behind everything already submitted, or refuse
+    /// with `ChannelFull` instead of blocking. The receiver yields the pump's
+    /// single verdict: a token covering every route, or the first route that
+    /// failed validation with nothing armed.
     pub fn submit_buzz(
         &self,
         params: crate::pump::BuzzParams,
@@ -658,9 +659,7 @@ impl StreamWorkerHandle {
         StreamWorkerError,
     > {
         let (notify, result) = crossbeam_channel::bounded(1);
-        self.sender
-            .send(StreamMsg::Buzz { params, notify })
-            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        self.try_send_arming(StreamMsg::Buzz { params, notify })?;
         Ok(result)
     }
 

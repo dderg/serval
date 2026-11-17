@@ -36,17 +36,12 @@ pub use ratio_ramp::{
     RatioStep, RebuildsWithin, SideWeight, TURNAROUND_SPEED_TIME_S, VALLEY_LEAD_BUDGET_S,
     VALLEY_RAMP_TIME_S, ValleyKind, coupled_bend, crawl_floor, crawl_side_width, crawl_step_window,
     kept_floor, leader_reach, rest_room_reach_mm, side_weight, turns_around, valley_reach,
-    widest_crawl_reach, widest_crawl_side_within,
+    widest_crawl_side_within,
 };
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};
 pub use shaped_corner::ShapedCorners;
 pub use step_capacity::{FollowerStepLoad, McuStepLoad, StepCapacity, StepCapacityOverload};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FollowerWord {
-    pub letter: u8,
-    pub axis_index: usize,
-}
 pub use space::{GcodePos, MachinePos};
 pub use surface::{
     Fade, MeshActivationError, MeshGrid, MeshGridSpec, MeshPatch, PatchAxis, ProbedMesh,

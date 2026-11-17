@@ -151,6 +151,37 @@ fn connect_priming_with_seeded_clock_latches() {
     );
 }
 
+/// #857: a restarted mcu whose counter does not advance answers every
+/// `get_clock` with the clock `get_uptime` seeded. The regression's 0 Hz rate
+/// is stable from sample to sample, but it is no rate at all, so the estimate
+/// must never latch synced.
+#[test]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn a_clock_that_does_not_advance_never_synchronizes() {
+    let t0 = 21.98_f64;
+    let frozen = (MCU_FREQ * 0.5416) as u64;
+    let mut est = seeded(frozen, frozen as f64, t0);
+    let mut prev_freq = MCU_FREQ;
+    let mut t = t0;
+    for _ in 0..16 {
+        t += 0.05;
+        if let Some(e) =
+            est.handle_clock(raw_low(frozen as f64), t, t + 0.0002, MCU_FREQ, prev_freq)
+        {
+            prev_freq = e.freq;
+        }
+    }
+    assert_eq!(
+        prev_freq, 0.0,
+        "the regression publishes the frozen clock's rate"
+    );
+    assert!(
+        !est.synced(),
+        "a 0 Hz rate latched synced after {} stable samples",
+        est.sync_stable_count()
+    );
+}
+
 /// A sample stream that carries the low 32 bits across a `2^32` boundary must
 /// reconstruct the full 64-bit clock and keep advancing the latch.
 #[test]
