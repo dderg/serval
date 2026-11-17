@@ -2445,7 +2445,11 @@ impl RatioSmoothing {
         let leaves_a_side = |s: f64| rested >= held || s - window - reach >= held;
         steps.own_near(tables, &untaken, &|s| untaken(s) && leaves_a_side(s));
         let zero = steps.zero_stretch();
-        let unfinal_steps = self.unfinal_steps(table_end, &|table, s| steps.owns(table, s));
+        let unfinal_steps = if guarded {
+            self.unfinal_steps(table_end, &|table, s| steps.owns(table, s))
+        } else {
+            Vec::new()
+        };
         let rested_trail = crawl
             .rests_past
             .map(|rested| self.trail.as_of(rested.trail_legs));

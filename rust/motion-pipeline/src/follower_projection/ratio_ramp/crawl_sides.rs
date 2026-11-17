@@ -314,7 +314,8 @@ impl Edge {
 /// What a crawl valley's sides read as laid: the span table up to `table`,
 /// infinite where the leaders rest past the trail; the leaders' trail; and
 /// the ratio steps the valley does not own whose smoothing may still change
-/// ([`RatioSmoothing::unfinal_steps`]).
+/// ([`RatioSmoothing::unfinal_steps`]), none for a follower the turning
+/// guard does not hold, whose sides budget no ramp.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SideReads<'a> {
     pub(super) table: f64,
