@@ -269,6 +269,52 @@ fn an_advance_without_extruder_limits_is_refused_naming_the_options() {
     );
 }
 
+fn kernel_free_pa_config(e_max_accel: f64, extruder: &str) -> Result<crate::PlannerConfig, String> {
+    let cfg = format!(
+        "{MINIMAL}{PA_TOPOLOGY}[axis x]\n[axis y]\n[axis z]\n[axis e]\nfollows: x, y, z\n\
+         motors: me\npost_processors: pa\nmax_accel: {e_max_accel}\n[extruder]\naxis: e\n\
+         max_extrude_only_velocity: 50\nmax_extrude_only_accel: 5000\n{extruder}"
+    );
+    let doc = Document::parse(&cfg, "test.cfg").unwrap();
+    let (s, _) = read_motion_settings(&doc)?;
+    crate::from_doc::planner_config_from_settings(&s)
+}
+
+const NOZZLE_AND_FILAMENT: &str = "nozzle_diameter: 0.4\nfilament_diameter: 1.75\n";
+
+/// `PA_TOPOLOGY`'s advance slope times the extrusion ratio of a 0.4 mm
+/// nozzle on 1.75 mm filament times the valley-speed crawl's rebuild at the
+/// default fit tolerances.
+fn kernel_free_floor() -> f64 {
+    0.04 * crate::from_doc::default_extrude_ratio(0.4, 1.75)
+        * geometry::valley_speed_crawl_rebuild(0.005, 50.0)
+}
+
+#[test]
+fn a_kernel_free_advance_under_the_crawl_rebuild_floor_is_refused_naming_it() {
+    let least = kernel_free_floor();
+    let refused = kernel_free_pa_config(0.99 * least, NOZZLE_AND_FILAMENT).unwrap_err();
+    for named in [
+        "axis 'e' max_accel".to_string(),
+        format!("at least {least:.1}"),
+        "smoothing kernel".to_string(),
+    ] {
+        assert!(refused.contains(&named), "{refused}");
+    }
+    assert!(kernel_free_pa_config(least, NOZZLE_AND_FILAMENT).is_ok());
+}
+
+#[test]
+fn the_crawl_rebuild_floor_binds_only_a_kernel_free_advance_with_a_known_ratio() {
+    assert!(kernel_free_pa_config(1.0, "").is_ok());
+    assert!(
+        pa_config(&format!(
+            "max_velocity: 60\nmax_accel: 1\n[extruder]\naxis: e\n{NOZZLE_AND_FILAMENT}"
+        ))
+        .is_ok()
+    );
+}
+
 #[test]
 fn consumed_options_report_values_and_defaults() {
     let doc = Document::parse(

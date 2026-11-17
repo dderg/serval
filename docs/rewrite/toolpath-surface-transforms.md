@@ -125,14 +125,18 @@ pre-densified into a grid with bilinear lookup. Rationale:
   on servos, fit a genuinely C² surface (natural bicubic spline) at build
   time — same runtime shape, different solve.
 
-Fade follows mainline semantics: full correction below `fade_start`, linear
-ramp to zero at `fade_end`, correction fading toward `fade_target` (mesh
-mean by default) rather than toward 0, constant `fade_target` applied above
-the band. Fade is a function of *gcode* Z, which the sampler has (the
-pre-warp value). Like the surface, the linear fade is C⁰ at the band edges
-(fade′ jumps by 1/fade_dist), another small accel-feedforward
-discontinuity accepted for v1 with the same smooth-ramp upgrade path if it
-ever shows.
+Fade follows mainline semantics at its ends: full correction below
+`fade_start`, none past `fade_end`, correction fading toward `fade_target`
+(mesh mean by default) rather than toward 0, constant `fade_target` applied
+above the band. Fade is a function of *gcode* Z, which the sampler has (the
+pre-warp value). Between the edges the factor is one minus the cubic
+smoothstep of the band's progress (`FADE_FACTOR_IN_BAND`), not mainline's
+linear ramp: the linear fade was C⁰ at the band edges, and a Z move crossing
+one stepped machine Z velocity by `ż·(mesh − target)/fade_dist`, which a
+kernel-free pressure advance turns into an extruder position step (#930).
+The smoothstep leaves and reaches the band edges flat, so the edges are C¹
+transitions like interior grid lines, and its slope peaks at 1.5× the linear
+one.
 
 ## State and lifecycle
 
@@ -180,8 +184,10 @@ surfaced before the first move.
 Z-velocity-limited, crossing the steepest mesh cell, with slopes aligned,
 can transiently exceed the configured Z limit by up to the coupled worst
 case above. Inside the fade band the fade derivative adds a further
-bounded term: adopt mainline's activation-time validation
-`fade_dist > mesh z-range`, which caps it at a known multiple of ż_g.
+bounded term: activation refuses a fade band not wider than 1.5× the mesh's
+deviation from the fade target (the smoothstep's steepest slope; mainline
+checks 1×), which keeps the warp invertible and caps the term at a known
+multiple of ż_g.
 Both bounds are computable at activation; the total envelope
 (`z_limit + coupling_max`, fade term folded in) is logged when the mesh
 activates. This transient is *accepted* design margin — configured Z
