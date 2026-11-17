@@ -2524,8 +2524,10 @@ post_processors: extruder_pa
 #max_velocity:
 #max_accel:
 #   Optional, on an axis that follows others. Must be above 0 (mm/s,
-#   mm/s^2). What the axis&#39;s motor can do for every move it makes, pressure
-#   advance included. The velocity planner slows each move so the commanded
+#   mm/s^2), and max_accel at least the floor below where an advance has
+#   no smoothing kernel. What the axis&#39;s motor can do for every move it
+#   makes, pressure advance included. The velocity planner slows each move
+#   so the commanded
 #   extruder velocity and acceleration stay within them, corners and curves
 #   included, and the axis&#39;s ratio ramp (below) derives each ramp time from
 #   them. A move is held to the largest extrusion ratio within its reach:
@@ -2543,6 +2545,18 @@ post_processors: extruder_pa
 #   unset is inherited from max_extrude_only_velocity /
 #   max_extrude_only_accel (the same motor). An advance needs both, set or
 #   inherited.
+#   With an advance and no smoothing kernel after it, max_accel must be at
+#   least k * r * R: the room the turning guard keeps for the advance to
+#   rebuild its lead around a crawl at 2 mm/s at the largest extrusion
+#   ratio, which no slowing of the moves there lowers. r is the extrusion
+#   ratio of a bead four nozzle diameters squared in cross section (0.266
+#   for a 0.4 mm nozzle on 1.75 mm filament), R 9844 mm/s^3 at the default
+#   max_path_deviation and max_accel_deviation. At k = 0.03 that is 79
+#   mm/s^2, at k = 0.5 about 1310. A config under it is refused, naming its
+#   floor; without nozzle_diameter and filament_diameter in [extruder] it
+#   is not checked. What a crawl asks also depends on its shape: at the
+#   floor, crawls at printing ratios (0.03-0.06) keep a wide margin, while
+#   a crawl at the largest ratio may still ask more and stop the print.
 #   On the [extruder] axis max_accel is the extruder motor&#39;s
 #   pressure-advance-capable acceleration: the filament acceleration the
 #   drive follows without skipping while the advance adds k times the
