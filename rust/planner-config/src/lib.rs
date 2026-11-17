@@ -544,6 +544,12 @@ pub struct PlannerConfig {
     pub post_processor_bypass: bool,
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
+    /// The extrusion ratio of a bead four nozzle diameters squared in cross
+    /// section, the `[extruder]`'s, where it names its nozzle_diameter and
+    /// filament_diameter: upstream Klipper's largest by default
+    /// (`max_extrude_cross_section`), and the scale of the default
+    /// extrude-only caps.
+    pub max_extrude_ratio: Option<f64>,
     pub fit_tolerance_mm: f64,
     pub fit_tolerance_accel_mm_s2: f64,
 }
@@ -742,20 +748,25 @@ impl PlannerConfig {
         self.runtime.effective(&self.cartesian)
     }
 
-    /// An advance with no smoothing kernel leaves the moves its follower
-    /// makes on its own — retracts, primes, which the advance leaves
-    /// untouched — bounded by the extrude-only caps alone, and those must be
-    /// set.
-    pub fn check_kernel_free_advance_extrude_only_caps(&self) -> Result<(), String> {
-        let chains = self.compile_active_chains().map_err(|e| e.to_string())?;
-        let Some(axis) = chains
+    /// The follower axis whose chain has an advance and no smoothing
+    /// kernel, the one the turning guard holds, if any.
+    fn kernel_free_advance_axis(chains: &AxisChainSet) -> Option<usize> {
+        chains
             .projected_followers()
             .map(|(axis, _)| axis)
             .find(|&axis| {
                 let chain = &chains.chains[axis];
                 chain.transform().is_some() && chain.kernel().is_none()
             })
-        else {
+    }
+
+    /// An advance with no smoothing kernel leaves the moves its follower
+    /// makes on its own — retracts, primes, which the advance leaves
+    /// untouched — bounded by the extrude-only caps alone, and those must be
+    /// set.
+    pub fn check_kernel_free_advance_extrude_only_caps(&self) -> Result<(), String> {
+        let chains = self.compile_active_chains().map_err(|e| e.to_string())?;
+        let Some(axis) = Self::kernel_free_advance_axis(&chains) else {
             return Ok(());
         };
         let finite = |cap: Option<f64>| cap.is_some_and(f64::is_finite);
@@ -767,6 +778,49 @@ impl PlannerConfig {
              makes on its own (retracts, primes) but the extrude-only caps: set finite \
              [extruder] max_extrude_only_velocity and max_extrude_only_accel",
             self.axis_registry.axis_name(axis)
+        ))
+    }
+
+    /// An advance with no smoothing kernel has the turning guard keep it
+    /// room to rebuild its lead around every crawl. Around a crawl at the
+    /// valley speed at the largest extrusion ratio `r`
+    /// ([`Self::max_extrude_ratio`]) that room is `k·r` times
+    /// [`geometry::valley_speed_crawl_rebuild`] at the fit's tolerances,
+    /// which no back-off of the moves there lowers: under it such a crawl
+    /// stops the print. Without `r` nothing bounds the ratio and this
+    /// checks nothing.
+    pub fn check_kernel_free_advance_accel_floor(&self) -> Result<(), String> {
+        let chains = self.compile_active_chains().map_err(|e| e.to_string())?;
+        let (Some(axis), Some(ratio)) = (
+            Self::kernel_free_advance_axis(&chains),
+            self.max_extrude_ratio,
+        ) else {
+            return Ok(());
+        };
+        let caps = extruder_caps(&self.axis_registry, &chains, self.fit_tolerance_mm)?;
+        let Some(caps) = caps.iter().find(|caps| caps.axis_index == axis) else {
+            return Ok(());
+        };
+        let rebuild = geometry::valley_speed_crawl_rebuild(
+            self.fit_tolerance_mm,
+            self.fit_tolerance_accel_mm_s2,
+        );
+        let least = caps.advance_slope_s * ratio * rebuild;
+        if caps.max_accel_mm_s2 >= least {
+            return Ok(());
+        }
+        Err(format!(
+            "axis '{}' max_accel {} mm/s^2 is under the {least:.1} mm/s^2 the turning guard \
+             keeps for its advance, which has no smoothing kernel, to rebuild its lead around \
+             a crawl at {} mm/s at the largest extrusion ratio: k * r * R with k = {}, r = \
+             {ratio:.4} (a bead 4 nozzle diameters squared in cross section) and R = \
+             {rebuild:.0} mm/s^3 at max_path_deviation and max_accel_deviation. Such a crawl \
+             stops the print. Raise max_accel to at least {least:.1}, or follow the advance \
+             with a smoothing kernel",
+            self.axis_registry.axis_name(axis),
+            caps.max_accel_mm_s2,
+            geometry::ADVANCE_VALLEY_SPEED_MM_S,
+            caps.advance_slope_s,
         ))
     }
 }
@@ -785,6 +839,7 @@ impl Default for PlannerConfig {
             post_processor_bypass: false,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
+            max_extrude_ratio: None,
             fit_tolerance_mm: 0.005,
             fit_tolerance_accel_mm_s2: 50.0,
         }

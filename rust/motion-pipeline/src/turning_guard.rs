@@ -1827,6 +1827,8 @@ fn summary_of(
 }
 
 #[cfg(test)]
+mod accel_floor_stream_tests;
+#[cfg(test)]
 mod backoff_stream_tests;
 #[cfg(test)]
 mod hold_time_tests;

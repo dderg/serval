@@ -2,8 +2,8 @@ use std::cell::OnceCell;
 use std::collections::VecDeque;
 
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RebuildsWithin, VALLEY_LEAD_BUDGET_S, turns_around,
-    valley_reach, widest_crawl_side_within,
+    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RebuildsWithin, VALLEY_LEAD_BUDGET_S, fit_speed_miss,
+    turns_around, valley_reach, widest_crawl_side_within,
 };
 
 use super::screen::ShapedBox;
@@ -12,9 +12,7 @@ use super::shadow::{CellMotion, norm};
 /// How far the fitted leaders the follower projection reads its valleys
 /// off may stray from the shaped motion the guard bounds: in position by
 /// the fit's tolerance, in acceleration by its acceleration tolerance, and
-/// in speed by `2·√(pos·accel)`, the fastest an error held within `pos`
-/// whose rate changes no faster than `accel` can change (Landau's
-/// inequality on a half-line).
+/// in speed by the [`fit_speed_miss`] of both.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct FitMiss {
     pub position: f64,
@@ -26,7 +24,7 @@ impl FitMiss {
     pub fn of(pos_mm: f64, accel_mm_s2: f64) -> Self {
         Self {
             position: pos_mm,
-            speed: 2.0 * (pos_mm * accel_mm_s2).sqrt(),
+            speed: fit_speed_miss(pos_mm, accel_mm_s2),
             accel: accel_mm_s2,
         }
     }
