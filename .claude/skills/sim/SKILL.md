@@ -18,7 +18,8 @@ tools/sim/run.sh test --keep-logs   # leave every world's logs in .sim-logs/
 tools/sim/run.sh test --verbose     # stream the image build (hidden by default)
 tools/sim/run.sh serve              # long-lived printer for Moonraker/Mainsail
 tools/sim/run.sh shell              # bash inside the image
-tools/sim/run.sh test --branch X    # mode first, then --branch: any mode against another branch
+tools/sim/run.sh test --branch X    # mode first, then --branch: any mode against another branch, built from X's own tools/sim
+tools/sim/run.sh test --branch X --overlay-sim-tools  # X with this worktree's tools/sim; banner, closing line and image tag say OVERLAID
 tools/sim/run.sh --no-cache         # force full rebuild
 SIM_JITTER=3 tools/sim/run.sh test # pin the container + 3 bursty burners to one cpuset (CI-runner jitter repro)
 tools/sim/run.sh fuzz --seeds 1..500 --minimize  # seeded scenario fuzzer (printer + print + user actions per seed, mesh seam moves with a mesh); failures in .sim-fuzz/
@@ -26,7 +27,7 @@ tools/sim/run.sh fuzz --seed N     # replay one seed; --replay DIR replays a sav
 python3 tools/sim/hunt.py --seeds 1000..2999 --run-name NAME  # long fuzz runs in ~10 min `slots.py --kind sim` batches; resumable from the ledger
 ```
 
-Every build is tagged `kalico-sim-<branch>` (the worktree's branch, or `--branch`'s argument), so agents/sessions on different worktrees build and test in parallel without clobbering each other's images.
+Every build is tagged `kalico-sim-<branch>` (the worktree's branch, or `--branch`'s argument; `.sim-tools-<worktree>` appended with `--overlay-sim-tools`), so agents/sessions on different worktrees build and test in parallel without clobbering each other's images.
 
 Planner-only check of a print without Docker: `uv run python scripts/preflight.py PRINT.gcode --config printer.cfg` (`docs/rewrite/preflight.md`); it does not cover what the sim does (MCU, homing, heaters, host runtime).
 
