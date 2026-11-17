@@ -21,6 +21,7 @@ on:
       - 'test/configs/*.config'
       - 'tools/bench/step_benchmark_emu.py'
       - 'scripts/ci-build-mcu.sh'
+      - 'scripts/linux_mcu_restart_check.py'
       - '.github/workflows/ci-mcu-firmware.yaml'
 
 concurrency:
@@ -116,6 +117,9 @@ jobs:
           nm rust/target-linux/release/libc_api.a 2>/dev/null | grep -qE ' U _?phase_stepping_write_xdirect' \
             || { echo "ERROR: Rust staticlib has no UNDEFINED phase_stepping_write_xdirect ref — mcu-linux FFI gate not emitting the call"; exit 1; }
           echo "OK: real Linux MCU linked; FFI edge live (Rust U -> C T phase_stepping_write_xdirect)"
+
+      - name: FIRMWARE_RESTART resets the real Linux MCU (#879)
+        run: python3 scripts/linux_mcu_restart_check.py out/klipper.elf out/klipper.dict
 
       - name: Build SIM Linux MCU (.config.linux, MCU_SIM=y)
         run: |
