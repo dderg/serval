@@ -2278,11 +2278,9 @@ fn fit_axis_targets(
             .filter_map(|&t| scale_cache[&t.to_bits()].steps.break_at(t, fit_tol, floors))
             .collect::<Vec<_>>();
         plans.push(
-            fit_plan_from_seeds(seeds, &breaks, floors, fit_tol.pos_mm).map_err(
-                |crowded| {
-                    crowded_velocity_breaks_error(axis, fit_context, floors, fit_tol, crowded)
-                },
-            )?,
+            fit_plan_from_seeds(seeds, &breaks, floors, fit_tol.pos_mm).map_err(|crowded| {
+                crowded_velocity_breaks_error(axis, fit_context, floors, fit_tol, crowded)
+            })?,
         );
     }
     let jobs = plans
@@ -4060,8 +4058,7 @@ impl StepsAcross {
 
 fn steps_across<S: TrackSignal>(sig: &S, t: f64) -> StepsAcross {
     let (_, velocity_after, acceleration_after) = sig.eval_pva(next_toward(t, f64::INFINITY));
-    let (_, velocity_before, acceleration_before) =
-        sig.eval_pva(next_toward(t, f64::NEG_INFINITY));
+    let (_, velocity_before, acceleration_before) = sig.eval_pva(next_toward(t, f64::NEG_INFINITY));
     StepsAcross {
         velocity: velocity_after - velocity_before,
         acceleration: acceleration_after - acceleration_before,
