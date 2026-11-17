@@ -254,7 +254,7 @@ fn hole_perimeters() -> Vec<GcodeLine> {
     ];
     let (inner_feed, between_feed, outer_feed) = (432.5609333333333, 1000.0, 331.60196666666667);
     let laid = |seq: u32, start: [f64; 2], end: [f64; 2], feed: f64| {
-        let length = (end[0] - start[0]).hypot(end[1] - start[1]);
+        let length = libm::hypot(end[0] - start[0], end[1] - start[1]);
         line(seq, start, end, RATIO * length, feed)
     };
     let mut lines: Vec<GcodeLine> = inner
