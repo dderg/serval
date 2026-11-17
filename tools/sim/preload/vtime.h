@@ -10,6 +10,11 @@
 #define VTIME_MAX_HOST_THREADS 64
 #define VTIME_MAX_LINKS 8
 #define VTIME_SHM_BYTES 8192
+// A device link slot's pts_plus_one once its process exited or exec'd (the
+// linux firmware's config_reset re-executes itself): the next device
+// process reuses it. CLAIMING holds it while that process resets it.
+#define VTIME_LINK_RELEASED UINT32_MAX
+#define VTIME_LINK_CLAIMING (UINT32_MAX - 1)
 
 // One device pty. Host→device bytes (written/consumed) hold the clock until
 // the device has read them; device→host bytes (reply_written /

@@ -239,6 +239,7 @@ _LINK_SLOTS_USED_OFFSET = 3600
 _LINKS_OFFSET = 3608
 _LINK_SLOT_SIZE = 48
 _MAX_LINKS = 8
+_LINK_CLAIMING = 0xFFFFFFFE
 _LINK_FAULTS_OFFSET = 3992
 _LINK_FAULT_SIZE = 24
 FAULT_DELAY, FAULT_DROP, FAULT_STALL, FAULT_LATE = 1, 2, 3, 4
@@ -395,7 +396,7 @@ class VirtualClock:
             pts, _, written, consumed = struct.unpack_from(
                 "<IIQQ", shm, _LINKS_OFFSET + i * _LINK_SLOT_SIZE
             )
-            if pts and written != consumed:
+            if 0 < pts < _LINK_CLAIMING and written != consumed:
                 parts.append(
                     f"device pts{pts - 1} unread={written - consumed}B"
                 )

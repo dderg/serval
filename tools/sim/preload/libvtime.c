@@ -382,6 +382,12 @@ link_slots_used(void)
     return used > VTIME_MAX_LINKS ? VTIME_MAX_LINKS : used;
 }
 
+static int
+link_in_use(uint32_t pts_plus_one)
+{
+    return pts_plus_one && pts_plus_one < VTIME_LINK_CLAIMING;
+}
+
 static int device_link_fd = -1;
 static int device_link_slot = -1;
 static __thread int device_handling;
@@ -402,7 +408,8 @@ device_input_floor(uint64_t now)
     uint32_t used = link_slots_used();
     for (uint32_t i = 0; i < used; i++) {
         struct vtime_device_link *link = &vshm->links[i];
-        if (!atomic_load_explicit(&link->pts_plus_one, memory_order_acquire))
+        if (!link_in_use(atomic_load_explicit(&link->pts_plus_one,
+                                              memory_order_acquire)))
             continue;
         if (atomic_load_explicit(&link->host_waiting, memory_order_acquire)
             && atomic_load_explicit(&link->reply_written, memory_order_acquire)
@@ -844,6 +851,24 @@ fault_bytes_due(void)
         || (fault.release_ns && vtime_now() >= fault.release_ns);
 }
 
+// A slot a device process released, else a fresh one: every
+// FIRMWARE_RESTART re-executes each MCU, and fresh slots alone ran out
+// after the second restart of a two-MCU world.
+static uint32_t
+claim_link_slot(void)
+{
+    uint32_t used = link_slots_used();
+    for (uint32_t i = 0; i < used; i++) {
+        uint32_t released = VTIME_LINK_RELEASED;
+        if (atomic_compare_exchange_strong_explicit(
+                &vshm->links[i].pts_plus_one, &released, VTIME_LINK_CLAIMING,
+                memory_order_acq_rel, memory_order_acquire))
+            return i;
+    }
+    return atomic_fetch_add_explicit(&vshm->link_slots_used, 1,
+                                     memory_order_acq_rel);
+}
+
 static void
 register_device_link(int master_fd)
 {
@@ -856,8 +881,7 @@ register_device_link(int master_fd)
         fprintf(stderr, "[vtime] TIOCGPTN failed: %s\n", strerror(errno));
         abort();
     }
-    uint32_t slot = atomic_fetch_add_explicit(&vshm->link_slots_used, 1,
-                                              memory_order_acq_rel);
+    uint32_t slot = claim_link_slot();
     if (slot >= VTIME_MAX_LINKS) {
         fprintf(stderr, "[vtime] more than %d device links\n",
                 VTIME_MAX_LINKS);
@@ -866,6 +890,10 @@ register_device_link(int master_fd)
     struct vtime_device_link *link = &vshm->links[slot];
     atomic_store_explicit(&link->written, 0, memory_order_release);
     atomic_store_explicit(&link->consumed, 0, memory_order_release);
+    atomic_store_explicit(&link->reply_written, 0, memory_order_release);
+    atomic_store_explicit(&link->reply_consumed, 0, memory_order_release);
+    atomic_store_explicit(&link->owner_stepping_to_ns, 0,
+                          memory_order_release);
     atomic_store_explicit(&link->pts_plus_one, pts + 1, memory_order_release);
     device_link_fd = master_fd;
     device_link_slot = (int)slot;
@@ -1303,8 +1331,8 @@ release_process_registrations(void)
                                   memory_order_release);
     finish_device_handling();
     if (device_link_slot >= 0)
-        atomic_store_explicit(&vshm->links[device_link_slot].pts_plus_one, 0,
-                              memory_order_release);
+        atomic_store_explicit(&vshm->links[device_link_slot].pts_plus_one,
+                              VTIME_LINK_RELEASED, memory_order_release);
 }
 
 __attribute__((destructor))
