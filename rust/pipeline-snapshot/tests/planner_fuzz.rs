@@ -38,7 +38,7 @@ use pipeline_snapshot::{
 };
 use planner_config::from_doc::planner_config_from_text;
 use proptest::prelude::*;
-use proptest::test_runner::RngSeed;
+use proptest::test_runner::{FailurePersistence, FileFailurePersistence, RngSeed};
 
 #[derive(Debug, Clone, Copy)]
 struct FuzzLimits {
@@ -221,20 +221,32 @@ fn xy_smoothness_spikes(report: &AuditReport) -> Vec<&Violation> {
 
 const PINNED_SEED: u64 = 20260708;
 
+const REGRESSIONS: &str = "proptest-regressions/planner_fuzz.txt";
+
+fn committed_regressions() -> Box<dyn FailurePersistence> {
+    Box::new(FileFailurePersistence::Direct(REGRESSIONS))
+}
+
+/// A fresh seed's run saves its failures to the committed regressions file
+/// and replays the file's seeds first. A run given its seed
+/// (`PROPTEST_RNG_SEED`) explores that seed alone and leaves the file be:
+/// the seed reproduces it, and replaying the file first would report a
+/// known failure in place of the seed's own.
 fn fresh_seed_config() -> ProptestConfig {
-    let seed = std::env::var("PROPTEST_RNG_SEED")
+    let given = std::env::var("PROPTEST_RNG_SEED")
         .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or_else(|| {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock after the epoch")
-                .as_nanos();
-            (nanos as u64) ^ u64::from(std::process::id()).rotate_left(40)
-        });
+        .and_then(|value| value.parse().ok());
+    let seed = given.unwrap_or_else(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after the epoch")
+            .as_nanos();
+        (nanos as u64) ^ u64::from(std::process::id()).rotate_left(40)
+    });
     eprintln!("planner_fuzz seed: reproduce with PROPTEST_RNG_SEED={seed}");
     ProptestConfig {
         rng_seed: RngSeed::Fixed(seed),
+        failure_persistence: given.is_none().then(committed_regressions),
         ..ProptestConfig::default()
     }
 }
@@ -257,6 +269,7 @@ proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256,
         rng_seed: RngSeed::Fixed(PINNED_SEED),
+        failure_persistence: Some(committed_regressions()),
         ..ProptestConfig::default()
     })]
 
@@ -425,7 +438,7 @@ proptest! {
     #![proptest_config(fresh_seed_config())]
 
     #[test]
-    #[ignore = "#936 #903 #946: a ratio read changing across a join, the turning guard's valley sides and a velocity step near a retract fail on draws of this space"]
+    #[ignore = "#936 #903 #946 #955: a ratio read changing across a join, the turning guard's valley sides, a velocity step near a retract and a ratio step crossed while braking fail on draws of this space"]
     fn an_advanced_extruder_plans_print_like_streams(
         printer in advanced_printer_strategy(),
         ratio in 0.02..0.06_f64,
