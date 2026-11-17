@@ -5,7 +5,7 @@ Run through tools/sim/run.sh, which mounts .sim-fuzz/ for the results:
 
     tools/sim/run.sh fuzz --seeds 1000..1999 [--jobs 8] [--budget-s 3600] [--minimize]
     tools/sim/run.sh fuzz --seed 1234                 # replay one seed
-    tools/sim/run.sh fuzz --replay .sim-fuzz/<run>/seed-1234/minimized
+    tools/sim/run.sh fuzz --replay .sim-fuzz/<run>/seed-1234/minimized [DIR ...]
 
 One line per scenario (PASS, or FAIL and the violated check). A failure
 keeps its directory: the scenario (scenario.json, timeline.txt and the
@@ -62,7 +62,10 @@ def _parse(argv) -> argparse.Namespace:
         help="one seed or a comma list",
     )
     which.add_argument(
-        "--replay", type=pathlib.Path, help="a saved scenario directory"
+        "--replay",
+        type=pathlib.Path,
+        nargs="+",
+        help="saved scenario directories (distinct seeds)",
     )
     which.add_argument("--worker", type=pathlib.Path, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -240,17 +243,24 @@ class Runner:
         print(_line(result), flush=True)
         return result
 
-    def replay(self, source: pathlib.Path) -> list[dict]:
-        chosen = scenario.load(source)
+    def replay(self, sources: list[pathlib.Path]) -> list[dict]:
+        chosen = [scenario.load(source) for source in sources]
+        seeds = [c.seed for c in chosen]
+        if len(set(seeds)) != len(seeds):
+            raise SystemExit(f"--replay: two scenarios share a seed: {seeds}")
 
-        def one(attempt: int) -> dict:
-            name = self._name(f"replay-{chosen.seed}", attempt)
-            directory = self._prepare(chosen, name)
+        def one(job: tuple[scenario.Scenario, int]) -> dict:
+            replayed, attempt = job
+            name = self._name(f"replay-{replayed.seed}", attempt)
+            directory = self._prepare(replayed, name)
             result = self.evaluate(directory, seed_mode=False)
             print(_line(result), flush=True)
             return result
 
-        return list(self.pool.map(one, range(self.args.repeat)))
+        jobs = [
+            (c, attempt) for c in chosen for attempt in range(self.args.repeat)
+        ]
+        return list(self.pool.map(one, jobs))
 
     def minimize(self, result: dict) -> dict:
         source = result["dir"]
