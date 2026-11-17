@@ -2,13 +2,13 @@ use std::cell::OnceCell;
 use std::collections::VecDeque;
 
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RATIO_RAMP_MAX_TIME_S, RatioRampRule,
+    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RATIO_RAMP_MAX_TIME_S, RatioRampRule, StepRamps,
     VALLEY_LEAD_BUDGET_S, crawl_side_width, crawl_step_window, kept_floor, side_weight,
     turns_around,
 };
 
 use super::super::{RatioSpan, SPAN_LOOKUP_SLACK_MM, Table};
-use super::{Crossing, NODE_SPACING_S, RampLeg, RatioSmoothing, Seam, StepRamps};
+use super::{Crossing, NODE_SPACING_S, RampLeg, RatioSmoothing, Seam};
 
 /// The fewest intervals per leg the side trail reads the leaders at; a
 /// longer leg gets one per [`NODE_SPACING_S`]. The most the leaders can be
@@ -314,15 +314,31 @@ impl Edge {
 }
 
 /// What a crawl valley's sides read as laid: the span table up to `table`,
-/// infinite where the leaders rest past the trail; the leaders' trail; and
-/// the ratio steps the valley does not own whose smoothing may still change
+/// infinite where the leaders rest past the trail; the leaders' trail; the
+/// ratio steps the valley does not own whose smoothing may still change
 /// ([`RatioSmoothing::unfinal_steps`]), none for a follower the turning
-/// guard does not hold, whose sides budget no ramp.
+/// guard does not hold, whose sides budget no ramp; and whether the width
+/// budgets the ramps of the steps inside the side.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SideReads<'a> {
     pub(super) table: f64,
     pub(super) trail: &'a SideTrail,
     pub(super) unfinal_steps: &'a [f64],
+    pub(super) step_ramps: StepRampBudget,
+}
+
+/// Whether a crawl side's width budgets the ramps of the ratio steps the
+/// valley does not own inside it ([`geometry::StepRamps`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum StepRampBudget {
+    /// The side widens until they fit.
+    InWidth,
+    /// The side is held within the path the projection still holds and its
+    /// width asks only the rebuild to fit: the ramps are the leaders'
+    /// speed's to fit, which the turning guard lowers, and the projection
+    /// holds their exact read to the follower's limit
+    /// ([`RatioSmoothing::assert_ramp_in_a_crawl_side_fits`]).
+    LeftToSpeed,
 }
 
 /// The width of the `side` of the crawl valley leaving its zero stretch at
@@ -375,7 +391,8 @@ pub(super) struct SideReads<'a> {
 /// `3W′·ṡ·s̈`. The advanced velocity `r̃·ṡ + k·(W·(r̃′·ṡ² + r̃·s̈) + W′·r̃·ṡ²)`
 /// fits the follower's velocity limit the same way, `W′·r̃·ṡ²` being the
 /// lead the rebuild adds ([`side_slope_within`]). The side widens until
-/// all of it fits.
+/// all of it fits, or, where `reads` leaves the ramps to the leaders'
+/// speed ([`StepRampBudget::LeftToSpeed`]), until the rest does.
 ///
 /// A follower behind its own kernel keeps the leaders' reach: the turning
 /// guard holds kernel-free followers only and leaves no room for its
@@ -459,7 +476,7 @@ pub(super) fn crawl_side(
         };
         let ramps_over = |interval: Interval| {
             let (lo, hi) = clipped(interval);
-            if lo > hi {
+            if lo > hi || reads.step_ramps == StepRampBudget::LeftToSpeed {
                 return StepRamps::default();
             }
             smoothing.step_ramps((lo, hi), &|table, s| steps.owns(table, s))
@@ -510,13 +527,9 @@ pub(super) fn crawl_side(
                 .map(|probe| side_weight(distance_of(probe), width, floor).0)
                 .into_iter()
                 .fold(0.0, f64::max);
-            let ramp_ask = ramps.flow * speed * speed
-                + slope
-                    * weight
-                    * speed
-                    * (ramps.curvature * speed * speed + 3.0 * ramps.slope * interval_accel);
+            let ramp_ask = ramps.accel(slope, weight, speed, interval_accel);
             let room = ((rule.max_accel_mm_s2 - ramp_ask) / ratio - own) / slope;
-            let lead_accel = interval_accel + 2.0 / 3.0 * ramps.slope / ratio * speed * speed;
+            let lead_accel = interval_accel + ramps.rebuild_accel(ratio, speed);
             let readings = [from, to].map(|probe| (distance_of(probe), probe.speed));
             let (near, far) = if readings[0].0 <= readings[1].0 {
                 (readings[0], readings[1])
@@ -564,6 +577,32 @@ pub(super) fn crawl_side(
         return Err(Unlaid::WaitsOnSteps);
     }
     Ok(width.filter(|&width| width <= limit))
+}
+
+/// The before side of a crawl valley at `edge` where none that budgets the
+/// ramps of the steps inside it fits within `limit`, the path the
+/// projection still holds: the narrowest within it whose rebuild fits,
+/// ramps aside (`laid` reads them [`StepRampBudget::LeftToSpeed`]).
+/// Widening it past the held path for the ramps would pull in more steps,
+/// and owning them more path, each without end on an outline: the ramps
+/// are the leaders' speed's to fit, and their exact read is held to the
+/// follower's limit ([`RatioSmoothing::assert_ramp_in_a_crawl_side_fits`]).
+/// Where even the rebuild fits no such side, the stream fails loudly.
+pub(super) fn held_side(
+    (edge, reach, limit): (Edge, f64, f64),
+    laid: (&RatioSmoothing, (&[RatioSpan], &[RatioSpan]), SideReads),
+    steps: &StepWindows,
+    rule: &RatioRampRule,
+) -> Result<f64, Unlaid> {
+    let width = crawl_side(Side::Before, edge, reach, laid, steps, rule, limit)?;
+    Ok(width.unwrap_or_else(|| {
+        panic!(
+            "follower projection: no before side of the crawl valley at s={} ({edge:?}) within \
+             the {limit} mm of path the projection still holds (reach {reach} mm) fits its \
+             rebuild within the follower's limit",
+            edge.s
+        )
+    }))
 }
 
 /// `(max W, max |W′|)` over the distances `[near, far]` from the zero

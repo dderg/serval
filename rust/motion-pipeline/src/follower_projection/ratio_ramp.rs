@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use geometry::{
     ADVANCE_VALLEY_SPEED_MM_S, AdvanceValley, RATIO_RAMP_ENVELOPE_SLOPE as ENVELOPE_SLOPE,
-    RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep,
+    RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S, RatioRampRule, RatioStep, StepRamps,
     TURNAROUND_SPEED_TIME_S, ValleyKind, crawl_floor, leader_reach, turns_around, valley_reach,
 };
 
@@ -17,7 +17,9 @@ mod crawl_sides;
 mod jet;
 mod models;
 
-use crawl_sides::{Side, SideReads, SideTrail, StepWindows, Unlaid, crawl_side};
+use crawl_sides::{
+    Side, SideReads, SideTrail, StepRampBudget, StepWindows, Unlaid, crawl_side, held_side,
+};
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
 pub(super) use models::{PathReach, ValleyWeight, narrow_floats};
@@ -655,17 +657,6 @@ impl SeamTable {
                 total + cluster.correction(s)
             })
     }
-}
-
-/// The most the ratio steps' ramps slope and bend the smoothed ratio over
-/// a stretch ([`RatioSmoothing::step_ramps`]): `|r̃′|` of the laid table,
-/// whose flow reaches the follower, and `|r̃′|`, `|r̃″|` of the advance
-/// table, which the advance reads.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(super) struct StepRamps {
-    pub(super) flow: f64,
-    pub(super) slope: f64,
-    pub(super) curvature: f64,
 }
 
 /// Which spans the smoothed table reads over a stretch
@@ -2413,11 +2404,15 @@ impl RatioSmoothing {
     /// wide as its rebuild
     /// needs ([`crawl_side`]), past the leaders' `reach`; the before side
     /// only where the valley does not widen the last one over it
-    /// ([`Self::place_valley`]). Where no before side reaching no further
-    /// back than the leaders last rested, nor into the path the projection
-    /// has taken, fits, the valley holds the weight at zero back to the rest
-    /// instead: the leaders leave that rest with no lead to release, and the
-    /// after side rebuilds it. A follower the turning guard does not hold
+    /// ([`Self::place_valley`]). The before side reaches back no further
+    /// than the leaders last rested, nor into the path the projection has
+    /// taken: the path it still holds, which [`Self::unlaid_valley_reach`]
+    /// keeps back for a crawl's lead budget. Where no such side fits and the
+    /// rest lies on untaken path, the valley holds the weight at zero back
+    /// to the rest instead: the leaders leave that rest with no lead to
+    /// release, and the after side rebuilds it. Elsewhere the side is the
+    /// widest the held path takes ([`held_side`]). A follower the turning
+    /// guard does not hold
     /// ([`guarded_by_the_turning_guard`]) has no room left for its sides:
     /// its before side is the leaders' reach, as far back as the projection
     /// still holds the path.
@@ -2467,6 +2462,7 @@ impl RatioSmoothing {
             table: table_end,
             trail,
             unfinal_steps: &unfinal_steps,
+            step_ramps: StepRampBudget::InWidth,
         };
         let laid = (&*self, tables, reads);
         let after = crawl_side(
@@ -2491,16 +2487,25 @@ impl RatioSmoothing {
         } else if widens_the_last {
             (zero.0, reach)
         } else {
-            crawl_side(
-                Side::Before,
-                edges.0,
-                reach,
-                laid,
-                &steps,
-                rule,
-                zero.0 - rested.max(held),
-            )?
-            .map_or((rested, 0.0), |before| (zero.0, before))
+            let limit = zero.0 - rested.max(held);
+            match crawl_side(Side::Before, edges.0, reach, laid, &steps, rule, limit)? {
+                Some(before) => (zero.0, before),
+                None if rested >= held => (rested, 0.0),
+                None => {
+                    let rebuild_only = SideReads {
+                        unfinal_steps: &[],
+                        step_ramps: StepRampBudget::LeftToSpeed,
+                        ..reads
+                    };
+                    let before = held_side(
+                        (edges.0, reach, limit),
+                        (&*self, tables, rebuild_only),
+                        &steps,
+                        rule,
+                    )?;
+                    (zero.0, before)
+                }
+            }
         };
         let (zero, sides, floors) = (
             (start, zero.1),
@@ -3116,9 +3121,10 @@ impl RatioSmoothing {
         )
     }
 
-    /// [`StepRamps`] over `[lo, hi]`: what each stationary cluster with a
-    /// ratio step adds there ([`SeamCluster::ramp_bounds`]), summed, but
-    /// for a cluster holding a seam of the table `skips` holds. The moving
+    /// [`StepRamps`] over `[lo, hi]`: the most the ratio steps' ramps slope
+    /// and bend the smoothed ratio there, each stationary cluster with a
+    /// ratio step adding its own ([`SeamCluster::ramp_bounds`]), but for a
+    /// cluster holding a seam of the table `skips` holds. The moving
     /// window's slopes are the planner's, as the flow over a crawl
     /// valley's zero stretch leaves them ([`StepWindows`]).
     pub(super) fn step_ramps(

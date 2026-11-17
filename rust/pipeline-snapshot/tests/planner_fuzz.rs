@@ -1270,14 +1270,54 @@ max_extrude_only_accel: 5000
 #[test]
 fn a_crawl_waiting_on_a_step_keeps_its_before_side_on_untaken_path() {
     let moves = [
-        PrintMove::Line { turn: 0.5581263465705404, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: -0.25910234519181824, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: -0.3732766402430854, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 8.634078274694607, feed_mm_s: 272.7737433730867, ratio_jitter: Some(0.3418686509066707) },
-        PrintMove::Line { turn: 0.0, length_mm: 0.12460863258698181, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 3.141592653589793, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line {
+            turn: 0.5581263465705404,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: -0.25910234519181824,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: -0.3732766402430854,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 8.634078274694607,
+            feed_mm_s: 272.7737433730867,
+            ratio_jitter: Some(0.3418686509066707),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 0.12460863258698181,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 3.141592653589793,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
     ];
     let failure = print_like_failure(SEED_107_PRINTER, 0.0506342928097271, &moves);
     assert!(failure.is_none(), "{}", failure.unwrap_or_default());
@@ -1337,18 +1377,78 @@ max_extrude_only_accel: 5000
 #[test]
 fn step_ramps_inside_a_lead_held_crawl_side_fit_the_extruder() {
     let moves = [
-        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(-0.39332805590604747) },
-        PrintMove::Line { turn: 0.0, length_mm: 2.989920269118111, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 5.0349722288363745, feed_mm_s: 20.0, ratio_jitter: Some(-0.49831958520602304) },
-        PrintMove::Line { turn: 0.0, length_mm: 5.1184025187851425, feed_mm_s: 278.40796362043454, ratio_jitter: Some(0.20222715099830577) },
-        PrintMove::Line { turn: 0.0, length_mm: 0.8140516725991794, feed_mm_s: 227.25216287748776, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 3.141592653589793, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 122.115339346924, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
-        PrintMove::Line { turn: 0.0, length_mm: 10.75845666965621, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(-0.39332805590604747),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 2.989920269118111,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 5.0349722288363745,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(-0.49831958520602304),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 5.1184025187851425,
+            feed_mm_s: 278.40796362043454,
+            ratio_jitter: Some(0.20222715099830577),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 0.8140516725991794,
+            feed_mm_s: 227.25216287748776,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 3.141592653589793,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 1.0,
+            feed_mm_s: 122.115339346924,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 1.0,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
+        PrintMove::Line {
+            turn: 0.0,
+            length_mm: 10.75845666965621,
+            feed_mm_s: 20.0,
+            ratio_jitter: Some(0.0),
+        },
     ];
     let failure = print_like_failure(SEED_116_PRINTER, 0.045351793198012864, &moves);
     assert!(failure.is_none(), "{}", failure.unwrap_or_default());
