@@ -205,8 +205,9 @@ pacer_floor_min(void)
     if (used > VTIME_MAX_PACERS)
         used = VTIME_MAX_PACERS;
     for (uint32_t i = 0; i < used; i++) {
-        if (!atomic_load_explicit(&vshm->pacers[i].active,
-                                  memory_order_acquire))
+        if (atomic_load_explicit(&vshm->pacers[i].active,
+                                 memory_order_acquire)
+            != VTIME_PACER_ACTIVE)
             continue;
         uint64_t f = atomic_load_explicit(&vshm->pacers[i].floor_ns,
                                           memory_order_acquire)
@@ -1214,13 +1215,30 @@ vtime_driver_main(void *arg)
 
 static void vtimer_check_and_fire(void);
 
+// A pacer slot a process released on exec or exit, else a fresh one: the
+// linux firmware re-registers its pacer after every config_reset.
+static uint32_t
+claim_pacer_slot(void)
+{
+    uint32_t used = atomic_load_explicit(&vshm->pacer_slots_used,
+                                         memory_order_acquire);
+    for (uint32_t i = 0; i < used && i < VTIME_MAX_PACERS; i++) {
+        uint32_t released = VTIME_PACER_RELEASED;
+        if (atomic_compare_exchange_strong_explicit(
+                &vshm->pacers[i].active, &released, VTIME_PACER_CLAIMING,
+                memory_order_acq_rel, memory_order_acquire))
+            return i;
+    }
+    return atomic_fetch_add_explicit(&vshm->pacer_slots_used, 1,
+                                     memory_order_acq_rel);
+}
+
 __attribute__((visibility("default"))) int
 vtime_pacer_register_slack(uint64_t period_ns, uint64_t slack_ns)
 {
     if (!vshm || period_ns == 0)
         return -1;
-    uint32_t slot = atomic_fetch_add_explicit(&vshm->pacer_slots_used, 1,
-                                              memory_order_acq_rel);
+    uint32_t slot = claim_pacer_slot();
     if (slot >= VTIME_MAX_PACERS)
         return -1;
     clock_lock();
@@ -1228,7 +1246,7 @@ vtime_pacer_register_slack(uint64_t period_ns, uint64_t slack_ns)
                           memory_order_release);
     atomic_store_explicit(&vshm->pacers[slot].floor_ns,
                           deadline_after(period_ns), memory_order_release);
-    atomic_store_explicit(&vshm->pacers[slot].active, 1,
+    atomic_store_explicit(&vshm->pacers[slot].active, VTIME_PACER_ACTIVE,
                           memory_order_release);
     clock_unlock();
     owned_pacer_slots[slot] = 1;
@@ -1327,8 +1345,8 @@ release_process_registrations(void)
         atomic_store_explicit(&vshm->host_present, 0, memory_order_release);
     for (int i = 0; i < VTIME_MAX_PACERS; i++)
         if (owned_pacer_slots[i])
-            atomic_store_explicit(&vshm->pacers[i].active, 0,
-                                  memory_order_release);
+            atomic_store_explicit(&vshm->pacers[i].active,
+                                  VTIME_PACER_RELEASED, memory_order_release);
     finish_device_handling();
     if (device_link_slot >= 0)
         atomic_store_explicit(&vshm->links[device_link_slot].pts_plus_one,

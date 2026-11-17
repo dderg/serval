@@ -240,6 +240,7 @@ _LINKS_OFFSET = 3608
 _LINK_SLOT_SIZE = 48
 _MAX_LINKS = 8
 _LINK_CLAIMING = 0xFFFFFFFE
+_PACER_ACTIVE = 1
 _LINK_FAULTS_OFFSET = 3992
 _LINK_FAULT_SIZE = 24
 FAULT_DELAY, FAULT_DROP, FAULT_STALL, FAULT_LATE = 1, 2, 3, 4
@@ -405,7 +406,7 @@ class VirtualClock:
             active, _, floor, slack = struct.unpack_from(
                 "<IIQQ", shm, _PACERS_OFFSET + i * _PACER_SLOT_SIZE
             )
-            if active:
+            if active == _PACER_ACTIVE:
                 parts.append(
                     f"pacer{i} floor+slack={(floor + slack - now) / 1e6:+.3f}ms"
                 )
