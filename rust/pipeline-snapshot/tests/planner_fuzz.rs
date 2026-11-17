@@ -425,7 +425,7 @@ proptest! {
     #![proptest_config(fresh_seed_config())]
 
     #[test]
-    #[ignore = "#936 #903: a ratio read changing across a join, and the turning guard's valley sides fail on draws of this space"]
+    #[ignore = "#936 #903 #946 #947: a ratio read changing across a join, the turning guard's valley sides, a velocity step near a retract, and a settling retract the audit reads as moving fail on draws of this space"]
     fn an_advanced_extruder_plans_print_like_streams(
         printer in advanced_printer_strategy(),
         ratio in 0.02..0.06_f64,
