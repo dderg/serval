@@ -469,7 +469,10 @@ fn stretches_reading<K: PartialEq + Clone>(
             continue;
         }
         if low == high {
-            let exact = (lo != reach.lo || reach.exact.0, hi != reach.hi || reach.exact.1);
+            let exact = (
+                lo != reach.lo || reach.exact.0,
+                hi != reach.hi || reach.exact.1,
+            );
             found.push((PathReach { lo, hi, exact }, low));
         } else {
             found.push((PathReach::point(lo), low));
@@ -769,7 +772,8 @@ impl RatioSmoothing {
     ) -> Option<Vec<CorrectionFormula>> {
         let stretches = stretches_reading(reach, |s| {
             let h = self.width.jet(s).value.max(0.0);
-            let count = |past: &dyn Fn(f64) -> bool| seams.seams.partition_point(|seam| past(seam.s));
+            let count =
+                |past: &dyn Fn(f64) -> bool| seams.seams.partition_point(|seam| past(seam.s));
             let window = (
                 count(&|seam| seam <= s - h),
                 count(&|seam| seam < s + h),
@@ -1055,7 +1059,12 @@ impl RatioSmoothing {
                 let (lo, hi) = reach.span();
                 let valleys: Vec<&AdvanceValley> = self.valleys_over(lo, hi).collect();
                 stretches_reading(reach, |at| {
-                    Some(valleys.iter().map(|valley| valley.order(at)).collect::<Vec<_>>())
+                    Some(
+                        valleys
+                            .iter()
+                            .map(|valley| valley.order(at))
+                            .collect::<Vec<_>>(),
+                    )
                 })?
                 .into_iter()
                 .map(|(part, _)| part)
