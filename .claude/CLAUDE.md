@@ -125,7 +125,18 @@ scope, every agent with it. Now a job over its cap is OOM-killed alone, and `slo
 99 with the job's name and peak. Without a user manager it fails loudly; a container sets
 `SERVAL_SLOT_UNCAPPED=1`. Heavy work started beside the slots still runs in the session scope:
 start it under `slots.py run`.
-`slots.py status` prints the wait graph (holders, and the queue with what each waiter wants).
+Each admission is capped in time: 2400 s (`MAX_HOLD_S`), 900 s exclusive
+(`MAX_EXCLUSIVE_HOLD_S`), shorter with `--max-hold S`. At the cap the job's processes get
+SIGTERM, then SIGKILL 10 s later, and `slots.py` exits 98 naming the job. Long work is chunked
+into separate admissions: a sim fuzz hunt by seed range, a sweep by manifest slice, `ci.sh all`
+by job. 11-17: an exclusive preflight timing pass reached the queue head while a
+`run.sh fuzz --seeds 1000..2999` hunt held a slot for hours, and every waiter sat behind it with
+two slots idle. Now an exclusive head waits at most 2400 s for the drain, and a waiter behind it
+at most 2400 + 900 s per exclusive ahead of it. Holders of older slots.py copies have no cap,
+so `status` names them as unbounded. `scripts/preflight.py --verdict-only` skips the
+exclusive timing pass when only the planner check and verdict are needed.
+`slots.py status` prints the wait graph: each holder with its held seconds and cap, the queue
+with what each waiter wants, and what the head waits for.
 Waiting is queued, prints the graph every 60 s and fails after 2 h, or after 5 min when the
 queue head has not moved although it could start, or while a holder (or a process under one)
 sits in the queue: it would wait for itself. Waiters are served first come, first served (a pid

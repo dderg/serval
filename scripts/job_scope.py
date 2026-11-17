@@ -24,6 +24,7 @@ from pathlib import Path
 
 GIB = 2**30
 ENV_UNCAPPED = "SERVAL_SLOT_UNCAPPED"
+UNIT_PREFIX = "serval-slot-"
 MOVE_SECONDS = 5.0
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 
@@ -114,7 +115,7 @@ class Scope:
 
 def enter(label: str, caps: Caps) -> Scope:
     pid = os.getpid()
-    unit = f"serval-slot-{pid}-{time.monotonic_ns()}.scope"
+    unit = f"{UNIT_PREFIX}{pid}-{time.monotonic_ns()}.scope"
     started = subprocess.run(
         start_call(unit, pid, caps, label[:200]),
         capture_output=True,
