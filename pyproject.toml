@@ -21,7 +21,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "ruff>=0.9.3",
+  "ruff==0.15.21",
   "pre-commit>=4.0.1",
   "pytest-xdist>=3.6.1",
   "pytest>=8.3.4",
@@ -87,9 +87,11 @@ pythonpath = [".", "klippy", "scripts"]
 testpaths = [
   "test",
   "snapshots/test_harness.py",
+  "scripts/test_ci_ruff.py",
   "scripts/test_job_scope.py",
   "scripts/test_preflight.py",
   "scripts/test_review_baselines.py",
+  "scripts/test_ship.py",
   "scripts/test_slots.py",
   "scripts/test_throughput_gate.py",
   "scripts/test_throughput_recheck.py",

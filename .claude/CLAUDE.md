@@ -476,7 +476,7 @@ the `source-tree` test `proptest_seeds` enforces it), because proptest's default
 persistence finds no crate root under nextest and silently drops the seed.
 
 A red check is investigated, not rerun, unless it is a known flake with an open
-issue; rerun those once and add the run id to the issue. Sim flakes so far were harness races between wall-clock threads and the free-running virtual clock, or reads of klippy's async log: look there first (`tools/sim/world.py` `settled_log_tail`, `HarnessPacer.hold_until`). `rust-fuzz` failures on a fresh
+issue; rerun those once and add the run id to the issue. Sim flakes so far were harness races between wall-clock threads and the free-running virtual clock, or reads of klippy's async log: look there first (`tools/sim/world.py` `settled_log_tail`, `HarnessPacer.hold_until`). A "sim flake" can be a product bug: #879 (`FIRMWARE_RESTART left klippy in 'shutdown'`), rerun on five PRs as a known flake, was the Linux MCU dropping the config_reset it read together with emergency_stop; make an intermittent deterministic before calling it a flake. `rust-fuzz` failures on a fresh
 seed are real counterexamples: commit the `cc` seed line to
 `proptest-regressions/` and file an issue.
 
