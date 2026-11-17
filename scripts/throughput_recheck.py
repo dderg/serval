@@ -17,9 +17,9 @@ the fit's CPU-dependent error grows with the head's distance from it.
 Between re-checks the pin holds still. Per variant and config:
 
 - Pi: the full dense print under `taskset -c 0,1` on the bench Pi (ssh
-  PI_HOST, under tools/bench/lock.py), the lowest worst window of PI_RUNS
-  runs, every variant built in one directory there so only its code differs,
-  and for the calibration commit also its fastest wall per stream second;
+  PI_HOST), the lowest worst window of PI_RUNS runs, every variant built in
+  one directory there so only its code differs, and for the calibration
+  commit also its fastest wall per stream second;
 - Ir: the instructions and stream seconds of the gate's slice, counted the
   way the gate counts them, in the gate's image;
 - live: the live 2-core wall per stream second of the full print on as many
@@ -54,6 +54,23 @@ branches), fit. `all` runs them in that order. Each stage saves its data
 under WORK/data, so a failed stage reruns alone with --stage. Collect adds
 its rows to the runner rows already collected, so a further dispatch +
 collect widens the CPU coverage before the fit.
+
+The pi stage takes the bench lock (tools/bench/lock.py) once per hold and
+releases it in between, so it refuses to run inside a hold. Every hold is
+planned to fit lock.MAX_HOLD_S less HOLD_MARGIN_S: SETTLE_PLAN_S for
+deploy.py settle (FIRMWARE_RESTART and klippy ready), BUILD_PLAN_S per
+variant build (the 2026-11-16 single-hold recheck spent ~4.5 min a
+variant), REPLAY_PLAN_S per replay (twice the slowest replay of the
+2026-11-16 qualification, 12.6 s). A build hold per variant whose
+bins/<label>.key on the Pi is not its key: settle, sync its tree into the
+shared lab dir, build, copy to bins/<label>, write the key. Then a measure
+hold per run index: settle, every key verified (a variant another run
+rebuilt is built again and the hold retried), PI_COOLDOWN_SECS, no
+throttling and no capped cpufreq policy, that run's replay of every config
+and variant in alternating order, no throttling again. Each run is saved
+under WORK/data as it lands, so a rerun after a lost hold measures only the
+runs still missing; the pi data, with every hold's lock wait and held
+seconds, is written when all runs are in.
 """
 
 from __future__ import annotations
@@ -61,21 +78,27 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime
+import enum
 import hashlib
 import json
 import math
 import os
 import re
+import shlex
 import shutil
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import throughput_gate as gate
 from throughput_gate import GateError
+
+sys.path.append(str(gate.ROOT / "tools" / "bench"))
+import lock  # noqa: E402
 
 WORK = gate.DOCKER_CACHE / "target" / "throughput-recheck"
 IMAGE_WORK = Path("rust") / "target" / "throughput-recheck"
@@ -94,6 +117,21 @@ PI_DIR = "throughput-recheck"
 PI_RUNS = 2
 PI_COOLDOWN_SECS = 60
 PI_LOCK_TIMEOUT_SECS = 3500
+HOLD_MARGIN_S = 300.0
+SETTLE_PLAN_S = 180.0
+BUILD_PLAN_S = 900.0
+REPLAY_PLAN_S = 25.0
+STALE_ATTEMPTS = 2
+KEY_SUFFIX = ".key"
+PI_BUILDS = "pi-builds"
+SETTLED = "settled: "
+UV_PYTHON = ("uv", "run", "python")
+BENCH = gate.ROOT / "tools" / "bench"
+CPUFREQ_STATE = (
+    "for p in /sys/devices/system/cpu/cpufreq/policy*; do "
+    'echo "${p##*/} $(cat $p/scaling_governor) $(cat $p/scaling_max_freq) '
+    '$(cat $p/cpuinfo_max_freq)"; done'
+)
 IMAGE_TAG = "klipper-build-throughput-recheck"
 WORST_WINDOW = re.compile(
     r"worst stream windows[^\n]*\n\s*[0-9.]+\.\.\s*[0-9.]+\s+([0-9.]+)x"
@@ -612,27 +650,241 @@ def local_held(keys: dict[str, str]) -> None:
     save("local", {"variants": keys, "rows": rows})
 
 
+class HoldKind(enum.Enum):
+    BUILD = "build"
+    MEASURE = "measure"
+
+
 def pi_stage(keys: dict[str, str]) -> None:
-    stream(
-        [
-            "uv",
-            "run",
-            "python",
-            str(gate.ROOT / "tools" / "bench" / "lock.py"),
-            "hold",
-            "--lock-timeout",
-            str(PI_LOCK_TIMEOUT_SECS),
-            "--",
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--stage",
-            "pi-held",
-            "--calibration-commit",
-            keys[CALIBRATION_LABEL],
-        ],
-        cwd=gate.ROOT,
+    refuse_nested_hold()
+    require_fits(HoldKind.BUILD, build_plan_s())
+    replays = len(keys) * len(gate.CONFIGS)
+    require_fits(HoldKind.MEASURE, measure_plan_s(replays))
+    runs = [pi_run(keys, run) for run in range(PI_RUNS)]
+    save("pi", pi_payload(keys, runs))
+    for name in [*map(run_name, range(PI_RUNS)), PI_BUILDS]:
+        data_path(name).unlink(missing_ok=True)
+
+
+def refuse_nested_hold() -> None:
+    if lock.TOKEN_ENV in os.environ:
+        raise GateError(
+            "the Pi measurement releases the bench lock between its holds: "
+            "run it outside lock.py hold"
+        )
+
+
+def build_plan_s() -> float:
+    return SETTLE_PLAN_S + BUILD_PLAN_S
+
+
+def measure_plan_s(replays: int) -> float:
+    return SETTLE_PLAN_S + PI_COOLDOWN_SECS + replays * REPLAY_PLAN_S
+
+
+def require_fits(kind: HoldKind, plan_s: float) -> None:
+    budget_s = lock.MAX_HOLD_S - HOLD_MARGIN_S
+    if plan_s > budget_s:
+        raise GateError(
+            f"a {kind.value} hold plans {plan_s:.0f} s, over the "
+            f"{budget_s:.0f} s one hold may plan (lock.MAX_HOLD_S less "
+            "HOLD_MARGIN_S)"
+        )
+
+
+def run_name(run: int) -> str:
+    return f"pi-run-{run}"
+
+
+def pi_run(keys: dict[str, str], run: int) -> dict:
+    path = data_path(run_name(run))
+    if path.exists():
+        kept = json.loads(path.read_text())
+        if kept["variants"] == keys:
+            print(
+                f"pi run {run + 1}/{PI_RUNS} measured these variants at "
+                f"{kept['measured_at']}: kept",
+                file=sys.stderr,
+                flush=True,
+            )
+            return kept
+    return measure_run(keys, run)
+
+
+def measure_run(keys: dict[str, str], run: int) -> dict:
+    holds = []
+    for _ in range(STALE_ATTEMPTS):
+        build_stale(keys)
+        hold = take_hold(
+            HoldKind.MEASURE,
+            held_command("pi-measure", keys, "--run", str(run)),
+        )
+        holds.append(hold)
+        measured = hold.pop("measured", None)
+        if measured is None:
+            print(
+                f"pi run {run + 1}/{PI_RUNS}: {hold['stale']} changed under "
+                "the measure hold, rebuilding",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        payload = {"variants": keys, **measured, "holds": holds}
+        save(run_name(run), payload)
+        return payload
+    raise GateError(
+        f"variants changed on the Pi under {STALE_ATTEMPTS} measure holds of "
+        f"run {run + 1}: is another recheck building in {PI_DIR} there?"
     )
-    load("pi", keys)
+
+
+def build_stale(keys: dict[str, str]) -> None:
+    for label in stale_labels(keys):
+        hold = take_hold(
+            HoldKind.BUILD, held_command("pi-build", keys, "--label", label)
+        )
+        path = data_path(PI_BUILDS)
+        builds = json.loads(path.read_text()) if path.exists() else {}
+        builds[label] = {"key": keys[label], "hold": hold}
+        save(PI_BUILDS, builds)
+
+
+def stale_labels(keys: dict[str, str]) -> list[str]:
+    on_pi = pi_keys()
+    return [label for label, key in keys.items() if on_pi.get(label) != key]
+
+
+def pi_keys() -> dict[str, str]:
+    listing = ssh(
+        f"cd {PI_DIR}/bins 2>/dev/null && grep -H . *{KEY_SUFFIX} "
+        "2>/dev/null || true"
+    )
+    return {
+        label: key
+        for label, _, key in (
+            line.partition(f"{KEY_SUFFIX}:") for line in listing.splitlines()
+        )
+    }
+
+
+def key_file(label: str) -> str:
+    return f"{PI_DIR}/bins/{label}{KEY_SUFFIX}"
+
+
+def held_command(stage: str, keys: dict[str, str], *extra: str) -> list[str]:
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--stage",
+        stage,
+        "--calibration-commit",
+        keys[CALIBRATION_LABEL],
+        *extra,
+    ]
+
+
+def take_hold(kind: HoldKind, command: list[str]) -> dict:
+    with tempfile.TemporaryDirectory() as scratch:
+        result = Path(scratch) / "hold.json"
+        requested = time.time()
+        code = subprocess.run(
+            [
+                *UV_PYTHON,
+                str(BENCH / "lock.py"),
+                "hold",
+                "--lock-timeout",
+                str(PI_LOCK_TIMEOUT_SECS),
+                "--",
+                *command,
+                "--result",
+                str(result),
+            ],
+            cwd=gate.ROOT,
+            check=False,
+        ).returncode
+        released = time.time()
+        if code == lock.HOLD_EXPIRED_EXIT:
+            raise GateError(
+                f"the {kind.value} hold ran past lock.MAX_HOLD_S and was "
+                "killed: rerun, it resumes with that hold"
+            )
+        if code != 0 or not result.exists():
+            raise GateError(f"the {kind.value} hold failed (exit {code})")
+        held = json.loads(result.read_text())
+    wait_s = round(held["started"] - requested, 1)
+    held_s = round(released - held["started"], 1)
+    print(
+        f"{kind.value} hold: {wait_s} s waiting for the lock, {held_s} s held",
+        file=sys.stderr,
+        flush=True,
+    )
+    return {
+        "kind": kind.value,
+        "wait_s": wait_s,
+        "held_s": held_s,
+        "exit": code,
+        **held,
+    }
+
+
+def pi_payload(keys: dict[str, str], runs: list[dict]) -> dict:
+    path = data_path(PI_BUILDS)
+    builds = json.loads(path.read_text()) if path.exists() else {}
+    holds = [
+        build["hold"]
+        for label, build in builds.items()
+        if keys.get(label) == build["key"]
+    ]
+    holds += [hold for run in runs for hold in run["holds"]]
+    holds.sort(key=lambda hold: hold["started"])
+    return {
+        "variants": keys,
+        "measured_at": runs[0]["measured_at"],
+        "worst_x": per_run(keys, runs, "worst_x"),
+        "cost": per_run(keys, runs, "cost"),
+        "holds": [
+            {"index": index, **hold} for index, hold in enumerate(holds, 1)
+        ],
+    }
+
+
+def per_run(
+    keys: dict[str, str], runs: list[dict], field: str
+) -> dict[str, dict[str, list[float]]]:
+    return {
+        label: {
+            config: [run[field][label][config] for run in runs]
+            for config in gate.CONFIGS
+        }
+        for label in keys
+    }
+
+
+def write_result(path: Path, started: float, facts: dict) -> None:
+    path.write_text(json.dumps({"started": started, **facts}, indent=2) + "\n")
+
+
+def timed(step: Callable[[], None]) -> float:
+    started = time.monotonic()
+    step()
+    return round(time.monotonic() - started, 1)
+
+
+def utc_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="seconds"
+    )
+
+
+def settle_bench() -> list[str]:
+    out = gate.run(
+        [*UV_PYTHON, str(BENCH / "deploy.py"), "settle"], cwd=gate.ROOT
+    )
+    return [
+        line.removeprefix(SETTLED)
+        for line in out.splitlines()
+        if line.startswith(SETTLED)
+    ]
 
 
 def ssh(command: str) -> str:
@@ -644,88 +896,149 @@ def pi_throttled_now() -> int:
     return int(reply.partition("=")[2], 16) & 0xF
 
 
-def pi_held(keys: dict[str, str]) -> None:
-    """Under the bench lock: build every variant in one directory on the Pi,
-    then replay each config PI_RUNS times per variant, alternating order."""
-    trees = " ".join(f"{PI_DIR}/trees/{label}" for label in keys)
-    ssh(f"mkdir -p {PI_DIR}/lab {PI_DIR}/bins {trees}")
-    for label in keys:
-        tree = WORK / "trees" / label
-        gate.run(
-            [
-                "rsync",
-                "-rlp",
-                "--checksum",
-                "--delete",
-                "--exclude",
-                "target",
-                f"{tree / 'rust'}/",
-                f"{PI_HOST}:{PI_DIR}/lab/rust/",
-            ]
+def governors() -> dict[str, dict]:
+    policies = {}
+    for line in ssh(CPUFREQ_STATE).splitlines():
+        name, governor, scaling_max, cpuinfo_max = line.split()
+        policies[name] = {
+            "scaling_governor": governor,
+            "scaling_max_freq": int(scaling_max),
+            "cpuinfo_max_freq": int(cpuinfo_max),
+        }
+    if not policies:
+        raise GateError("the Pi reports no cpufreq policy")
+    capped = sorted(
+        name
+        for name, policy in policies.items()
+        if policy["scaling_max_freq"] < policy["cpuinfo_max_freq"]
+    )
+    if capped:
+        raise GateError(
+            f"cpufreq {capped} capped below cpuinfo_max_freq after settle: "
+            f"{policies}"
         )
-        gate.run(
-            [
-                "rsync",
-                "-a",
-                "--delete",
-                f"{tree / 'tools'}/",
-                f"{PI_HOST}:{PI_DIR}/trees/{label}/tools/",
-            ]
-        )
-        print(f"building {label} on the Pi", file=sys.stderr, flush=True)
-        ssh(
-            f"cd {PI_DIR}/lab/rust && . ~/.cargo/env && "
-            "CARGO_TARGET_DIR=../target cargo build --release --locked -q "
-            "-p motion-core --example gcode_replay_bench && "
-            f"cp ../target/release/examples/gcode_replay_bench ../../bins/{label}"
-        )
+    return policies
+
+
+def pi_build_held(label: str, key: str, result: Path) -> None:
+    started = time.time()
+    restored = settle_bench()
+    ssh(
+        f"mkdir -p {PI_DIR}/lab {PI_DIR}/bins {PI_DIR}/trees/{label} && "
+        f"rm -f {key_file(label)}"
+    )
+    sync_s = timed(lambda: sync_variant(label))
+    print(f"building {label} on the Pi", file=sys.stderr, flush=True)
+    build_s = timed(lambda: build_variant(label))
+    ssh(f"printf '%s\\n' {shlex.quote(key)} > {key_file(label)}")
+    write_result(
+        result,
+        started,
+        {
+            "label": label,
+            "restored": restored,
+            "sync_s": sync_s,
+            "build_s": build_s,
+        },
+    )
+
+
+def sync_variant(label: str) -> None:
+    tree = WORK / "trees" / label
+    gate.run(
+        [
+            "rsync",
+            "-rlp",
+            "--checksum",
+            "--delete",
+            "--exclude",
+            "target",
+            f"{tree / 'rust'}/",
+            f"{PI_HOST}:{PI_DIR}/lab/rust/",
+        ]
+    )
+    gate.run(
+        [
+            "rsync",
+            "-a",
+            "--delete",
+            f"{tree / 'tools'}/",
+            f"{PI_HOST}:{PI_DIR}/trees/{label}/tools/",
+        ]
+    )
+
+
+def build_variant(label: str) -> None:
+    ssh(
+        f"cd {PI_DIR}/lab/rust && . ~/.cargo/env && "
+        "CARGO_TARGET_DIR=../target cargo build --release --locked -q "
+        "-p motion-core --example gcode_replay_bench && "
+        f"cp ../target/release/examples/gcode_replay_bench ../../bins/{label}"
+    )
+
+
+def pi_measure_held(keys: dict[str, str], run: int, result: Path) -> None:
+    started = time.time()
+    restored = settle_bench()
+    stale = stale_labels(keys)
+    if stale:
+        write_result(result, started, {"restored": restored, "stale": stale})
+        return
     time.sleep(PI_COOLDOWN_SECS)
     if pi_throttled_now():
         raise GateError("the Pi is throttling before the runs")
-    measured_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
-        timespec="seconds"
-    )
-    labels = list(keys)
-    worst = {label: {config: [] for config in gate.CONFIGS} for label in labels}
-    cost = {label: {config: [] for config in gate.CONFIGS} for label in labels}
-    for run in range(PI_RUNS):
-        order = labels if run % 2 == 0 else labels[::-1]
-        for config in gate.CONFIGS:
-            for label in order:
-                out = ssh(
-                    f"cd {PI_DIR} && date +pi_started_ns=%s%N && "
-                    f"taskset -c {gate.LIVE_CORES} bins/{label} "
-                    f"trees/{label}/{gate.GCODE} --config trees/{label}/{config} "
-                    "&& date +pi_ended_ns=%s%N"
-                )
-                match = WORST_WINDOW.search(out)
-                if not match:
-                    raise GateError(
-                        f"no worst window in the Pi replay of {label} {config}"
-                    )
-                worst[label][config].append(float(match.group(1)))
-                cost[label][config].append(
-                    pi_wall_secs(out) / gate.stream_secs(out)
-                )
-                print(
-                    f"pi run {run + 1}/{PI_RUNS} {label} {Path(config).stem}: "
-                    f"{match.group(1)}x",
-                    file=sys.stderr,
-                    flush=True,
-                )
+    policies = governors()
+    measured_at = utc_now()
+    worst, cost = replay_run(list(keys), run)
     if pi_throttled_now():
         raise GateError(
             "the Pi throttled during the runs: their windows are void"
         )
-    save(
-        "pi",
+    write_result(
+        result,
+        started,
         {
-            "variants": keys,
-            "measured_at": measured_at,
-            "worst_x": worst,
-            "cost": cost,
+            "run": run,
+            "restored": restored,
+            "governors": policies,
+            "cooldown_s": PI_COOLDOWN_SECS,
+            "measured": {
+                "measured_at": measured_at,
+                "worst_x": worst,
+                "cost": cost,
+            },
         },
     )
+
+
+def replay_run(
+    labels: list[str], run: int
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+    worst: dict[str, dict[str, float]] = {label: {} for label in labels}
+    cost: dict[str, dict[str, float]] = {label: {} for label in labels}
+    order = labels if run % 2 == 0 else labels[::-1]
+    for config in gate.CONFIGS:
+        for label in order:
+            out = ssh(
+                f"cd {PI_DIR} && date +pi_started_ns=%s%N && "
+                f"taskset -c {gate.LIVE_CORES} bins/{label} "
+                f"trees/{label}/{gate.GCODE} --config trees/{label}/{config} "
+                "&& date +pi_ended_ns=%s%N"
+            )
+            match = WORST_WINDOW.search(out)
+            if not match:
+                raise GateError(
+                    f"no worst window in the Pi replay of {label} {config}"
+                )
+            worst[label][config] = float(match.group(1))
+            cost[label][config] = pi_wall_secs(out) / gate.stream_secs(out)
+            print(
+                f"pi run {run + 1}/{PI_RUNS} {label} {Path(config).stem}: "
+                f"{match.group(1)}x",
+                file=sys.stderr,
+                flush=True,
+            )
+    return worst, cost
 
 
 def pi_wall_secs(out: str) -> float:
@@ -1050,7 +1363,8 @@ def main() -> int:
             *STAGES,
             "build-in-image",
             "local-held",
-            "pi-held",
+            "pi-build",
+            "pi-measure",
             "probe",
         ),
     )
@@ -1059,6 +1373,9 @@ def main() -> int:
     parser.add_argument("--image", help=argparse.SUPPRESS)
     parser.add_argument("--probe", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--job", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--label", help=argparse.SUPPRESS)
+    parser.add_argument("--run", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--result", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.stage == "probe":
@@ -1088,8 +1405,10 @@ def main() -> int:
             dispatch_stage(keys, args.dispatches)
         elif stage == "pi":
             pi_stage(keys)
-        elif stage == "pi-held":
-            pi_held(keys)
+        elif stage == "pi-build":
+            pi_build_held(args.label, keys[args.label], args.result)
+        elif stage == "pi-measure":
+            pi_measure_held(keys, args.run, args.result)
         elif stage == "local":
             local_stage(keys)
         elif stage == "local-held":
