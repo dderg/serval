@@ -33,8 +33,11 @@ import fcntl
 import json
 import os
 import random
+import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,7 +54,12 @@ ENV_SLOTS = "SERVAL_SLOTS"
 ENV_DIR = "SERVAL_SLOTS_DIR"
 ENV_HELD = "SERVAL_SLOT_HELD"
 MEMORY_CAP_EXIT = 99
+HOLD_EXPIRED_EXIT = 98
 SESSION_RESERVE_GIB = 10
+MAX_HOLD_S = 2400.0
+MAX_EXCLUSIVE_HOLD_S = 900.0
+TERM_GRACE_S = 10.0
+HOLD_LINE = re.compile(r"since (\d+) cap (\d+)")
 
 
 class Kind(enum.Enum):
@@ -80,6 +88,10 @@ class NestedSlot(RuntimeError):
 
 
 class SlotStall(RuntimeError):
+    pass
+
+
+class HoldExpired(RuntimeError):
     pass
 
 
@@ -154,18 +166,46 @@ def opens(pid: int, path: Path) -> bool:
     return False
 
 
-def holders(directory: Path, count: int) -> dict[int, list[str]]:
-    """Holder pid to the labels of the slot files it holds."""
+@dataclass
+class Holding:
+    slots: int
+    label: str
+    since: float | None
+    cap: float | None
+
+    def remaining(self) -> float | None:
+        if self.since is None or self.cap is None:
+            return None
+        return self.since + self.cap - time.time()
+
+    def describe(self, pid: int) -> str:
+        if self.since is None or self.cap is None:
+            held = "no hold cap (older slots.py)"
+        else:
+            held_s = max(0.0, time.time() - self.since)
+            held = f"{held_s:.0f} s of its {self.cap:.0f} s cap"
+        return f"holds {self.slots} slot(s), {held}: pid {pid} {self.label}"
+
+
+def holders(directory: Path, count: int) -> dict[int, Holding]:
+    """Holder pid to what it holds, from the slot files it has locked."""
     owners = lock_owners()
-    found: dict[int, list[str]] = {}
+    found: dict[int, Holding] = {}
     for index in range(count):
         path = directory / f"slot-{index}"
         if not path.exists():
             continue
         for pid in owners.get(path.stat().st_ino, []):
-            if opens(pid, path):
-                label = path.read_text().strip() or f"pid {pid}"
-                found.setdefault(pid, []).append(label)
+            if not opens(pid, path):
+                continue
+            text = path.read_text()
+            label = text.splitlines()[0] if text.strip() else f"pid {pid}"
+            hold = HOLD_LINE.search(text)
+            since, cap = (
+                (float(v) for v in hold.groups()) if hold else (None, None)
+            )
+            holding = found.setdefault(pid, Holding(0, label, since, cap))
+            holding.slots += 1
     return found
 
 
@@ -287,13 +327,13 @@ class Board:
     """One reading of who holds and who waits."""
 
     total: int
-    holders: dict[int, list[str]]
+    holders: dict[int, Holding]
     queue: list[int]
     requests: dict[int, dict]
 
     @property
     def free(self) -> int:
-        return self.total - sum(map(len, self.holders.values()))
+        return self.total - sum(h.slots for h in self.holders.values())
 
     def holding(self, pid: int) -> int | None:
         return next((p for p in ancestors(pid) if p in self.holders), None)
@@ -308,12 +348,25 @@ class Board:
     def waits_for_itself(self) -> list[int]:
         return [pid for pid in self.queue if self.holding(pid) is not None]
 
+    def head_waits_for(self) -> str:
+        request = self.requests.get(self.queue[0])
+        if request is None:
+            return "unknown (older slots.py)"
+        uncapped = [p for p, h in self.holders.items() if h.remaining() is None]
+        if uncapped:
+            return f"unbounded: pid {uncapped[0]} holds without a hold cap"
+        remaining = [max(h.remaining(), 0.0) for h in self.holders.values()]
+        if request["exclusive"]:
+            drain = max(remaining, default=0.0)
+            return f"every slot: all holders end within {drain:.0f} s"
+        if self.free:
+            return "a slot: one is free"
+        return f"a slot: the first ends within {min(remaining):.0f} s"
+
     def graph(self) -> str:
         lines = [f"{self.free} of {self.total} slots free"]
-        for pid, labels in self.holders.items():
-            lines.append(
-                f"  holds {len(labels)} slot(s): pid {pid} {labels[0]}"
-            )
+        for pid, holding in self.holders.items():
+            lines.append(f"  {holding.describe(pid)}")
         for place, pid in enumerate(self.queue, 1):
             request = self.requests.get(pid)
             wants = (
@@ -325,6 +378,8 @@ class Board:
             holder = self.holding(pid)
             cycle = "" if holder is None else f" [pid {holder} HOLDS a slot]"
             lines.append(f"  {place}. pid {pid} wants {wants}{cycle}")
+        if self.queue:
+            lines.append(f"  head waits for {self.head_waits_for()}")
         return "\n".join(lines)
 
 
@@ -376,6 +431,7 @@ def acquire(
     exclusive: bool = False,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     label: str = "",
+    cap: float = MAX_HOLD_S,
     notify=lambda message: print(message, file=sys.stderr, flush=True),
 ) -> Lease:
     directory = slots_dir()
@@ -419,8 +475,90 @@ def acquire(
         queue.leave(pid)
     for fd in held:
         os.ftruncate(fd, 0)
-        os.write(fd, f"{who}\n".encode())
+        os.write(fd, f"{who}\nsince {time.time():.0f} cap {cap:.0f}\n".encode())
     return Lease(held)
+
+
+def hold_cap(exclusive: bool, requested: float | None) -> float:
+    limit = MAX_EXCLUSIVE_HOLD_S if exclusive else MAX_HOLD_S
+    if requested is None:
+        return limit
+    if not 0 < requested <= limit:
+        raise ValueError(
+            f"a hold of {requested} s is outside (0, {limit:.0f}] s: split the "
+            "work into shorter admissions"
+        )
+    return requested
+
+
+def descendants(root: int) -> list[int]:
+    children: dict[int, list[int]] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        with contextlib.suppress(OSError):
+            stat = Path(f"/proc/{entry}/stat").read_text()
+            parent = int(stat[stat.rfind(")") + 2 :].split()[1])
+            children.setdefault(parent, []).append(int(entry))
+    found, stack = [], list(children.get(root, []))
+    while stack:
+        pid = stack.pop()
+        found.append(pid)
+        stack.extend(children.get(pid, []))
+    return found
+
+
+def job_processes() -> list[int]:
+    """Everything the holder started: the members of its own memory scope,
+    which keeps daemonised children, else its process tree."""
+    me = os.getpid()
+    cgroup = job_scope.own_cgroup()
+    if not cgroup.name.startswith(job_scope.UNIT_PREFIX):
+        return descendants(me)
+    procs = (cgroup / "cgroup.procs").read_text().split()
+    return [int(pid) for pid in procs if int(pid) != me]
+
+
+def signal_all(pids: list[int], signum: int) -> None:
+    for pid in pids:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signum)
+
+
+def terminate_job() -> None:
+    job = job_processes()
+    signal_all(job, signal.SIGTERM)
+    time.sleep(TERM_GRACE_S)
+    signal_all(job, signal.SIGKILL)
+
+
+@contextlib.contextmanager
+def held_for(cap: float, label: str):
+    """End the job at its hold cap: a long hunt held a slot for hours while
+    an exclusive waiter parked the whole queue behind it."""
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        terminate_job()
+
+    timer = threading.Timer(cap, expire)
+    timer.daemon = True
+    timer.start()
+    message = (
+        f"{label} reached its {cap:.0f} s hold cap and was terminated: split "
+        "it into admissions shorter than the cap"
+    )
+    try:
+        yield
+    except BaseException as exc:
+        if expired.is_set():
+            raise HoldExpired(message) from exc
+        raise
+    finally:
+        timer.cancel()
+    if expired.is_set():
+        raise HoldExpired(message)
 
 
 @contextlib.contextmanager
@@ -429,6 +567,7 @@ def slot(
     exclusive: bool = False,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     label: str = "",
+    max_hold: float | None = None,
 ):
     if os.environ.get(ENV_HELD):
         if exclusive:
@@ -438,19 +577,33 @@ def slot(
             )
         yield
         return
-    lease = acquire(exclusive=exclusive, timeout=timeout, label=label)
+    cap = hold_cap(exclusive, max_hold)
+    name = label or kind.value
+    lease = acquire(exclusive=exclusive, timeout=timeout, label=label, cap=cap)
     os.environ[ENV_HELD] = "1"
     try:
-        with job_scope.capped(label or kind.value, CAPS[kind]):
+        with job_scope.capped(name, CAPS[kind]), held_for(cap, name):
             yield
     finally:
         del os.environ[ENV_HELD]
         lease.release()
 
 
-def run(command: list[str], kind: Kind, exclusive: bool, timeout: float) -> int:
+def run(
+    command: list[str],
+    kind: Kind,
+    exclusive: bool,
+    timeout: float,
+    max_hold: float | None,
+) -> int:
     label = " ".join(command)[:80]
-    with slot(kind, exclusive=exclusive, timeout=timeout, label=label):
+    with slot(
+        kind,
+        exclusive=exclusive,
+        timeout=timeout,
+        label=label,
+        max_hold=max_hold,
+    ):
         return subprocess.run(command).returncode
 
 
@@ -468,6 +621,7 @@ def main() -> int:
     runner.add_argument(
         "--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS
     )
+    runner.add_argument("--max-hold", type=float, default=None)
     runner.add_argument("command", nargs=argparse.REMAINDER)
     sub.add_parser("status")
     args = parser.parse_args()
@@ -479,7 +633,9 @@ def main() -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("run needs a command after --")
-    return run(command, Kind(args.kind), args.exclusive, args.timeout)
+    return run(
+        command, Kind(args.kind), args.exclusive, args.timeout, args.max_hold
+    )
 
 
 def cli() -> int:
@@ -488,11 +644,15 @@ def cli() -> int:
     except job_scope.MemoryCapKill as exc:
         print(f"slots: {exc}", file=sys.stderr)
         return MEMORY_CAP_EXIT
+    except HoldExpired as exc:
+        print(f"slots: {exc}", file=sys.stderr)
+        return HOLD_EXPIRED_EXIT
     except (
         SlotTimeout,
         NestedExclusive,
         NestedSlot,
         SlotStall,
+        ValueError,
         job_scope.NoUserManager,
     ) as exc:
         print(f"slots: {exc}", file=sys.stderr)

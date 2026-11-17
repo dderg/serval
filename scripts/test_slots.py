@@ -1,6 +1,7 @@
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -412,7 +413,10 @@ def test_status_shows_the_wait_graph(tmp_path):
             text=True,
             check=True,
         ).stdout
-        assert f"holds 3 slot(s): pid {holder.pid}" in shown
+        assert re.search(
+            rf"holds 3 slot\(s\), \d+ s of its 900 s cap: pid {holder.pid}",
+            shown,
+        )
     finally:
         holder.kill()
         holder.wait()
@@ -439,3 +443,82 @@ def test_the_engine_sample_takes_its_slot_before_the_scratch_lock(
     )
     pending.sample_commit("0123456789abcdef")
     assert order == ["slot", "lock", "work"]
+
+
+SLEEPER = "import os, time; print(os.getpid(), flush=True); time.sleep(60)"
+
+
+def capped_sleeper(tmp_path, count, *flags):
+    return subprocess.Popen(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "run",
+            "--kind",
+            "build",
+            *flags,
+            "--",
+            sys.executable,
+            "-c",
+            SLEEPER,
+        ],
+        env=env(tmp_path, count),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def test_a_job_past_its_hold_cap_is_terminated_and_named(tmp_path):
+    holder = capped_sleeper(tmp_path, 1, "--max-hold", "1")
+    out, err = holder.communicate(timeout=30)
+    assert holder.returncode == slots.HOLD_EXPIRED_EXIT
+    assert "reached its 1 s hold cap and was terminated" in err
+    assert f"slots: {sys.executable} -c" in err, "the message names the job"
+    child = int(out.split()[0])
+    wait_for(lambda: not slots.pid_alive(child))
+
+
+def test_a_hold_past_the_cap_is_refused_and_exclusive_holds_are_shorter():
+    assert slots.hold_cap(False, None) == slots.MAX_HOLD_S
+    assert slots.hold_cap(True, None) == slots.MAX_EXCLUSIVE_HOLD_S
+    assert slots.MAX_EXCLUSIVE_HOLD_S < slots.MAX_HOLD_S
+    with pytest.raises(ValueError, match="shorter admissions"):
+        slots.hold_cap(False, slots.MAX_HOLD_S + 1)
+
+
+def test_an_exclusive_waiter_waits_at_most_the_holders_cap(tmp_path):
+    holder = capped_sleeper(tmp_path, 3, "--max-hold", "2")
+    wait_for(lambda: holder.pid in slots.holders(tmp_path / "slots", 3))
+    queued_at = time.time()
+    exclusive = start(tmp_path, 3, "x", "--exclusive")
+    assert exclusive.wait(timeout=30) == 0
+    holder.communicate(timeout=30)
+    assert holder.returncode == slots.HOLD_EXPIRED_EXIT
+    started = records(tmp_path)[0][1]
+    assert started - queued_at < 2 + 5, "the drain outlived the holder's cap"
+
+
+def test_status_shows_held_time_cap_and_what_the_head_waits_for(tmp_path):
+    holder = capped_sleeper(tmp_path, 3, "--max-hold", "30")
+    exclusive = None
+    try:
+        wait_for(lambda: holder.pid in slots.holders(tmp_path / "slots", 3))
+        exclusive = start(tmp_path, 3, "x", "--exclusive")
+        wait_for(lambda: exclusive.pid in queued_pids(tmp_path))
+        shown = subprocess.run(
+            [sys.executable, str(SCRIPT), "status"],
+            env=env(tmp_path, 3),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert re.search(rf"\d+ s of its 30 s cap: pid {holder.pid}", shown)
+        assert re.search(
+            r"head waits for every slot: all holders end within \d+ s", shown
+        )
+    finally:
+        for process in (holder, exclusive):
+            if process is not None:
+                process.kill()
+                process.wait()
