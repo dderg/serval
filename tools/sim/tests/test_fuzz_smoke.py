@@ -2,7 +2,8 @@
 a print program and a timeline of user actions, held to every invariant
 in tools/sim/fuzzing/checks.py. Fresh seeds run in `ci.sh sim-fuzz`.
 
-Both MCU topologies, flat/wavy/steep meshes, PAUSE/RESUME, CANCEL_PRINT,
+Both MCU topologies, flat/wavy/steep meshes (with the seam moves
+fuzzing/mesh_paths.py draws across them), PAUSE/RESUME, CANCEL_PRINT,
 RESTART, e-stop + FIRMWARE_RESTART, link faults, SET_PRESSURE_ADVANCE and
 the refused SET_INPUT_SHAPER. A FIRMWARE_RESTART landing in an M400 is
 left out while the GreenletExit shutdown it causes is open."""

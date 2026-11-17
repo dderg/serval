@@ -21,8 +21,9 @@ tools/sim/run.sh shell              # bash inside the image
 tools/sim/run.sh test --branch X    # mode first, then --branch: any mode against another branch
 tools/sim/run.sh --no-cache         # force full rebuild
 SIM_JITTER=3 tools/sim/run.sh test # pin the container + 3 bursty burners to one cpuset (CI-runner jitter repro)
-tools/sim/run.sh fuzz --seeds 1..500 --minimize  # seeded scenario fuzzer (printer + print + user actions per seed); failures in .sim-fuzz/
+tools/sim/run.sh fuzz --seeds 1..500 --minimize  # seeded scenario fuzzer (printer + print + user actions per seed, mesh seam moves with a mesh); failures in .sim-fuzz/
 tools/sim/run.sh fuzz --seed N     # replay one seed; --replay DIR replays a saved/minimized scenario
+python3 tools/sim/hunt.py --seeds 1000..2999 --run-name NAME  # long fuzz runs in ~10 min `slots.py --kind sim` batches; resumable from the ledger
 ```
 
 Every build is tagged `kalico-sim-<branch>` (the worktree's branch, or `--branch`'s argument), so agents/sessions on different worktrees build and test in parallel without clobbering each other's images.
