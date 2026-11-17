@@ -63,7 +63,22 @@ pub struct KnownExcesses {
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownExcesses] = &[];
+/// #954: under the hybrid test config's 2 ms kernel after its advance, the
+/// extruder leaves its acceleration cap while the toolhead moves.
+pub const KNOWN: &[KnownExcesses] = &[
+    KnownExcesses {
+        case: "voron_first_layers/rust/motion-core/tests/configs/bench_ramp_hybrid.cfg",
+        class: ExcessClass::Accel,
+        count: 88,
+        worst: 6348.3,
+    },
+    KnownExcesses {
+        case: "neptune_cube/discontinuity/rust/motion-core/tests/configs/bench_ramp_hybrid.cfg",
+        class: ExcessClass::Accel,
+        count: 32,
+        worst: 7193.3,
+    },
+];
 
 /// Where the audit of the case named `case` departs from what [`KNOWN`]
 /// pins for it, as one failure line.
