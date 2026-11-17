@@ -229,6 +229,12 @@ seeds through `hunt.py`: batches of about 10 minutes, each its own
 (exit 98) or memory cap (exit 99) stops the hunt with that exit, its
 unrecorded seeds left pending for a rerun of the same command.
 
+Open product bugs keep their minimized scenario in
+`fuzzing/repros/issue-N/` (its README lists each replay command and the
+failure it shows). A fix moves its directory to `fuzzing/regressions/`,
+which `test_fuzz_regressions.py` replays in the e2e suite and expects to
+pass. `--replay` accepts paths in the tree as well as `.sim-fuzz/` runs.
+
 ## CI
 
 - `./scripts/ci.sh sim` runs the in-process `sim_unit` tests (no ELF).

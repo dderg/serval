@@ -1,0 +1,61 @@
+{
+ "seed": 37,
+ "printer": {
+  "base": "heaters",
+  "topology": "one_mcu",
+  "max_velocity": 1000.0,
+  "max_accel": 1919.0,
+  "corner": "corner_deviation",
+  "corner_value": 0.264,
+  "max_z_velocity": 10.0,
+  "max_z_accel": 200.0,
+  "shaper_x": null,
+  "shaper_y": null,
+  "pa_k": null,
+  "extruder_kernel": null,
+  "mesh": "none",
+  "mesh_points": [],
+  "mesh_fade": false,
+  "mesh_at_start": false,
+  "heaters": false,
+  "pause_macro": "base",
+  "cancel_macro": "base",
+  "end_steps": [],
+  "idle_timeout_s": null
+ },
+ "programs": [
+  {
+   "name": "A",
+   "segments": [
+    {
+     "kind": "limits",
+     "lines": [
+      "SET_VELOCITY_LIMIT VELOCITY=525 ACCEL=20323",
+      "SET_VELOCITY_LIMIT CORNER_DEVIATION=0.249",
+      ";fuzz_probe"
+     ]
+    },
+    {
+     "kind": "travel",
+     "lines": [
+      "G90",
+      "G1 X145.753 Y143.685 F19140",
+      "G1 X115.164 Y148.584 F58020",
+      "G1 X155.542 Y135.571 F19620",
+      "G1 X93.399 Y77.376 F53220",
+      "G1 X125.607 Y125.4 F22620",
+      "G1 X136.669 Y53.784 F57180",
+      "G1 X57.505 Y50.791 F16800",
+      "G1 X72.791 Y70.037 F40860",
+      "G1 X62.711 Y75.472 F16380",
+      "G1 X69.203 Y150.494 F24900"
+     ]
+    }
+   ],
+   "end_print": false
+  }
+ ],
+ "prints": [
+  "A"
+ ]
+}

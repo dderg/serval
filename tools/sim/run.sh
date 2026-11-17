@@ -18,7 +18,8 @@
 #   SIM_JITTER=3 ./run.sh test        # share a cpuset with 3 bursty CPU burners
 #   ./run.sh fuzz --seeds 1..500      # seeded scenario fuzzer; results in .sim-fuzz/
 #   ./run.sh fuzz --seed 1234         # replay one seed
-#   ./run.sh fuzz --replay DIR        # replay a saved (e.g. minimized) scenario
+#   ./run.sh fuzz --replay DIR...     # replay saved scenarios: .sim-fuzz/ runs, or the
+#                                     # committed repros in tools/sim/fuzzing/repros/
 
 set -euo pipefail
 
@@ -27,6 +28,17 @@ export DOCKER_BUILDKIT=1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+IMAGE_REPO_ROOT="/kalico"
+
+# A replay directory as the fuzz container sees it: .sim-fuzz/ is mounted at
+# its host path; anything else in the tree is in the image under /kalico.
+image_path() {
+    case "$1" in
+        "$REPO_ROOT/.sim-fuzz"/*) echo "$1" ;;
+        "$REPO_ROOT"/*) echo "$IMAGE_REPO_ROOT/${1#"$REPO_ROOT"/}" ;;
+        *) echo "run.sh: --replay $1 is neither under .sim-fuzz/ nor in the tree" >&2; exit 2 ;;
+    esac
+}
 
 GIT_DIR="$(cd "$REPO_ROOT" && git rev-parse --git-common-dir 2>/dev/null || echo "$REPO_ROOT/.git")"
 MAIN_REPO="$(cd "$GIT_DIR/.." 2>/dev/null && pwd || echo "$REPO_ROOT")"
@@ -95,7 +107,7 @@ while [[ $# -gt 0 ]]; do
             EXTRA_ARGS+=("$1")
             shift
             while [[ $# -gt 0 && "$1" != -* ]]; do
-                EXTRA_ARGS+=("$(realpath "$1")")
+                EXTRA_ARGS+=("$(image_path "$(realpath "$1")")")
                 shift
             done
             ;;

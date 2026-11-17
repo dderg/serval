@@ -72,6 +72,37 @@ Timing rule for test code: anything that watches or pokes the printer *while it 
 
 Run one test: `tools/sim/run.sh test -k my_scenario`.
 
+## Scenario fuzzer
+
+One integer seed draws a printer, one or two print programs and a timeline of user actions (`tools/sim/fuzzing/`). With a bed mesh, the programs also get seam moves: across the probed area's edges, along grid lines, through nodes and through the fade band. The driver holds each run to every check in `fuzzing/checks.py`. Reference: `tools/sim/README.md` "Scenario fuzzer".
+
+```bash
+tools/sim/run.sh fuzz --seeds 1000..1199          # a range, 8 worlds at a time; failures kept in .sim-fuzz/<run>/seed-N/
+tools/sim/run.sh fuzz --seed 18,27 --repeat 3     # given seeds, N times each
+tools/sim/run.sh fuzz --replay DIR... [--minimize] # saved scenarios; --minimize shrinks a failure into DIR/minimized/
+python3 tools/sim/hunt.py --seeds A..B --run-name NAME  # long runs in ~10 min `slots.py --kind sim` batches, resumable
+./scripts/ci.sh sim-fuzz                          # 500 fresh seeds through hunt.py
+```
+
+Checks (the failing check names the `FAIL` line):
+
+| check | meaning |
+|---|---|
+| `panic`, `fatal_event`, `klippy_exit` | a Rust panic; a fatal engine event (`anchor_underrun`, `stream_worker_fatal`, ...); klippy died |
+| `uncommanded_shutdown` | a shutdown no timeline action asked for |
+| `rest_steps` | at a rest probe (M400, mark pin, G4) a motor stands still off its commanded step lattice |
+| `pin_order` | motors moved within 0.3 s of the mark pin, inside the dwell after it: the pin was not ordered after the M400 (#893) |
+| `pacer_brake` | `pipe_drain` outside a commanded stop |
+| `print_outcome`, `stop_state`, `recovery`, `command_result`, `estop_latency`, `idle_timeout` | the print or a user action did not end as commanded |
+| `session_repeat` | the same program printed twice in a session moved differently |
+| `reactor_stall`, `wedge`, `memory`, `stuck` | klippy's reactor late; virtual clock frozen; klippy RSS > 2 GB; worker over budget |
+| `harness` | the fuzzer's own error: fix the harness, not the product |
+
+- Rest probes count only mark-pin edges the harness saw within 50 ms. A flip it missed, or one during a PAUSE, is counted but not checked.
+- Smoke set: `tests/test_fuzz_smoke.py` (seeds 10 11 20 27 35 41 63) runs in `run.sh test`.
+- Open bugs keep their minimized scenario in `fuzzing/repros/issue-N/`; replay with `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-N`.
+- A fix PR `git mv`s the scenario into `fuzzing/regressions/`, which `tests/test_fuzz_regressions.py` replays and expects to pass.
+
 ## Architecture
 
 ```
