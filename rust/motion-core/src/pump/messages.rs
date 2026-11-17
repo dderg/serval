@@ -64,6 +64,11 @@ pub enum PumpMsg {
         mcu_id: u32,
         error: String,
     },
+    /// The mcu reported `shutdown`/`is_shutdown`: it drops every command
+    /// and acks no barrier from here on.
+    McuShutdown {
+        mcu_id: u32,
+    },
     Endpoint {
         command: super::EndpointCommand,
         reply: std::sync::mpsc::SyncSender<Result<(), String>>,
@@ -658,6 +663,10 @@ pub trait SpanSink: Send {
              no stepcompress endpoint"
         )))
     }
+
+    /// The mcu reported shutdown: nothing sent to it can execute or retire,
+    /// so its endpoints stop streaming and stop waiting on barrier acks.
+    fn on_mcu_shutdown(&self, _mcu_id: u32) {}
 }
 
 pub struct PumpCallbacks {
