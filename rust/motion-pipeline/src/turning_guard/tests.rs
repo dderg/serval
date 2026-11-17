@@ -52,7 +52,10 @@ fn a_move_off_the_toolhead_after_a_prime_fails_as_a_discontinuity() {
 /// re-opens. Strokes of 40 s at 1 mm/s must not grid whole held moves.
 #[test]
 fn the_guard_grids_slow_strokes_within_its_windows() {
-    let most = most_held_over_slow_strokes(|guard| guard.grid.end() - guard.grid.base());
+    let most = most_held_over_slow_strokes(|guard| {
+        let grid = guard.grid.borrow();
+        grid.end() - grid.base()
+    });
     let bound = window_cells_bound();
     assert!(
         most <= bound,
