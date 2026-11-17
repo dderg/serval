@@ -91,6 +91,7 @@ class _Recheck:
     steps: dict
     label: str
     mismatch: Optional[Violation]
+    at_next_rest: bool
 
 
 class _WallMap:
@@ -348,8 +349,18 @@ class Session:
             steps,
             label,
             mismatch,
+            self._at_next_rest(steps, index),
         )
         self.next_probe += 1
+
+    def _at_next_rest(self, steps: dict, index: int) -> bool:
+        """Whether `steps` are where probe `index + 1` rests: the pin of
+        probe `index` then flipped a whole move late (#893)."""
+        following = index + 1
+        if following >= len(self.probes):
+            return False
+        position = self.probes[following].position
+        return self._rest_mismatch(steps, position, "") is None
 
     def _step_timing(self) -> str:
         """When the mark pin was seen against the last step any motor
@@ -366,10 +377,10 @@ class Session:
 
     def _finish_recheck(self) -> None:
         """Motors that move within PROBE_RECHECK_S of the pin, inside the
-        dwell after it, mean the pin flipped after the next move began
-        (#893): the pin, not the rest, is out of order. Motors still for
-        that long at a position other than the commanded one are a rest
-        error."""
+        dwell after it, or that stand at the next probe's rest, mean the
+        pin flipped after the next move began (#893): the pin, not the
+        rest, is out of order. Motors still for that long anywhere else
+        off the commanded position are a rest error."""
         recheck, self.recheck = self.recheck, None
         steps = self._steps()
         moved = {
@@ -383,6 +394,13 @@ class Session:
                 f"{recheck.label}: motors moved within {PROBE_RECHECK_S} s "
                 f"of the pin, inside the G4 P{program.PROBE_HOLD_MS} after "
                 f"it\nsteps moved: {moved}; now {self._step_timing()}",
+            )
+        if recheck.mismatch and recheck.at_next_rest:
+            raise Violation(
+                Check.PIN_ORDER,
+                f"{recheck.label}: motors stand at the next probe's rest: "
+                f"the pin flipped after the move that follows its M400\n"
+                f"{recheck.mismatch.evidence}",
             )
         if recheck.mismatch:
             raise recheck.mismatch
