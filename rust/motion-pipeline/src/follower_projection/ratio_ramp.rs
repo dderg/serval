@@ -2441,7 +2441,7 @@ impl RatioSmoothing {
                      crawl valley {last:?}"
                 );
                 assert!(
-                    back >= turn - last.end,
+                    back + SPAN_LOOKUP_SLACK_MM >= turn - last.end,
                     "follower projection: the crawl at s={turn} widens the crawl valley {last:?} \
                      from {} mm back, but the projection has taken the path to {back} mm before it",
                     turn - last.end

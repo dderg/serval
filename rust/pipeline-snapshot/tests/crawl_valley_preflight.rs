@@ -653,3 +653,84 @@ fn a_crawl_valley_widened_past_a_retract_holds_zero_on_untaken_path() {
     let config = printer_from("reversal_past_a_retract_printer", REVERSAL_PAST_A_RETRACT_PRINTER);
     plans_within_the_extruder_limits("reversal_past_a_retract", REVERSAL_PAST_A_RETRACT, &config);
 }
+
+/// #912's widening check, drawn by the print-like planner fuzz: an 88 Hz
+/// corexy with no square-corner velocity and a kernel-free advance.
+const WIDENED_FROM_THE_TAKEN_EDGE_PRINTER: &str = "[printer]
+max_velocity: 315.12426332023136
+max_accel: 5396.416678781325
+square_corner_velocity: 0
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 10069.342545867317
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.03820311461480342
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 88.15871560075092
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 87.77439227405594
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// The projection took the path to 3e-14 mm past the zero-wide crawl
+/// valley at s=25.115, which the next crawl widens.
+const WIDENED_FROM_THE_TAKEN_EDGE: &str = "G90
+M83
+G1 X150.0 Y150.0 Z0.2 F30000
+G1 X150.075 Y149.980 E0.00336 F11517
+G1 X166.285 Y147.318 F14701
+G1 E-0.5 F2400
+G1 Z0.600 F600
+G1 X158.077 Y147.036 F30000
+G1 Z0.200 F600
+G1 E0.5 F2400
+G1 X158.140 Y147.040 E0.00191 F7700
+G1 X158.635 Y147.446 E0.00638 F10130
+G1 X158.483 Y147.069 E0.02095 F12356
+G1 X158.568 Y147.517 F3615
+G1 E-0.5 F2400
+";
+
+#[test]
+fn a_crawl_valley_widens_from_the_edge_of_the_taken_path() {
+    let config = printer_from(
+        "widened_from_the_taken_edge_printer",
+        WIDENED_FROM_THE_TAKEN_EDGE_PRINTER,
+    );
+    plans_within_the_extruder_limits(
+        "widened_from_the_taken_edge",
+        WIDENED_FROM_THE_TAKEN_EDGE,
+        &config,
+    );
+}
