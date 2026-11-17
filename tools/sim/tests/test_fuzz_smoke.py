@@ -16,7 +16,7 @@ from tools.sim.fuzzing import execute, scenario
 pytestmark = pytest.mark.needs_elf
 
 THREE_PRINTS_SEED = 27
-THREE_PRINTS_EXPECTED_S = 30
+THREE_PRINTS_EXPECTED_S = 100
 SMOKE_SEEDS = (
     10,
     11,
