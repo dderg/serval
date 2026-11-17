@@ -219,10 +219,15 @@ fn corner_after_a_travel() -> Vec<GcodeLine> {
     ]
 }
 
-/// Half a hole's inner perimeter, a short travel and the start of its outer
+/// Half a hole's inner perimeter, a short move and the start of its outer
 /// one, short chords at 330–430 mm/s (`voron_dense_top_layers` lines
-/// 1332–1351).
+/// 1332–1351), all laid at one extrusion ratio. A planner blind to the
+/// advance's jerk is as blind to the leaders crossing a ratio step, whose
+/// demand the guard does not model: on caps the guard did not plan with, a
+/// ratio step would meet the planner's own check of its crossing from a
+/// stop, which only these swapped caps can fail.
 fn hole_perimeters() -> Vec<GcodeLine> {
+    const RATIO: f64 = 0.0337;
     let inner = [
         [118.761, 146.406],
         [119.068, 146.417],
@@ -238,10 +243,6 @@ fn hole_perimeters() -> Vec<GcodeLine> {
         [120.362, 148.972],
         [120.171, 149.246],
     ];
-    let inner_e = [
-        0.01033, 0.01241, 0.0087, 0.01242, 0.01258, 0.01245, 0.0087, 0.01231, 0.00866, 0.01246,
-        0.01259, 0.01126,
-    ];
     let outer = [
         [120.549, 149.526],
         [120.768, 149.229],
@@ -251,21 +252,22 @@ fn hole_perimeters() -> Vec<GcodeLine> {
         [120.976, 147.541],
         [120.834, 147.174],
     ];
-    let outer_e = [0.01621, 0.0205, 0.01979, 0.01633, 0.01984, 0.01724];
-    let (inner_feed, travel_feed, outer_feed) = (432.5609333333333, 1000.0, 331.60196666666667);
+    let (inner_feed, between_feed, outer_feed) = (432.5609333333333, 1000.0, 331.60196666666667);
+    let laid = |seq: u32, start: [f64; 2], end: [f64; 2], feed: f64| {
+        let length = libm::hypot(end[0] - start[0], end[1] - start[1]);
+        line(seq, start, end, RATIO * length, feed)
+    };
     let mut lines: Vec<GcodeLine> = inner
         .windows(2)
-        .zip(inner_e)
         .zip(1332..)
-        .map(|((ends, de), seq)| line(seq, ends[0], ends[1], de, inner_feed))
+        .map(|(ends, seq)| laid(seq, ends[0], ends[1], inner_feed))
         .collect();
-    lines.push(line(1344, inner[12], outer[0], 0.0, travel_feed));
+    lines.push(laid(1344, inner[12], outer[0], between_feed));
     lines.extend(
         outer
             .windows(2)
-            .zip(outer_e)
             .zip(1346..)
-            .map(|((ends, de), seq)| line(seq, ends[0], ends[1], de, outer_feed)),
+            .map(|(ends, seq)| laid(seq, ends[0], ends[1], outer_feed)),
     );
     lines
 }

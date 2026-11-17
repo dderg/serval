@@ -135,7 +135,7 @@ A stop check also fails when no motion was in flight at the request: such a run 
 | cancel_macro_mesh | #406 | + macros, mesh | first_layers, mesh loaded | cancel +20 s (macro clears the mesh) |
 | end_print_mesh | #362 | + macros, mesh | first 1500 lines, mesh loaded, END_PRINT (no leading M400) | print |
 | firmware_restart | #844 | printer.cfg | first_layers | FIRMWARE_RESTART +20 s |
-| host_restart | #939 | + `heater_without_load.cfg` | first 1500 lines, extruder heated to full power after the preamble, `TURN_OFF_HEATERS` before the ending | RESTART +20 s; print again 5 s after the first ends |
+| host_restart | #939 | + `heater_without_load.cfg` | first 1500 lines, extruder heated to full power after the preamble, `TURN_OFF_HEATERS` before the ending | RESTART +20 s; print again 5 s after the first ends and klippy is `ready` again (15.5–19.6 s after a restart on the bench since #915; the run fails beyond 30 s, #984) |
 | estop | #855 | printer.cfg | first_layers | e-stop +20 s, FIRMWARE_RESTART +5.5 s, wait 10 s |
 | estop_g4 | #406 | printer.cfg | first 200 lines, 120-stroke zigzag, `G4 P1` | e-stop 2 s after the reader reaches `G4 P1`, FIRMWARE_RESTART +5.5 s, wait 10 s |
 
