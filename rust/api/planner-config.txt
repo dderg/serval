@@ -96,7 +96,7 @@ pub planner_config::PlannerConfig::post_processor_bypass: bool
 pub planner_config::PlannerConfig::post_processors: planner_config::PostProcessorSet
 pub planner_config::PlannerConfig::runtime: planner_config::RuntimeLimits
 impl planner_config::PlannerConfig
-pub fn planner_config::PlannerConfig::check_kernel_free_advance_accel_floor(&self) -> core::result::Result<(), alloc::string::String>
+pub fn planner_config::PlannerConfig::check_kernel_free_advance_accel_floor(&self, &trajectory::chain::AxisChainSet, &[geometry::frontend::ExtruderCaps]) -> core::result::Result<(), alloc::string::String>
 pub fn planner_config::PlannerConfig::check_kernel_free_advance_extrude_only_caps(&self) -> core::result::Result<(), alloc::string::String>
 pub fn planner_config::PlannerConfig::compile_active_chains(&self) -> core::result::Result<trajectory::chain::AxisChainSet, planner_config::PostProcessorConfigError>
 pub fn planner_config::PlannerConfig::effective_limits(&self) -> (f64, f64, geometry::frontend::CornerBudget)

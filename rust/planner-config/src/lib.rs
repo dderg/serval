@@ -788,16 +788,19 @@ impl PlannerConfig {
     /// [`geometry::valley_speed_crawl_rebuild`] at the fit's tolerances,
     /// which no back-off of the moves there lowers: under it such a crawl
     /// stops the print. Without `r` nothing bounds the ratio and this
-    /// checks nothing.
-    pub fn check_kernel_free_advance_accel_floor(&self) -> Result<(), String> {
-        let chains = self.compile_active_chains().map_err(|e| e.to_string())?;
+    /// checks nothing. `chains` are the active chains and `caps` their
+    /// [`extruder_caps`].
+    pub fn check_kernel_free_advance_accel_floor(
+        &self,
+        chains: &AxisChainSet,
+        caps: &[geometry::ExtruderCaps],
+    ) -> Result<(), String> {
         let (Some(axis), Some(ratio)) = (
-            Self::kernel_free_advance_axis(&chains),
+            Self::kernel_free_advance_axis(chains),
             self.max_extrude_ratio,
         ) else {
             return Ok(());
         };
-        let caps = extruder_caps(&self.axis_registry, &chains, self.fit_tolerance_mm)?;
         let Some(caps) = caps.iter().find(|caps| caps.axis_index == axis) else {
             return Ok(());
         };
