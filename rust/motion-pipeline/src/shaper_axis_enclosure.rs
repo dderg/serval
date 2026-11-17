@@ -18,8 +18,8 @@ use std::ops::{Add, Mul, Neg};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{Arc as PathArc, Clothoid, Segment};
 use geometry::{
-    FollowerDemand, LawSegment, MeshPatch, PatchAxis, RailPair, RailPairShape, ScalarLaw,
-    SurfaceTransform,
+    FADE_FACTOR_IN_BAND, FollowerDemand, LawSegment, MeshPatch, PatchAxis, RailPair, RailPairShape,
+    ScalarLaw, SurfaceTransform,
 };
 use nurbs::bezier::BezierPiece;
 use nurbs::bezier::extract_bezier_pieces;
@@ -585,23 +585,18 @@ fn warped_models(surface: &SurfaceTransform, [x, y, z]: [[TaylorModel; 3]; 3]) -
     let mesh = PatchReading::of(&patch, &u, &v);
     let fade = surface.fade();
     let target = Ball::exact(fade.target);
-    let (factor, factor_slope) = if fade.is_disabled() {
-        (TaylorModel::constant(Ball::exact(1.0)), Ball::exact(0.0))
+    let constant = |value: f64| TaylorModel::constant(Ball::exact(value));
+    let (factor, factor_slope, factor_curvature) = if fade.is_disabled() {
+        (constant(1.0), constant(0.0), constant(0.0))
     } else {
         let (start, end) = fade.band();
         let height = centre(&z[0]);
         if height >= end {
-            (TaylorModel::constant(Ball::exact(0.0)), Ball::exact(0.0))
+            (constant(0.0), constant(0.0), constant(0.0))
         } else if height >= start {
-            let inverse_band = Ball::rounded(1.0 / (end - start), 2);
-            (
-                z[0].scale(Ball::exact(-1.0))
-                    .add_ball(Ball::exact(end))
-                    .scale(inverse_band),
-                -inverse_band,
-            )
+            fade_band_models(&z[0], start, end)
         } else {
-            (TaylorModel::constant(Ball::exact(1.0)), Ball::exact(0.0))
+            (constant(1.0), constant(0.0), constant(0.0))
         }
     };
     let deviation = mesh.value.add_ball(-target);
@@ -610,12 +605,13 @@ fn warped_models(surface: &SurfaceTransform, [x, y, z]: [[TaylorModel; 3]; 3]) -
     let w = factor.mul(&deviation).add_ball(target);
     let wx = factor.mul(&mesh_x);
     let wy = factor.mul(&mesh_y);
-    let wz = deviation.scale(factor_slope);
+    let wz = deviation.mul(&factor_slope);
     let wxx = factor.mul(&mesh.duu.scale(du * du));
     let wxy = factor.mul(&mesh.duv.scale(du * dv));
     let wyy = factor.mul(&mesh.dvv.scale(dv * dv));
-    let wxz = mesh_x.scale(factor_slope);
-    let wyz = mesh_y.scale(factor_slope);
+    let wxz = mesh_x.mul(&factor_slope);
+    let wyz = mesh_y.mul(&factor_slope);
+    let wzz = deviation.mul(&factor_curvature);
     let two = Ball::exact(2.0);
     let [_, xv, xa] = &x;
     let [_, yv, ya] = &y;
@@ -630,8 +626,32 @@ fn warped_models(surface: &SurfaceTransform, [x, y, z]: [[TaylorModel; 3]; 3]) -
             .add(&wxy.mul(xv).mul(yv).scale(two))
             .add(&wyy.mul(yv).mul(yv))
             .add(&wxz.mul(xv).mul(zv).scale(two))
-            .add(&wyz.mul(yv).mul(zv).scale(two)),
+            .add(&wyz.mul(yv).mul(zv).scale(two))
+            .add(&wzz.mul(zv).mul(zv)),
     ]
+}
+
+/// [`FADE_FACTOR_IN_BAND`] and its first two derivatives in the height, on
+/// the model `z` of a height inside the band `[start, end)`.
+fn fade_band_models(
+    z: &TaylorModel,
+    start: f64,
+    end: f64,
+) -> (TaylorModel, TaylorModel, TaylorModel) {
+    let inverse_band = Ball::rounded(1.0 / (end - start), 2);
+    let progress = z.add_ball(Ball::exact(-start)).scale(inverse_band);
+    let horner = |coefficients: &[f64]| {
+        coefficients.iter().rev().fold(
+            TaylorModel::constant(Ball::exact(0.0)),
+            |sum, &coefficient| sum.mul(&progress).add_ball(Ball::exact(coefficient)),
+        )
+    };
+    let [c0, c1, c2, c3] = FADE_FACTOR_IN_BAND;
+    (
+        horner(&[c0, c1, c2, c3]),
+        horner(&[c1, 2.0 * c2, 3.0 * c3]).scale(inverse_band),
+        horner(&[2.0 * c2, 6.0 * c3]).scale(inverse_band * inverse_band),
+    )
 }
 
 /// A patch parameter's model along `coordinate` and its rate in it: the
