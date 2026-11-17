@@ -591,6 +591,43 @@ fn a_sent_reanchor_cut_parks_the_lane_until_the_barrier_reconciles() {
     h.drain_control();
 }
 
+/// #869: a shut-down mcu acks no barrier; once it reported shutdown the cut
+/// it parks is moot, so the deadline must not escalate a dead endpoint.
+#[test]
+fn a_shut_down_mcu_leaves_its_cut_barrier_unacked_without_a_fatal() {
+    let mut h = harness(&[lane_cfg(0, OID)]);
+    h.endpoint
+        .send_frames(MCU_ID, &[frame(0, vec![span(0, 0.0, 10.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
+        .expect("spans accepted");
+    let cut_at = (CYCLES_PER_SECOND * 0.05) as u64;
+    h.endpoint
+        .mark_reanchor(0, cut_at, Some(CYCLES_PER_SECOND))
+        .expect("axis exists");
+    h.endpoint
+        .send_frames(MCU_ID, &[frame(0, vec![span(cut_at, 10.0, 30.0, 0.05)])])
+        .and_then(|()| h.endpoint.tick())
+        .expect("spans held behind the cut");
+    assert!(
+        h.taken().iter().any(|s| s.name == SAMPLE_BARRIER_NAME),
+        "the cut owes a barrier"
+    );
+
+    h.endpoint.on_mcu_shutdown();
+    h.advance((2.0 * BARRIER_ACK_DEADLINE_SECONDS * CYCLES_PER_SECOND) as u64);
+    h.endpoint
+        .tick()
+        .expect("a shut-down mcu's silence is not an endpoint failure");
+
+    assert!(
+        !h.control
+            .try_iter()
+            .any(|msg| matches!(msg, PumpMsg::StepcompressFatal { .. })),
+        "a shut-down mcu must not escalate to the fatal-transport action"
+    );
+    assert!(h.taken().is_empty(), "nothing reaches a shut-down mcu");
+}
+
 #[test]
 fn a_readback_disagreeing_with_the_host_is_fatal() {
     let mut h = harness(&[lane_cfg(0, OID)]);

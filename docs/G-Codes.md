@@ -961,7 +961,7 @@ available while the tool is active.
 
 #### Z_OFFSET_APPLY_ENDSTOP
 `Z_OFFSET_APPLY_ENDSTOP`: Take the current Z Gcode offset (aka,
-babystepping), and subtract it from the stepper_z endstop_position.
+babystepping), and subtract it from the `[axis z]` position_endstop.
 This acts to take a frequently used babystepping value, and "make it
 permanent". Requires a `SAVE_CONFIG` to take effect.
 

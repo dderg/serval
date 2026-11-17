@@ -259,7 +259,7 @@ def fails_on_main(failure: Failure, rev: str = "origin/main") -> bool | None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as handle:
             handle.write(f"cc {value} # fuzz_triage replay\n")
-    with slots.slot(label="fuzz replay"):
+    with slots.slot(slots.Kind.SWEEP, label="fuzz replay"):
         result = subprocess.run(
             [
                 "cargo",

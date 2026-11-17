@@ -31,10 +31,9 @@ use arc_swap::ArcSwap;
 use crate::host_io::fire_and_forget_depth::FireAndForgetDepth;
 use crate::host_io::link_health::LinkHealth;
 use crate::host_io::parser::MsgProtoParser;
-use crate::host_io::runtime_events::{FaultEvent, McuLogEvent, RuntimeEvent, StatusEvent};
+use crate::host_io::runtime_events::{McuLogEvent, RuntimeEvent, StatusEvent};
 use crate::transport::{MessageParams, SubscribeError, TransportError};
 
-const DEFAULT_BAUD: u32 = 250_000;
 const IDENTIFY_TIMEOUT: Duration = Duration::from_millis(15_000);
 const RUNTIME_EVENT_CAPACITY: usize = 512;
 const RUNTIME_EVENT_BULK_CAPACITY: usize = 4096;
@@ -50,10 +49,6 @@ pub enum ReactorCommand {
     Abandon(u64),
     AttachHeartbeatCallback(Arc<dyn Fn(&[u32], &[u64]) + Send + Sync>),
     SetMcuLogHook(Box<dyn Fn(McuLogEvent) + Send + Sync>),
-    SubscribeFault {
-        sender: SyncSender<FaultEvent>,
-        reply: SyncSender<Result<(), SubscribeError>>,
-    },
     SubscribeRuntimeEvents {
         priority: SyncSender<RuntimeEvent>,
         bulk: SyncSender<RuntimeEvent>,
@@ -136,15 +131,6 @@ impl Drop for McuHostIo {
 impl McuHostIo {
     pub fn open(path: &str, baud: u32) -> Result<Self, TransportError> {
         Self::open_with_label(path, baud, path)
-    }
-
-    pub fn open_default(path: &str) -> Result<Self, TransportError> {
-        Self::open(path, DEFAULT_BAUD)
-    }
-
-    #[cfg(target_family = "unix")]
-    pub fn open_pipe(path: &str) -> Result<Self, TransportError> {
-        Self::open_pipe_with_label(path, path)
     }
 
     #[cfg(target_family = "unix")]
@@ -518,19 +504,6 @@ impl McuHostIo {
 
     pub fn set_mcu_log_hook(&self, hook: Box<dyn Fn(McuLogEvent) + Send + Sync>) {
         let _ = self.submission_tx.send(ReactorCommand::SetMcuLogHook(hook));
-    }
-
-    pub fn subscribe_fault(&self) -> Result<std::sync::mpsc::Receiver<FaultEvent>, SubscribeError> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-        self.submission_tx
-            .send(ReactorCommand::SubscribeFault {
-                sender,
-                reply: reply_tx,
-            })
-            .map_err(|_| SubscribeError::Closed)?;
-        reply_rx.recv().map_err(|_| SubscribeError::Closed)??;
-        Ok(receiver)
     }
 
     pub fn take_runtime_event_subscription(
