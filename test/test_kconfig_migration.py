@@ -80,7 +80,9 @@ def test_the_committed_configs_include_the_bench_config():
 @pytest.mark.parametrize(
     "committed", COMMITTED_CONFIGS, ids=lambda path: str(path.relative_to(ROOT))
 )
-def test_a_build_in_place_leaves_a_committed_config_unchanged(tmp_path, committed):
+def test_a_build_in_place_leaves_a_committed_config_unchanged(
+    tmp_path, committed
+):
     tree = _build_tree(tmp_path)
     shutil.copy(committed, tree / ".config")
 
