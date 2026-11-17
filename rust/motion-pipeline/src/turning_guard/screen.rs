@@ -20,6 +20,11 @@ pub(super) struct MoveSummary {
     /// move bounds the laid ratio by wherever its acceleration reaches the
     /// shaped path (see [`geometry::ExtrusionBudget`]).
     pub ratio: Option<(usize, f64)>,
+    /// Where the move extrudes on its follower, the widest half-width the
+    /// ramp of its ratio steps may take along the path,
+    /// `0.5·v·RATIO_RAMP_MAX_TIME_S` at the fastest `v` the leaders reach
+    /// about it.
+    pub extrusion_ramp_mm: Option<f64>,
 }
 
 impl MoveSummary {
@@ -33,6 +38,7 @@ impl MoveSummary {
             accel_bound: 0.0,
             moves_on: [false; 3],
             ratio: None,
+            extrusion_ramp_mm: None,
         }
     }
 }
