@@ -2512,7 +2512,7 @@ impl RatioSmoothing {
             }
         }
         #[cfg(feature = "valley-audit")]
-        audit::lay_crawl(turn, crawl.1, reach, zero);
+        audit::lay_crawl(turn, crawl.crossing, reach, zero);
         self.place_valley(turn, (zero, sides), floors);
         Ok(())
     }
