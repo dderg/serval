@@ -2,8 +2,9 @@ use std::cell::OnceCell;
 use std::collections::VecDeque;
 
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width,
-    crawl_step_window, kept_floor, side_weight, turns_around,
+    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RATIO_RAMP_MAX_TIME_S, RatioRampRule,
+    VALLEY_LEAD_BUDGET_S, crawl_side_width, crawl_step_window, kept_floor, side_weight,
+    turns_around,
 };
 
 use super::super::{RatioSpan, SPAN_LOOKUP_SLACK_MM, Table};
@@ -89,6 +90,14 @@ impl SideTrail {
         self.probes
             .back()
             .map_or(f64::NEG_INFINITY, |probe| probe.s)
+    }
+
+    /// The fastest the leaders move anywhere on the trail.
+    fn fastest(&self) -> f64 {
+        self.probes
+            .iter()
+            .map(|probe| probe.speed)
+            .fold(0.0, f64::max)
     }
 
     /// How many legs the trail has probed.
@@ -304,13 +313,13 @@ impl Edge {
 
 /// What a crawl valley's sides read as laid: the span table up to `table`,
 /// infinite where the leaders rest past the trail; the leaders' trail; and
-/// the smoothed ratio, final up to `smoothing`
-/// ([`RatioSmoothing::final_through`]).
+/// the ratio steps the valley does not own whose smoothing may still change
+/// ([`RatioSmoothing::unfinal_steps`]).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SideReads<'a> {
     pub(super) table: f64,
     pub(super) trail: &'a SideTrail,
-    pub(super) smoothing: f64,
+    pub(super) unfinal_steps: &'a [f64],
 }
 
 /// The width of the `side` of the crawl valley leaving its zero stretch at
@@ -331,10 +340,11 @@ pub(super) struct SideReads<'a> {
 /// With an infinite table end the leaders rest past the trail, and the
 /// side reads it as far as it goes; else a side whose ratio the smoothing
 /// reads past the table's end waits for the spans laid there
-/// ([`RatioSmoothing::reads_within`]). A side waits too until the
-/// smoothed ratio over it is final: a step's ramp, and whether the side
-/// budgets it, follows the width at the step, which nodes still to come
-/// may move. It fails loudly where the leaders leave the follower no room
+/// ([`RatioSmoothing::reads_within`]). A side waits too while a ratio step
+/// whose smoothing may still change lies within the widest ramp the
+/// leaders' speed on the trail allows, `V·τ_max/2`, of it: the step's
+/// width, and so its ramp and whether it lands in the side, is not known
+/// yet. It fails loudly where the leaders leave the follower no room
 /// in any interval: it never narrows a side to
 /// make it fit. An interval whose own reading passes the limit is read
 /// again across the width field's node spacing first
@@ -407,7 +417,12 @@ pub(super) fn crawl_side(
             return true;
         }
         let window = (window.0, window.1.min(trail.through()));
-        if window.1 > reads.smoothing {
+        let ramp_reach = 0.5 * RATIO_RAMP_MAX_TIME_S * trail.fastest();
+        if reads
+            .unfinal_steps
+            .iter()
+            .any(|&s| s >= window.0 - ramp_reach && s <= window.1 + ramp_reach)
+        {
             waits = true;
             return true;
         }

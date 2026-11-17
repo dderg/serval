@@ -2445,7 +2445,7 @@ impl RatioSmoothing {
         let leaves_a_side = |s: f64| rested >= held || s - window - reach >= held;
         steps.own_near(tables, &untaken, &|s| untaken(s) && leaves_a_side(s));
         let zero = steps.zero_stretch();
-        let smoothing_final = self.final_through(table_end);
+        let unfinal_steps = self.unfinal_steps(table_end, &|table, s| steps.owns(table, s));
         let rested_trail = crawl
             .rests_past
             .map(|rested| self.trail.as_of(rested.trail_legs));
@@ -2454,7 +2454,7 @@ impl RatioSmoothing {
         let reads = SideReads {
             table: table_end,
             trail,
-            smoothing: smoothing_final,
+            unfinal_steps: &unfinal_steps,
         };
         let laid = (&*self, tables, reads);
         let after = crawl_side(
@@ -2858,6 +2858,31 @@ impl RatioSmoothing {
             .filter(|last| self.advance_reads_the_weight() && last.reach_end() > table_end - unlaid)
             .map_or(table_end, |last| last.end);
         unlaid.max(table_end - widened_from)
+    }
+
+    /// Where the ratio steps of either table lie whose clusters may still
+    /// change ([`SeamTable::first_unfinal`]), but for those `owned` holds:
+    /// past the width's final nodes a step's window is not known yet, and
+    /// beyond the last node it is none.
+    fn unfinal_steps(&mut self, table_end: f64, owned: &dyn Fn(Table, f64) -> bool) -> Vec<f64> {
+        let width_final = self.width.final_through();
+        [(Table::Laid, &self.laid), (Table::Advance, &self.advance)]
+            .into_iter()
+            .flat_map(|(table, seams)| {
+                let unfinal_from = width_final.map_or(Some(f64::NEG_INFINITY), |width_final| {
+                    seams.first_unfinal(&self.width, width_final, table_end)
+                });
+                seams
+                    .seams
+                    .iter()
+                    .filter(move |seam| {
+                        unfinal_from.is_some_and(|from| seam.s >= from)
+                            && seam.step != 0.0
+                            && !owned(table, seam.s)
+                    })
+                    .map(|seam| seam.s)
+            })
+            .collect()
     }
 
     /// How far the smoothed ratio is final: its width there is, no window
