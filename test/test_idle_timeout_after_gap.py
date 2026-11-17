@@ -81,7 +81,9 @@ def test_ready_check_is_armed_within_ready_timeout():
 def test_printing_event_is_not_scheduled_in_the_past():
     motion, _it, printer = _first_activity_after_gap()
     est_now = motion.mcu.estimated_print_time(NOW)
-    printing = [p for name, p in printer.events if name == "idle_timeout:printing"]
+    printing = [
+        p for name, p in printer.events if name == "idle_timeout:printing"
+    ]
     assert len(printing) == 1
     (print_time,) = printing[0]
     assert print_time >= est_now, est_now - print_time
