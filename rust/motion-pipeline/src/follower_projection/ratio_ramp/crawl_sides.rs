@@ -2,16 +2,22 @@ use std::cell::OnceCell;
 use std::collections::VecDeque;
 
 use geometry::{
-    CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width, crawl_step_window,
-    side_weight, turns_around,
+    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width,
+    crawl_step_window, side_weight, turns_around,
 };
 
 use super::super::{RatioSpan, Table};
-use super::{Crossing, RampLeg, RatioSmoothing, Seam};
+use super::{Crossing, NODE_SPACING_S, RampLeg, RatioSmoothing, Seam};
 
 /// Probes per leg the side trail reads the leaders at, both ends included
 /// once more.
 const TRAIL_PROBES_PER_LEG: usize = 16;
+
+/// The share of what the nearer steps and `r·A` leave of the follower's
+/// limit that the far steps' windows are widened to fit
+/// ([`StepWindows::widen_far_steps`]): the rest keeps the sum the flow
+/// check then reads, rounded, under the limit.
+const FAR_STEP_FLOW_SHARE: f64 = 0.99;
 
 /// The leaders at one probe of the side trail: the leg it reads, where on
 /// the path, how fast, and the path speed's rate `s̈`, signed, as they
@@ -75,11 +81,15 @@ impl SideTrail {
     }
 
     /// The path the leaders had reached [`VALLEY_LEAD_BUDGET_S`] before the
-    /// last probe, at the latest probe no later: no crawl valley still to
-    /// lay reaches back past it. `None` before the trail covers that long.
-    pub(super) fn lead_budget_back(&self) -> Option<f64> {
-        let last = self.probes.back()?;
-        let since = last.t - VALLEY_LEAD_BUDGET_S;
+    /// last probe at or before `s`, at the latest probe no later: no side of
+    /// a crawl valley at `s` reaches back past it. `None` where the trail
+    /// does not cover that long.
+    pub(super) fn lead_budget_back_from(&self, s: f64) -> Option<f64> {
+        let at = self
+            .probes
+            .partition_point(|probe| probe.s <= s)
+            .checked_sub(1)?;
+        let since = self.probes[at].t - VALLEY_LEAD_BUDGET_S;
         let index = self.probes.partition_point(|probe| probe.t <= since);
         (index > 0).then(|| self.probes[index - 1].s)
     }
@@ -164,11 +174,53 @@ impl SideTrail {
             },
         )
     }
+
+    /// `interval` read across at least `span` of the leaders' time about
+    /// its middle, between the probes of any leg nearest outside it. The
+    /// fit holds `s̈` within its tolerance `A` and leaves the jerk free, so
+    /// over an interval of a sliver leg, 1e-5 mm long, the mean `Δs̈/Δt`
+    /// reads a sliver piece's jerk, within only `2A/Δt` of the leaders'
+    /// own; across `span` that error is `2A/span`. An interval as long
+    /// already, or one the trail has no probe beyond, reads as it is.
+    fn read_across<'a>(&'a self, interval: Interval<'a>, span: f64) -> Interval<'a> {
+        let (from, to, _) = interval;
+        if to.t - from.t >= span {
+            return interval;
+        }
+        let middle = 0.5 * (from.t + to.t);
+        let start = self
+            .probes
+            .iter()
+            .filter(|probe| probe.t <= middle - 0.5 * span)
+            .max_by(|left, right| left.t.total_cmp(&right.t));
+        let end = self
+            .probes
+            .iter()
+            .filter(|probe| probe.t >= middle + 0.5 * span)
+            .min_by(|left, right| left.t.total_cmp(&right.t));
+        let (Some(start), Some(end)) = (start, end) else {
+            return interval;
+        };
+        (
+            start,
+            end,
+            (end.path_accel - start.path_accel) / (end.t - start.t),
+        )
+    }
 }
 
 /// Two neighbouring probes of one leg and the mean `s⃛` between them
 /// ([`SideTrail::intervals_within`]).
 type Interval<'a> = (&'a TrailProbe, &'a TrailProbe, f64);
+
+/// Whether the leaders may crawl between the probes of `interval`, under
+/// [`ADVANCE_VALLEY_SPEED_MM_S`]: the slowest they can be there, each
+/// probe's speed less what the larger `|s̈|` takes off toward the other,
+/// is `(v₁ + v₂ − |s̈|·Δt)/2`.
+fn may_crawl((from, to, _): Interval) -> bool {
+    let decline = from.path_accel.abs().max(to.path_accel.abs()) * (to.t - from.t).abs();
+    0.5 * (from.speed + to.speed - decline) < ADVANCE_VALLEY_SPEED_MM_S
+}
 
 impl TrailProbe {
     /// The path acceleration away from the crawl a side reaching `side`
@@ -241,7 +293,14 @@ impl Edge {
 /// reads past `table_end` waits for the spans laid there
 /// ([`RatioSmoothing::reads_within`]). It fails loudly where the leaders
 /// leave the follower no room in any interval: it never narrows a side to
-/// make it fit.
+/// make it fit. An interval whose own reading passes the limit is read
+/// again across the width field's node spacing first
+/// ([`SideTrail::read_across`]): a sliver leg's mean reads the fit, not
+/// the leaders. Where that still passes the limit across an interval the
+/// leaders may crawl in (a reversal inside the side), it asks `|s̈|` alone:
+/// the turning there is that crawl's, whose own valley holds the weight
+/// at zero over it, as the turning guard asks nothing of the turning
+/// term below [`ADVANCE_VALLEY_SPEED_MM_S`].
 ///
 /// The advance reads `r·(s̈ + k·Φ·s⃛)`, `Φ` the product of the valleys'
 /// weights, at most this side's `W(d)` at a distance `d` from the crawl:
@@ -343,7 +402,18 @@ pub(super) fn crawl_side(
         trail
             .intervals_within(window, side)
             .fold(true, |fits, interval| {
-                let (ratio, own) = (ratio_over(interval), own_over(interval));
+                let ratio = ratio_over(interval);
+                let interval = if ratio * own_over(interval) >= rule.max_accel_mm_s2 {
+                    trail.read_across(interval, NODE_SPACING_S)
+                } else {
+                    interval
+                };
+                let own = match own_over(interval) {
+                    own if ratio * own >= rule.max_accel_mm_s2 && may_crawl(interval) => {
+                        interval.0.path_accel.abs().max(interval.1.path_accel.abs())
+                    }
+                    own => own,
+                };
                 assert!(
                     ratio * own < rule.max_accel_mm_s2,
                     "follower projection: the leaders ask {} mm/s² of the follower between \
@@ -366,7 +436,8 @@ pub(super) fn crawl_side(
 
 /// The ratio steps a crawl valley holds the weight at zero around: each
 /// step's window is kept within `window` of it
-/// ([`geometry::crawl_step_window`]), with every seam of the sloped run of
+/// ([`geometry::crawl_step_window`]), or wider for a far step whose flow
+/// would pass the limit at it ([`Self::widen_far_steps`]), with every seam of the sloped run of
 /// spans either side of it, which the smoothing may join into one cluster
 /// ramped over the narrowest of their windows ([`SeamTable::joins`]), and
 /// the valley's zero stretch spans the crawl and every owned run's
@@ -386,19 +457,21 @@ pub(super) struct StepWindows {
 }
 
 /// A ratio step a crawl valley holds the weight at zero around: which
-/// table it steps, where, and the seams of the sloped run of spans either
-/// side of it, its own among them, whose windows the valley caps with it.
+/// table it steps, where, the seams of the sloped run of spans either side
+/// of it, its own among them, whose windows the valley caps with it, and
+/// the half-width it caps them to.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct OwnedStep {
     pub(super) table: Table,
     pub(super) s: f64,
     pub(super) run: Vec<f64>,
+    pub(super) half_width: f64,
 }
 
 impl OwnedStep {
     /// The step `seam` of `spans` at their index `at`, with the seams of
     /// the sloped spans running from it either way.
-    fn of(table: Table, spans: &[RatioSpan], at: usize, seam: &Seam) -> Self {
+    fn of(table: Table, spans: &[RatioSpan], at: usize, seam: &Seam, half_width: f64) -> Self {
         let mut first = at;
         while first > 1 && spans[first - 1].ratio_slope() != 0.0 {
             first -= 1;
@@ -415,6 +488,7 @@ impl OwnedStep {
             table,
             s: seam.s,
             run,
+            half_width,
         }
     }
 
@@ -469,7 +543,7 @@ impl StepWindows {
                 if seam.step == 0.0 || seam.s < lo || seam.s > hi || owned_already {
                     continue;
                 }
-                let owned = OwnedStep::of(table, spans, at, &seam);
+                let owned = OwnedStep::of(table, spans, at, &seam, self.window);
                 if owned.run.iter().all(|&s| untaken(s)) {
                     self.owned.push(owned);
                 }
@@ -485,7 +559,10 @@ impl StepWindows {
             .iter()
             .fold((self.turn, self.turn), |(lo, hi), owned| {
                 let (first, last) = owned.extent();
-                (lo.min(first - self.window), hi.max(last + self.window))
+                (
+                    lo.min(first - owned.half_width),
+                    hi.max(last + owned.half_width),
+                )
             })
     }
 
@@ -538,14 +615,7 @@ impl StepWindows {
     }
 
     /// Fails loudly where the flow over the zero stretch asks more than the
-    /// follower's limit: `r·A` at the largest ratio the smoothed laid
-    /// table, laid as `laid`, reads there ([`RatioSmoothing::peak_ratio_in`]),
-    /// and `¾·|Δ|·ṡ²/window` for each ratio step `Δ` of an owned run of the
-    /// laid table, `ṡ²` read as far from the crawl as the step's own capped
-    /// window reaches: a step ramps over its window alone, and the run's
-    /// other seams only change the slope. The table's own slopes, which a
-    /// window of any width averages to no steeper, are the planner's to
-    /// hold.
+    /// follower's limit ([`Self::flow`]).
     pub(super) fn assert_flow_fits(
         &self,
         smoothing: &RatioSmoothing,
@@ -557,14 +627,7 @@ impl StepWindows {
         }
         let zero = self.zero_stretch();
         let path_accel = self.path_accel(&smoothing.trail);
-        let ramps: f64 = self
-            .laid_steps(laid)
-            .map(|(s, step)| {
-                let reaching = (s - self.turn).abs() + self.window;
-                0.75 * step * self.speed_squared_within(path_accel, reaching) / self.window
-            })
-            .sum();
-        let flow = smoothing.peak_ratio_in(Table::Laid, laid, zero.0, zero.1) * path_accel + ramps;
+        let flow = self.flow(smoothing, laid, path_accel);
         assert!(
             flow <= rule.max_accel_mm_s2,
             "follower projection: the ratio steps {:?} the crawl valley at s={} ({:?}) holds at \
@@ -579,9 +642,116 @@ impl StepWindows {
         );
     }
 
+    /// What the flow over the zero stretch asks of the follower at the path
+    /// acceleration `A` across it: `r·A` at the largest ratio the smoothed
+    /// laid table, laid as `laid`, reads there
+    /// ([`RatioSmoothing::peak_ratio_in`]), and `¾·|Δ|·ṡ²/w` for each ratio
+    /// step `Δ` of an owned run of the laid table capped to `w`, `ṡ²` read
+    /// as far from the crawl as the step's own window reaches: a step ramps
+    /// over its window alone, and the run's other seams only change the
+    /// slope. The table's own slopes, which a window of any width averages
+    /// to no steeper, are the planner's to hold.
+    fn flow(&self, smoothing: &RatioSmoothing, laid: &[RatioSpan], path_accel: f64) -> f64 {
+        let zero = self.zero_stretch();
+        let ramps: f64 = self
+            .laid_steps(laid)
+            .map(|(owner, s, step)| self.step_flow(path_accel, s, step, owner.half_width))
+            .sum();
+        smoothing.peak_ratio_in(Table::Laid, laid, zero.0, zero.1) * path_accel + ramps
+    }
+
+    /// `¾·|Δ|·ṡ²/w` of a step `step` at `s` capped to `half_width`.
+    fn step_flow(&self, path_accel: f64, s: f64, step: f64, half_width: f64) -> f64 {
+        let reaching = (s - self.turn).abs() + half_width;
+        0.75 * step * self.speed_squared_within(path_accel, reaching) / half_width
+    }
+
+    /// Where the flow over the zero stretch passes the follower's limit,
+    /// widens the window of each owned laid step lying further than two
+    /// windows from the crawl to the narrowest that fits its share of what
+    /// the nearer steps and `r·A` leave, shared by the size of its steps.
+    /// [`crawl_step_window`]'s share holds a step's flow to the shortest
+    /// ramp's only within two windows of the crawl; past them the leaders
+    /// may cross it far faster. A step `Δ` a distance `d` out with window
+    /// `w` asks `¾·|Δ|·(v² + 2A·(d + w))/w`, which falls toward
+    /// `1.5·|Δ|·A` as `w` grows, so a share above that has a width. A step
+    /// whose wider window would push the before side onto taken path
+    /// (`leaves_a_side`, read at the window's start) keeps its own. Whether
+    /// any widened: the zero stretch then moved, and the sides with it.
+    pub(super) fn widen_far_steps(
+        &mut self,
+        smoothing: &RatioSmoothing,
+        (laid, rule): (&[RatioSpan], &RatioRampRule),
+        leaves_a_side: &dyn Fn(f64) -> bool,
+    ) -> bool {
+        if self.owned.is_empty() {
+            return false;
+        }
+        let path_accel = self.path_accel(&smoothing.trail);
+        if self.flow(smoothing, laid, path_accel) <= rule.max_accel_mm_s2 {
+            return false;
+        }
+        let zero = self.zero_stretch();
+        let (turn, window) = (self.turn, self.window);
+        let far = move |owner: &OwnedStep| (owner.s - turn).abs() > 2.0 * window;
+        let (near_flow, far_steps) =
+            self.laid_steps(laid)
+                .fold((0.0, 0.0), |(near_flow, far_steps), (owner, s, step)| {
+                    if far(owner) {
+                        (near_flow, far_steps + step)
+                    } else {
+                        (
+                            near_flow + self.step_flow(path_accel, s, step, owner.half_width),
+                            far_steps,
+                        )
+                    }
+                });
+        let left = FAR_STEP_FLOW_SHARE
+            * (rule.max_accel_mm_s2
+                - smoothing.peak_ratio_in(Table::Laid, laid, zero.0, zero.1) * path_accel
+                - near_flow);
+        if far_steps == 0.0 || left <= 1.5 * path_accel * far_steps {
+            return false;
+        }
+        let speed_squared = self.crossing.speed * self.crossing.speed;
+        let mut widened = false;
+        for index in 0..self.owned.len() {
+            let owner = &self.owned[index];
+            if owner.table != Table::Laid || !far(owner) {
+                continue;
+            }
+            let (moment, steps) = self
+                .laid_steps(laid)
+                .filter(|(other, _, _)| std::ptr::eq(*other, owner))
+                .fold((0.0, 0.0), |(moment, steps), (_, s, step)| {
+                    let distance = (s - self.turn).abs();
+                    (
+                        moment + 0.75 * step * (speed_squared + 2.0 * path_accel * distance),
+                        steps + step,
+                    )
+                });
+            if steps == 0.0 {
+                continue;
+            }
+            let share = left * steps / far_steps;
+            let half_width = moment / (share - 1.5 * path_accel * steps);
+            let opens_at = owner.extent().0 - half_width;
+            if half_width <= owner.half_width || (owner.s < self.turn && !leaves_a_side(opens_at)) {
+                continue;
+            }
+            self.owned[index].half_width = half_width;
+            widened = true;
+        }
+        widened
+    }
+
     /// Each seam of the owned runs of the laid table, laid as `laid`, that
-    /// steps its ratio, once, with the step's size.
-    fn laid_steps<'a>(&'a self, laid: &'a [RatioSpan]) -> impl Iterator<Item = (f64, f64)> + 'a {
+    /// steps its ratio, once, with the owned step whose run holds it first
+    /// and the step's size.
+    fn laid_steps<'a>(
+        &'a self,
+        laid: &'a [RatioSpan],
+    ) -> impl Iterator<Item = (&'a OwnedStep, f64, f64)> + 'a {
         let laid_runs = self
             .owned
             .iter()
@@ -589,13 +759,14 @@ impl StepWindows {
             .filter(|(_, owned)| owned.table == Table::Laid);
         laid_runs
             .flat_map(move |(index, owned)| {
-                owned.run.iter().copied().filter(move |&s| {
-                    !self.owned[..index]
+                owned.run.iter().copied().filter_map(move |s| {
+                    let earlier = self.owned[..index]
                         .iter()
-                        .any(|earlier| earlier.table == Table::Laid && earlier.run.contains(&s))
+                        .any(|earlier| earlier.table == Table::Laid && earlier.run.contains(&s));
+                    (!earlier).then_some((owned, s))
                 })
             })
-            .filter_map(move |s| {
+            .filter_map(move |(owned, s)| {
                 let at = laid.partition_point(|span| span.s0 < s);
                 assert!(
                     at > 0 && laid.get(at).is_some_and(|span| span.s0 == s),
@@ -603,7 +774,7 @@ impl StepWindows {
                      longer has"
                 );
                 let step = Seam::between(&laid[at - 1], &laid[at]).map_or(0.0, |seam| seam.step);
-                (step != 0.0).then_some((s, step.abs()))
+                (step != 0.0).then_some((owned, s, step.abs()))
             })
     }
 }
