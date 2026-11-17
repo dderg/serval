@@ -931,14 +931,9 @@ fn materialize_source_axis(
             })?);
         }
     }
-    let convolved = chains
-        .chains
-        .get(axis)
-        .is_some_and(|chain| chain.kernel().is_some());
-    let seam_continuity = if convolved {
-        SeamContinuity::Position
-    } else {
-        crate::follower_projection::leader_seam_continuity(chains, axis)
+    let seam_continuity = match chains.chains.get(axis) {
+        Some(chain) if chain.kernel().is_some() => convolved_source_seams(chain),
+        _ => crate::follower_projection::leader_seam_continuity(chains, axis),
     };
     let mut curve = fit_axis_from_signal(
         AxisFit {
@@ -970,6 +965,17 @@ fn materialize_source_axis(
         }
     }
     Ok(ContinuousAxis::Spline(Arc::new(curve)))
+}
+
+/// What every seam of a convolved source's fit carries: velocity under a
+/// motor-side acceleration gain `k2`, which turns a source velocity step
+/// `Δv` at `b` into a motor-command velocity step `k2·Δv·k'` where a kernel
+/// edge of slope `k'` passes `b`; position otherwise.
+fn convolved_source_seams(chain: &CompiledChain) -> SeamContinuity {
+    match chain.trailing_transform() {
+        Some(ChainStage::DerivativeGains { k2, .. }) if *k2 != 0.0 => SeamContinuity::Velocity,
+        _ => SeamContinuity::Position,
+    }
 }
 
 /// Fits the changed sources of every segment in `segments` on the calling
