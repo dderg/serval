@@ -373,14 +373,17 @@ def _hold_start(monkeypatch, foreign=None, found=RAN_ON, tree_build="f00d"):
     monkeypatch.setattr(
         suite,
         "python",
-        lambda script, *a, **k: calls.append(f"{script} {a[0]}")
-        or _completed(0),
+        lambda script, *a, **k: (
+            calls.append(f"{script} {a[0]}") or _completed(0)
+        ),
     )
     monkeypatch.setattr(
         suite.deploy,
         "settle",
-        lambda config: calls.append(f"settle {config.name}")
-        or ["FIRMWARE_RESTART: the Pi ran another printer config"],
+        lambda config: (
+            calls.append(f"settle {config.name}")
+            or ["FIRMWARE_RESTART: the Pi ran another printer config"]
+        ),
     )
     monkeypatch.setattr(suite, "query_step_benchmark", lambda: {"ok": True})
     monkeypatch.setattr(
@@ -469,8 +472,9 @@ def test_a_row_that_no_longer_fits_the_hold_is_deferred(monkeypatch):
     monkeypatch.setattr(
         suite,
         "run_hardware",
-        lambda row, suite_dir, timeout: ran.append(row.name)
-        or {"name": row.name},
+        lambda row, suite_dir, timeout: (
+            ran.append(row.name) or {"name": row.name}
+        ),
     )
     result = {"deployed": {}, "rows": [], "deferred": []}
     plan = {**LATER_HOLD, "rows": ["first_layers", "cancel_then_print"]}
