@@ -159,7 +159,7 @@ class Bench:
     in a machine-wide slot, timed in all of them (scripts/slots.py)."""
 
     def build(self) -> None:
-        with slots.slot(label="preflight build"):
+        with slots.slot(slots.Kind.BUILD, label="preflight build"):
             built = subprocess.run(
                 [
                     "cargo",
@@ -182,11 +182,13 @@ class Bench:
             )
 
     def check(self, arguments: list[str]) -> BenchRun:
-        with slots.slot(label="preflight check"):
+        with slots.slot(slots.Kind.SWEEP, label="preflight check"):
             return bench_run([*arguments, "--synchronous", "--check"])
 
     def time(self, arguments: list[str]) -> BenchRun:
-        with slots.slot(exclusive=True, label="preflight timing"):
+        with slots.slot(
+            slots.Kind.SWEEP, exclusive=True, label="preflight timing"
+        ):
             return bench_run(arguments, ["taskset", "-c", gate.LIVE_CORES])
 
 
@@ -372,11 +374,13 @@ def calibration_costs(commit: str) -> dict[str, float]:
         return cached[cpu][commit]
     gate.gate_cores()
     target = RUST / "target"
-    with slots.slot(label="preflight calibration build"):
+    with slots.slot(slots.Kind.BUILD, label="preflight calibration build"):
         gate.extract_commit(commit, target)
         tree = gate.commit_tree(target, commit)
         bench = gate.build_in_lab(tree / "rust", "calibration")
-    with slots.slot(exclusive=True, label="preflight calibration replay"):
+    with slots.slot(
+        slots.Kind.SWEEP, exclusive=True, label="preflight calibration replay"
+    ):
         costs = {
             config: gate.fastest_mean(
                 [
