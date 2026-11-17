@@ -194,9 +194,11 @@ def main() -> int:
         ).strip()
         for rev in (args.commit_a, args.commit_b)
     ]
-    with slots.slot(label="bench_compare build"):
+    with slots.slot(slots.Kind.BUILD, label="bench_compare build"):
         binaries = [checkout_and_build(sha) for sha in shas]
-    with slots.slot(exclusive=True, label="bench_compare measure"):
+    with slots.slot(
+        slots.Kind.SWEEP, exclusive=True, label="bench_compare measure"
+    ):
         return measure(args, shas, binaries, env)
 
 
