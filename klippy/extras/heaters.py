@@ -77,6 +77,7 @@ class Heater:
         self.last_temp_time = 0.0
         # pwm caching
         self.next_pwm_time = 0.0
+        self.last_pwm_time = 0.0
         self.last_pwm_value = 0.0
         # Those are necessary so the klipper config check does not complain
         config.get("control", None)
@@ -161,15 +162,25 @@ class Heater:
         ) < 0.05:
             # No significant change in value - can suppress update
             return
-        pwm_time = read_time + self.pwm_delay
+        self._send_pwm(read_time + self.pwm_delay, value)
+
+    def _send_pwm(self, pwm_time, value):
+        self.last_pwm_time = pwm_time
         self.next_pwm_time = (
             pwm_time + MAX_HEAT_TIME - (3.0 * self.pwm_delay + 0.001)
         )
         self.last_pwm_value = value
         self.mcu_pwm.set_pwm(pwm_time, value)
-        # logging.debug("%s: pwm=%.3f@%.3f (from %.3f@%.3f [%.3f])",
-        #              self.name, value, pwm_time,
-        #              self.last_temp, self.last_temp_time, self.target_temp)
+
+    def switch_off(self):
+        mcu = self.mcu_pwm.get_mcu()
+        now = mcu.estimated_print_time(self.reactor.monotonic())
+        with self.lock:
+            self.target_temp = 0.0
+            if self.last_pwm_value:
+                off_time = max(now, self.last_pwm_time) + self.pwm_delay
+                self._send_pwm(off_time, 0.0)
+            return self.last_pwm_time
 
     def temperature_callback(self, read_time, temp):
         with self.lock:
@@ -1177,7 +1188,7 @@ class PrinterHeaters:
         self.has_started = self.have_load_sensors = False
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
         self.printer.register_event_handler(
-            "gcode:request_restart", self.turn_off_all_heaters
+            "gcode:request_restart", self._switch_off_before_restart
         )
         # Register commands
         self.gcode = self.printer.lookup_object("gcode")
@@ -1284,9 +1295,15 @@ class PrinterHeaters:
             "available_monitors": self.available_monitors,
         }
 
-    def turn_off_all_heaters(self, print_time=0.0):
+    def turn_off_all_heaters(self):
         for heater in self.heaters.values():
             heater.set_temp(0.0)
+
+    def _switch_off_before_restart(self, print_time):
+        if not self.heaters:
+            return
+        off_since = max(heater.switch_off() for heater in self.heaters.values())
+        self.printer.lookup_object("toolhead").wait_until_print_time(off_since)
 
     cmd_TURN_OFF_HEATERS_help = "Turn off all heaters"
 
