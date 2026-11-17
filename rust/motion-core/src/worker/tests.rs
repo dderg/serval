@@ -687,7 +687,10 @@ fn a_dwell_before_the_first_move_counts_from_a_fresh_start() {
 fn a_dwell_after_a_start_hold_counts_from_the_hold() {
     let mut w = MockedWorker::spawn();
     let held = w.host_now() + 3.0;
-    w.h.hold_start_until_try_start(held).unwrap().recv().unwrap();
+    w.h.hold_start_until_try_start(held)
+        .unwrap()
+        .recv()
+        .unwrap();
 
     let move_start = w.start_after_dwell([0.0, 0.0, 0.0]);
 
