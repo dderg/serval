@@ -7,7 +7,7 @@
 
 mod corpus;
 
-use corpus::extruder::{ExtruderExcess, ToolheadPhase};
+use corpus::extruder::{Commanded, ExtruderExcess};
 
 /// `tools/sim/gcode/trident_follower_cache_regression.gcode` lines
 /// 1191-1213, the last layer's reversal at x≈129, y≈138.
@@ -164,7 +164,7 @@ fn a_reversal_the_kernels_fold_asks_the_extruder_no_more_than_its_limit() {
             matches!(
                 excess,
                 ExtruderExcess::Acceleration {
-                    phase: ToolheadPhase::Moving,
+                    command: Commanded::Following,
                     ..
                 }
             )

@@ -1605,11 +1605,17 @@ pub fn follower_velocity_step_allowance(
         })
 }
 
-/// What every seam of leader `leader`'s fit must carry of its shaped signal
-/// for the followers of `chains` that read it. An advance with no kernel
-/// after it ([`LeadingAdvance::is_ramped`]) reads the leader's acceleration
-/// as velocity, so an acceleration step at a seam would reach the
-/// follower's motor as a velocity step.
+/// What every seam of leader `leader`'s fits, of its planned source and of
+/// its shaped signal, must carry for the followers of `chains` that read
+/// it. The leader's velocity at least: a kernel `w` turns a source's
+/// velocity step `Δv` into an acceleration step `Δv·w` of the shaped path,
+/// past the fit's acceleration tolerance, and where a support edge of `w`
+/// has a slope, into a jerk step `Δv·w′` the true planned motion never
+/// makes. Its acceleration too where an advance with no kernel after it
+/// ([`LeadingAdvance::is_ramped`]) reads it: that advance reads the
+/// leader's acceleration as velocity and its jerk as acceleration, so an
+/// acceleration step at a seam would reach the follower's motor as a
+/// velocity step.
 pub(crate) fn leader_seam_continuity(chains: &AxisChainSet, leader: usize) -> SeamContinuity {
     let read_by_kernel_free_advance = chains
         .projected_followers()

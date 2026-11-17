@@ -8,10 +8,10 @@ use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use trajectory::{AnalyticMoveSpan, SurfaceMode};
 
 use super::{
-    AxisFit, CrowdedVelocityBreaks, EdgeSlivers, Enclosure, FitTol, LadderFloors,
-    PostProcessError, SignalBreak, TrackSignal, breaks_among, cap_contact_seeds,
-    coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration, fit_axis_from_signal,
-    plan_over_seeds, seed_floors, test_signals,
+    AxisFit, CrowdedVelocityBreaks, EdgeSlivers, Enclosure, FitTol, LadderFloors, PostProcessError,
+    SignalBreak, TrackSignal, breaks_among, cap_contact_seeds, coalesce_degenerate_seeds,
+    edge_inset, edge_velocity_and_acceleration, fit_axis_from_signal, plan_over_seeds, seed_floors,
+    test_signals,
 };
 use crate::lowering::SeamContinuity;
 
@@ -277,11 +277,7 @@ struct ReversingSpeed {
 impl TrackSignal for ReversingSpeed {
     fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
         let since = t - self.at;
-        let acceleration = if since < 0.0 {
-            -self.accel
-        } else {
-            self.accel
-        };
+        let acceleration = if since < 0.0 { -self.accel } else { self.accel };
         (
             0.5 * self.accel * since * since.abs() + self.position,
             self.accel * since.abs(),
@@ -380,9 +376,12 @@ fn the_fit_holds_the_acceleration_across_a_reversal_crowded_by_a_seed() {
                 t,
             )
         })
-        .fold((0.0, 0.0), |worst: (f64, f64), miss| {
-            if miss.0 > worst.0 { miss } else { worst }
-        });
+        .fold(
+            (0.0, 0.0),
+            |worst: (f64, f64), miss| {
+                if miss.0 > worst.0 { miss } else { worst }
+            },
+        );
     assert!(
         worst.0 <= fit.fit_tol.accel_mm_s2,
         "the fit misses the acceleration by {} mm/s² at {} around the reversal at {}, past \

@@ -18,6 +18,9 @@ SIM_BARRIER_ACK_DEADLINE_S = 60.0
 MOVE_UNDERWAY_S = 1.0
 X_STEP_LINE = 18
 REPEATED_RESTARTS = 4
+CONFIG_RESET_AFTER_ESTOP_S = 0.015
+ESTOP_HOLD_S = 1.5 * CONFIG_RESET_AFTER_ESTOP_S
+ESTOP_HELD = "[vtime] fault: delaying frame carrying msgid"
 
 
 def _kalico_native(sim_world):
@@ -135,4 +138,15 @@ def test_firmware_restart_right_after_a_latched_endpoint_death(sim_world):
     )
     assert ENDPOINT_DEATH_WATCHDOG_ABORT not in _host_rust_events(world)
     assert world.klippy_proc.poll() is None
+    _moves_after_restart(world)
+
+
+def test_config_reset_read_with_the_emergency_stop_resets_the_mcu(sim_world):
+    """#879: klippy sends config_reset 15 ms after emergency_stop. A link
+    held past that gap hands the MCU both frames in one read; the
+    emergency_stop shutdown must not discard the config_reset behind it."""
+    world = _kalico_native(sim_world)
+    world.inject("h7", delay_command="emergency_stop", by_s=ESTOP_HOLD_S)
+    world.firmware_restart()
+    assert ESTOP_HELD in (world.log_dir / "h7.log").read_text(errors="replace")
     _moves_after_restart(world)
