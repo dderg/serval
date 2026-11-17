@@ -9,6 +9,8 @@ use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use motion_pipeline::{Control, DispatchCommand, StreamConfig};
 use trajectory::{ContinuousSegment, NudgeProfile};
 
+mod slow_host;
+
 #[derive(Clone, Default)]
 struct Capture {
     segs: Arc<Mutex<Vec<(f64, f64, f64)>>>, // (t_start, t_end, x_at_end)
@@ -101,7 +103,7 @@ fn spawn_on_timeline(
     sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
 ) -> TestWorker {
-    spawn_recorded(config, chains, home, sink, timeline, None)
+    spawn_recorded(config, chains, home, sink, timeline, None, None)
 }
 
 fn spawn_recorded(
@@ -111,6 +113,7 @@ fn spawn_recorded(
     mut sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
     dispatch_record: Option<Arc<DispatchRecorder>>,
+    compute_charge: Option<ComputeCharge>,
 ) -> TestWorker {
     struct NoEndpoint;
     impl crate::pump::SpanSink for NoEndpoint {
@@ -157,6 +160,7 @@ fn spawn_recorded(
             trajectory: output,
             input_tap: None,
             dispatch_record,
+            compute_charge,
         },
         links,
         timeline,
@@ -919,6 +923,7 @@ fn finite_homing_admission_and_cancellation_preserve_backpressure() {
             trajectory: output,
             input_tap: None,
             dispatch_record: None,
+            compute_charge: None,
         },
         links,
         idle_timeline(frontier),
@@ -2368,6 +2373,7 @@ fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_pl
         sink.clone(),
         timeline,
         Some(Arc::clone(&record)),
+        None,
     );
     let mut at = [0.0_f64, 0.0, 0.0];
     let mut line_no = 1;

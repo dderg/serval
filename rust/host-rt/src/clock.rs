@@ -59,6 +59,28 @@ pub fn monotonic_raw_ns() -> u64 {
     }
 }
 
+/// CPU time the calling thread has run for: what a slower host would need
+/// that many times longer for.
+pub fn thread_cpu_time() -> Duration {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: clock_gettime is a safe POSIX syscall; we only read the result.
+        #[allow(unsafe_code)]
+        let ts = unsafe {
+            let mut ts: libc::timespec = std::mem::zeroed();
+            libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts);
+            ts
+        };
+        let secs = u64::try_from(ts.tv_sec).expect("thread CPU seconds are never negative");
+        let nanos = u32::try_from(ts.tv_nsec).expect("thread CPU nanoseconds fit a second");
+        Duration::new(secs, nanos)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        panic!("thread_cpu_time reads CLOCK_THREAD_CPUTIME_ID, which only Linux provides here")
+    }
+}
+
 /// Convert an `Instant` to seconds relative to a stable process-lifetime anchor.
 ///
 /// The anchor is initialised on first call and shared across all callers in the

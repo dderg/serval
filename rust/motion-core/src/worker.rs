@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Sender, TrySendError, bounded};
 use trajectory::AxisChainSet;
 
-use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
+use motion_pipeline::{ComputeCharge, Pipeline, StreamConfig, TrajectoryItem};
 
 mod dispatch;
+mod host_compute;
 mod ingress;
 mod intake_gate;
 mod producer_throttle;
@@ -272,6 +273,7 @@ pub(crate) struct PipelineOutput {
     pub(crate) trajectory: Sender<TrajectoryItem>,
     pub(crate) input_tap: Option<Sender<motion_pipeline::InputTrace>>,
     pub(crate) dispatch_record: Option<Arc<DispatchRecorder>>,
+    pub(crate) compute_charge: Option<ComputeCharge>,
 }
 
 /// Where a detached pipeline's dispatcher hands its segments: recorded,
@@ -405,6 +407,7 @@ pub fn setup_pipeline(
             trajectory: output,
             input_tap,
             dispatch_record,
+            compute_charge: host_compute::from_env(),
         },
         links,
         timeline,
@@ -432,13 +435,18 @@ impl StreamWorkerHandle {
             trajectory,
             input_tap,
             dispatch_record,
+            compute_charge,
         } = output;
         let pipeline = Pipeline::new(config.clone(), axis_chains, home_pos.clone(), 0.0);
         let pipeline = match input_tap {
             Some(tap) => pipeline.with_input_tap(tap),
             None => pipeline,
-        }
-        .into_staged(move |item| trajectory.send(item).is_ok());
+        };
+        let sink = move |item| trajectory.send(item).is_ok();
+        let pipeline = match compute_charge {
+            Some(charge) => pipeline.into_staged_charging(sink, charge),
+            None => pipeline.into_staged(sink),
+        };
         let pacer = ingress::Pacer::default();
         let intake = Arc::new(intake_gate::IntakeGate::new(
             Arc::clone(&timeline.frontier),
