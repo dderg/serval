@@ -397,6 +397,9 @@ def _hold_start(monkeypatch, foreign=None, found=RAN_ON, tree_build="f00d"):
     return calls
 
 
+SETTLE = "settle printer.cfg"
+
+
 def _start_hold(plan) -> dict:
     result = {"restored": [], "rows": [], "deferred": []}
     suite.held(plan, result, lambda: None)
@@ -406,7 +409,7 @@ def _start_hold(plan) -> dict:
 def test_the_first_hold_syncs_and_records_the_boards_firmware(monkeypatch):
     calls = _hold_start(monkeypatch)
     result = _start_hold(FIRST_HOLD)
-    assert calls == ["deploy.py sync", "settle printer.cfg", "rows"]
+    assert calls == ["deploy.py sync", SETTLE, "rows", SETTLE]
     assert result["deployed"] == {"head": "abc", "timestamp": "this sync"}
     assert result["firmware"] == RAN_ON
     assert result["restored"] == []
@@ -415,19 +418,20 @@ def test_the_first_hold_syncs_and_records_the_boards_firmware(monkeypatch):
 def test_a_later_hold_on_an_untouched_bench_only_settles(monkeypatch):
     calls = _hold_start(monkeypatch)
     result = _start_hold(LATER_HOLD)
-    assert calls == ["settle printer.cfg", "rows"]
+    assert calls == [SETTLE, "rows", SETTLE]
     assert result["deployed"] == LATER_HOLD["deployed"]
     assert result["restored"] == []
     assert result["settled"] == [
         "FIRMWARE_RESTART: the Pi ran another printer config"
     ]
+    assert result["left"] == result["settled"]
 
 
 def test_a_tree_another_holder_synced_is_restored_and_recorded(monkeypatch):
     taken = "the Pi runs /wt/b head 123456789, not /wt/a: another session"
     calls = _hold_start(monkeypatch, foreign=taken)
     result = _start_hold(LATER_HOLD)
-    assert calls == ["deploy.py sync", "settle printer.cfg", "rows"]
+    assert calls == ["deploy.py sync", SETTLE, "rows", SETTLE]
     assert result["restored"] == [f"re-synced /wt/a: {taken}"]
     assert result["deployed"]["timestamp"] == "this sync"
 
@@ -445,7 +449,7 @@ def test_a_reflashed_f401_is_flashed_back_once_built(monkeypatch):
     found = {**RAN_ON, "target": "v1-fwbeef"}
     calls = _hold_start(monkeypatch, found=found)
     result = _start_hold({**LATER_HOLD, "target_built": True})
-    assert calls == ["deploy.py ensure-target", "settle printer.cfg", "rows"]
+    assert calls == ["deploy.py ensure-target", SETTLE, "rows", SETTLE]
     assert result["restored"] == [
         "F401 reflashed from 'v1-fwbeef' to 'v1-fwf00d'"
     ]

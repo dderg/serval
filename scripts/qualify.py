@@ -11,11 +11,15 @@ latest qualified-* tag, not from main.
 
 `run` checks REV (default origin/main) out clean in the scratch tree
 RUN_TREE (cargo target pending_baselines.target_dir_for(RUN_TREE)), builds
-its engine and runs its units in order, stopping at the first that fails.
+its engine and F401 image and runs its units in order, stopping at the
+first that fails. The builds take a build slot first and the qualify lock
+inside it (#906): a process holding the lock never queues for a slot, and
+no unit, so no bench hold, runs inside a slot; the units run under the
+lock alone, after checking RUN_TREE still holds REV.
 `run` never holds the bench lock: each unit's tool takes its own holds of
 at most lock.MAX_HOLD_S, each restoring the bench it starts from:
-- deploy: deploy.py build-target without the lock, then one hold
-  (`qualify.py deploy`) of deploy.py settle, sync and ensure-target; the
+- deploy: one hold (`qualify.py deploy`) of deploy.py settle, sync and
+  ensure-target; the
   F401 must report REV's firmware build id and the deploy record name it;
 - suite-<k>: suite.py --row ... for each hold tools/bench/hold_plan.py
   plans over the full suite; a row may fail only through --expect-fail
@@ -48,8 +52,8 @@ landing.
 --good) up to --bad (default origin/main) for the first on which one suite
 row fails: per candidate, the row as --bad defines it runs from RUN_TREE
 through `suite.py --row NAME --tree CANDIDATE_TREE` in a hold suite.py
-takes, the candidate checked out clean, its engine built and synced the way
-ab.py deploys a ref.
+takes, the candidate checked out clean and its engine built in a slot the
+same way, synced the way ab.py deploys a ref.
 """
 
 from __future__ import annotations
@@ -74,6 +78,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pending_baselines as pending
+import slots
 
 SCRIPT = Path(__file__).resolve()
 MAIN = "origin/main"
@@ -616,10 +621,6 @@ def deploy_drift(deployed: dict, target_id: str) -> dict[str, str]:
 
 
 def deploy_unit(context: Context, unit: Unit) -> Outcome:
-    build = (*DEPLOY_TOOL, "build-target", "--tree", str(context.tree))
-    if tool(context, unit.name, *build)[0]:
-        failed = f"deploy.py build-target failed: {unit.name}.log"
-        return Outcome(False, failures=(failed,))
     handoff = context.record / DEPLOY_HANDOFF
     handoff.unlink(missing_ok=True)
     code = hold(context.tree, [DEPLOY, context.rev])
@@ -958,11 +959,45 @@ def resolve(rev: str) -> str:
     return git("rev-parse", "--verify", f"{rev}^{{commit}}")
 
 
+class Build(enum.Enum):
+    ENGINE = "engine"
+    ENGINE_AND_F401 = "engine and F401 image"
+
+
 def build_engine(tree: Path) -> None:
     try:
         pending.run(list(ENGINE_BUILD), tree, target_env(tree))
     except pending.PendingBaselinesError as exc:
         raise QualifyError(str(exc)) from exc
+
+
+def build_target(tree: Path) -> None:
+    build = [*UV_PYTHON, str(tree / BENCH / "deploy.py"), "build-target"]
+    try:
+        pending.run([*build, "--tree", str(tree)], tree, target_env(tree))
+    except pending.PendingBaselinesError as exc:
+        raise QualifyError(str(exc)) from exc
+
+
+def unmoved(tree: Path, sha: str) -> None:
+    head = git("rev-parse", "HEAD", cwd=tree)
+    if head != sha:
+        raise QualifyError(
+            f"{tree} moved from {sha[:12]} to {head[:12]} while this run "
+            "released the qualify lock: another qualify.py took it"
+        )
+
+
+def built(tree: Path, sha: str, what: Build) -> None:
+    label = f"qualify {what.value} {sha[:12]}"
+    with (
+        slots.slot(slots.Kind.BUILD, label=label),
+        pending.commit_lock(LOCK_NAME),
+    ):
+        unmoved(tree, sha)
+        build_engine(tree)
+        if what is Build.ENGINE_AND_F401:
+            build_target(tree)
 
 
 def hold(tree: Path, argv: list[str]) -> int:
@@ -1099,8 +1134,13 @@ def bisect(row: str, good: str, bad: str) -> int:
     log.parent.mkdir(parents=True, exist_ok=True)
 
     def passes(sha: str) -> bool:
-        candidate = checkout(CANDIDATE_TREE, sha)
-        passed = row_passes(RUN_TREE, candidate, row, log)
+        with pending.commit_lock(LOCK_NAME):
+            candidate = checkout(CANDIDATE_TREE, sha)
+        built(candidate, sha, Build.ENGINE)
+        with pending.commit_lock(LOCK_NAME):
+            unmoved(RUN_TREE, bad)
+            unmoved(candidate, sha)
+            passed = row_passes(RUN_TREE, candidate, row, log)
         print(f"bisect: {row} {'passes' if passed else 'fails'} at {sha[:12]}")
         return passed
 
@@ -1131,7 +1171,9 @@ def run_command(args: argparse.Namespace) -> int:
     with pending.commit_lock(LOCK_NAME):
         sha = checked_out(args.rev)
         refuse_held(bench(RUN_TREE, "lock"))
-        build_engine(RUN_TREE)
+    built(RUN_TREE, sha, Build.ENGINE_AND_F401)
+    with pending.commit_lock(LOCK_NAME):
+        unmoved(RUN_TREE, sha)
         return run(sha, expected)
 
 
@@ -1140,7 +1182,7 @@ def bisect_command(args: argparse.Namespace) -> int:
         bad = checked_out(args.bad)
         refuse_held(bench(RUN_TREE, "lock"))
         good = resolve(args.good or last_qualified())
-        return bisect(args.row, good, bad)
+    return bisect(args.row, good, bad)
 
 
 def main() -> int:

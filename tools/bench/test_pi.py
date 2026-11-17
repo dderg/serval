@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import urllib.error
 from pathlib import Path
@@ -66,6 +67,53 @@ def test_ssh_and_scp_reach_the_pi_at_its_address_through_the_alias(
     assert pi.PI_ADDRESS[:2] == ("-o", f"HostName={pi.PI_HOST}")
     assert calls[0] == ["ssh", *pi.PI_ADDRESS, pi.PI_SSH, "true"]
     assert calls[1][:-2] == ["scp", "-q", *pi.PI_ADDRESS]
+
+
+def test_several_pi_files_are_copied_in_one_scp(monkeypatch):
+    run, calls = _results(0)
+    monkeypatch.setattr(pi.subprocess, "run", run)
+    pi.scp_files_from_pi(["/a/x.jsonl", "/a/y.jsonl"], Path("/run/events"))
+    assert calls == [
+        [
+            "scp",
+            "-q",
+            *pi.PI_ADDRESS,
+            f"{pi.PI_SSH}:/a/x.jsonl",
+            f"{pi.PI_SSH}:/a/y.jsonl",
+            "/run/events",
+        ]
+    ]
+
+
+def test_only_event_logs_written_since_the_start_are_listed(
+    monkeypatch, tmp_path
+):
+    events = tmp_path / pi.PI_EVENTS
+    events.mkdir(parents=True)
+    started = 1_800_000_000.0
+    for name, written in {
+        "host-py.jsonl": started + 30,
+        "host-rust.jsonl.1": started + 0.5,
+        "host-rust.jsonl.2": started - 0.5,
+        "mcu.jsonl": started - 3600,
+    }.items():
+        (events / name).write_text("{}\n")
+        os.utime(events / name, (written, written))
+
+    def local_shell(command):
+        return subprocess.run(
+            ["bash", "-c", command],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    monkeypatch.setattr(pi, "ssh", local_shell)
+    assert pi.events_written_since(started) == [
+        f"{pi.PI_EVENTS}/host-py.jsonl",
+        f"{pi.PI_EVENTS}/host-rust.jsonl.1",
+    ]
 
 
 def test_an_ssh_that_never_reached_the_pi_is_retried(monkeypatch):
