@@ -15,11 +15,9 @@ fn scenario_file(seed: u32, name: &str) -> String {
 }
 
 fn replays_to_the_end(seed: u32) {
-    let planner = planner_config::from_doc::planner_config_from_text(&scenario_file(
-        seed,
-        "printer.cfg",
-    ))
-    .expect("the scenario's planner config");
+    let planner =
+        planner_config::from_doc::planner_config_from_text(&scenario_file(seed, "printer.cfg"))
+            .expect("the scenario's planner config");
     let mut script = LiveScript::new(
         &scenario_file(seed, "print.gcode"),
         &planner,
@@ -37,7 +35,10 @@ fn replays_to_the_end(seed: u32) {
         true
     };
     for input in inputs {
-        assert!(pipeline.feed(input, &mut count), "the pipeline refused an input");
+        assert!(
+            pipeline.feed(input, &mut count),
+            "the pipeline refused an input"
+        );
     }
     assert!(pipeline.finish(&mut count), "the pipeline failed to drain");
     assert!(emitted > 0, "the replay emitted no motion");

@@ -5268,11 +5268,10 @@ impl VelocityControls {
     }
 
     fn hull(&self) -> (f64, f64) {
-        self.controls[..self.len]
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &control| {
-                (low.min(control), high.max(control))
-            })
+        self.controls[..self.len].iter().fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(low, high), &control| (low.min(control), high.max(control)),
+        )
     }
 
     /// The controls of the two halves, by de Casteljau.
@@ -5394,8 +5393,9 @@ fn odometer_leaves(
             }
             let (odometer_leaf, rate) = OdometerLeaf::through(&samples, a, b);
             let centre = 0.5 * (a + b);
-            let on_speed =
-                |&x: &f64| (chebyshev_sum(&rate, x) - speed(centre + half * x)).abs() <= ODOMETER_RATE_TOL_MM_S;
+            let on_speed = |&x: &f64| {
+                (chebyshev_sum(&rate, x) - speed(centre + half * x)).abs() <= ODOMETER_RATE_TOL_MM_S
+            };
             let zone = half * (1.0 - ODOMETER_RATE_CHECKS[KRONROD_POINTS]);
             let follows_speed = ODOMETER_RATE_CHECKS.iter().all(on_speed)
                 && (!end_zones.hold_a_reversal((a, b), zone)
