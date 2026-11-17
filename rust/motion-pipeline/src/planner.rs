@@ -10,7 +10,8 @@ use crate::step_capacity_log::{StepCapacityLog, StepCapacityReport};
 use approach::Approaches;
 
 mod approach;
-pub(crate) use approach::{PIECE_S, corner_reach_mm};
+pub(crate) use approach::EARLY_RELEASE_S;
+use crate::fit_stage::Lookahead;
 use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig, StreamInput};
 use crate::worker_pool::WorkerPool;
 
@@ -57,8 +58,16 @@ pub struct Planner {
 
 impl Planner {
     pub fn new(config: StreamConfig, workers: Arc<WorkerPool>) -> Self {
+        Self::with_lookahead(config, workers, Lookahead::Settled)
+    }
+
+    pub(crate) fn with_lookahead(
+        config: StreamConfig,
+        workers: Arc<WorkerPool>,
+        lookahead: Lookahead,
+    ) -> Self {
         Self {
-            approaches: Approaches::new(config.corner, config.limits.accel_mm_s2),
+            approaches: Approaches::new(config.corner, config.limits.accel_mm_s2, lookahead),
             reach: ExtrusionReach::new(
                 config.max_extrude_only_velocity_mm_s,
                 config.max_extrude_only_accel_mm_s2,

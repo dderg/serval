@@ -12,7 +12,7 @@ use planner_config::from_doc::planner_config_from_text;
 use trajectory::AxisChainSet;
 
 use super::{SCALE_FLOOR, TurningGuard};
-use crate::fit_stage::FitStage;
+use crate::fit_stage::{FitStage, Lookahead};
 use crate::live_config::{GcodeLine, GcodeMoveBase, extruder_caps, stream_config};
 use crate::planner::Planner;
 use crate::types::{PlannedItem, StreamConfig, StreamInput};
@@ -57,6 +57,14 @@ const WHOLE_MOVES: usize = 4;
 /// may still merge into, and the half of the move before it a run that
 /// move may start can still ease over.
 const FRONT_REST_S: f64 = 1.5;
+
+/// One input of a stream: a G-code line under a runtime acceleration cap,
+/// or a drain (a dwell, a control token).
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Step {
+    Line(GcodeLine, Option<f64>),
+    Drain,
+}
 
 pub(super) struct BenchChain {
     base: GcodeMoveBase,
@@ -103,6 +111,40 @@ impl BenchChain {
             assert!(fit.feed(StreamInput::Move(m), &mut |item| {
                 planner.feed(item, &mut collect)
             }));
+        }
+        assert!(fit.finish(&mut |item| planner.feed(item, &mut collect)));
+        assert!(planner.finish(&mut collect));
+        planned
+    }
+
+    /// The planner's output for `steps`, each line under its runtime
+    /// acceleration cap, a drain where a step asks for one, fitted and
+    /// planned with `lookahead`, the stream closed at the end.
+    pub(super) fn plan_with(&self, steps: &[Step], lookahead: Lookahead) -> Vec<PlannedItem> {
+        let mut runtime = RuntimeLimits::default();
+        let mut fit = FitStage::with_lookahead(self.config.corner, lookahead).into_driver();
+        let mut planner = Planner::with_lookahead(self.config.clone(), Arc::default(), lookahead);
+        let mut planned = Vec::new();
+        let mut collect = |item| {
+            planned.push(item);
+            true
+        };
+        for step in steps {
+            let item = match step {
+                Step::Line(line, accel) => {
+                    runtime.set_accel_cap(*accel).expect("a positive cap");
+                    let Some(m) = self
+                        .base
+                        .line_move(&runtime, *line)
+                        .expect("the line moves")
+                    else {
+                        continue;
+                    };
+                    StreamInput::Move(m)
+                }
+                Step::Drain => StreamInput::Drain,
+            };
+            assert!(fit.feed(item, &mut |item| planner.feed(item, &mut collect)));
         }
         assert!(fit.finish(&mut |item| planner.feed(item, &mut collect)));
         assert!(planner.finish(&mut collect));

@@ -939,3 +939,5 @@ mod consumption_tests;
 mod cruise_onset_tests;
 #[cfg(test)]
 mod plan_velocity_bench;
+#[cfg(test)]
+mod may_open_run_tests;

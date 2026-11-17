@@ -1831,6 +1831,8 @@ mod backoff_stream_tests;
 #[cfg(test)]
 mod hold_time_tests;
 #[cfg(test)]
+mod lookahead_tests;
+#[cfg(test)]
 mod test_motion;
 #[cfg(test)]
 mod tests;
