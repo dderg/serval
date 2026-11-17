@@ -448,7 +448,9 @@ class Session:
         for command in printer.heater_targets(self.spec):
             self._gcode(command, Check.RECOVERY)
         if self.spec.runout_sensor:
-            self.marks.set_gpio_input(MARK_CHIP, RUNOUT_PIN_LINE, FILAMENT_PRESENT)
+            self.marks.set_gpio_input(
+                MARK_CHIP, RUNOUT_PIN_LINE, FILAMENT_PRESENT
+            )
         if self.spec.mesh is MeshKind.NONE:
             return
         mesh = (
@@ -821,7 +823,9 @@ class Session:
                 continue
             idle = event.get("cause") == IDLE_BRAKE_CAUSE
             if idle and self._spend_host_wait(low):
-                self.notes.append(f"idle brake at {low / NS_PER_S:.3f} s in a heat wait")
+                self.notes.append(
+                    f"idle brake at {low / NS_PER_S:.3f} s in a heat wait"
+                )
                 continue
             fields = {
                 k: event.get(k)
@@ -901,7 +905,8 @@ class Session:
         armed_ns = self.ready_ns + int(RUNOUT_ARM_S * NS_PER_S)
         if self._now_ns() < armed_ns:
             self._hold(
-                (armed_ns - self._now_ns()) / NS_PER_S, "the runout switch arming"
+                (armed_ns - self._now_ns()) / NS_PER_S,
+                "the runout switch arming",
             )
         start_ns = self._now_ns()
         self.paused = True
@@ -912,7 +917,9 @@ class Session:
         if state == "paused":
             self._resume(start_ns)
             return
-        self.notes.append(f"runout after the print completed: {action.to_line()}")
+        self.notes.append(
+            f"runout after the print completed: {action.to_line()}"
+        )
         self.paused = False
         self._allow_brakes(start_ns)
 

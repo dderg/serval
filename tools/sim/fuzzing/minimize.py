@@ -106,7 +106,9 @@ def _plainer_printers(scenario: Scenario) -> Iterator[Scenario]:
         plainer: PrinterSpec = dataclasses.replace(spec, **change)
         if plainer != spec:
             yield dataclasses.replace(scenario, printer=plainer)
-    if spec.exclude_object and not _targets(scenario, Act.EXCLUDE_OBJECT, "name"):
+    if spec.exclude_object and not _targets(
+        scenario, Act.EXCLUDE_OBJECT, "name"
+    ):
         yield _without_objects(scenario)
 
 

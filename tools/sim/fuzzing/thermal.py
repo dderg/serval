@@ -26,7 +26,11 @@ PULLUP_OHM = 4700.0
 KELVIN = 273.15
 HEATER_CHIP = 0
 THERMISTOR_POINTS = {
-    "EPCOS 100K B57560G104F": ((25.0, 100000.0), (150.0, 1641.9), (250.0, 226.15)),
+    "EPCOS 100K B57560G104F": (
+        (25.0, 100000.0),
+        (150.0, 1641.9),
+        (250.0, 226.15),
+    ),
 }
 
 
@@ -110,7 +114,9 @@ class Hotend:
 
     def _heater_on(self) -> int:
         try:
-            return self._control.gpio_output(HEATER_CHIP, self._pins.heater_line)
+            return self._control.gpio_output(
+                HEATER_CHIP, self._pins.heater_line
+            )
         except SimError:
             return 0
 

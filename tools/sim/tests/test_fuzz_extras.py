@@ -50,12 +50,15 @@ def test_the_extras_leave_what_a_seed_drew_before():
     for seed in SEEDS:
         chosen = scenario.generate(seed)
         plain = printer.draw_printer(_child(seed, "printer"))
-        assert dataclasses.replace(
-            chosen.printer,
-            runout_sensor=False,
-            exclude_object=False,
-            hotend_model=False,
-        ) == plain
+        assert (
+            dataclasses.replace(
+                chosen.printer,
+                runout_sensor=False,
+                exclude_object=False,
+                hotend_model=False,
+            )
+            == plain
+        )
         rng = _child(seed, "timeline")
         drawn = []
         for index, name in enumerate(chosen.prints):
@@ -122,17 +125,21 @@ def test_the_minimizer_drops_unused_extras():
     for seed in SEEDS:
         chosen = scenario.generate(seed)
         stripped = dataclasses.replace(
-            chosen, timeline=(), programs=tuple(map(_without_extras, chosen.programs))
+            chosen,
+            timeline=(),
+            programs=tuple(map(_without_extras, chosen.programs)),
         )
         spec = stripped.printer
         smaller = list(minimize.candidates(stripped))
         printers = {c.printer for c in smaller}
-        assert not spec.runout_sensor or dataclasses.replace(
-            spec, runout_sensor=False
-        ) in printers
-        assert not spec.hotend_model or dataclasses.replace(
-            spec, hotend_model=False
-        ) in printers
+        assert (
+            not spec.runout_sensor
+            or dataclasses.replace(spec, runout_sensor=False) in printers
+        )
+        assert (
+            not spec.hotend_model
+            or dataclasses.replace(spec, hotend_model=False) in printers
+        )
         if any(lead != scenario.Lead() for lead in chosen.leads):
             assert any(c.leads == () for c in smaller)
     labelled = next(
