@@ -42,8 +42,8 @@ use std::time::Instant;
 use geometry::{GcodePos, MachinePos, MeshGridSpec, ProbedMesh, SurfaceTransform};
 use motion_core::seam_test_harness::{LiveScript, LiveScriptError};
 use motion_pipeline::timing::stage_totals;
-use motion_pipeline::{Control, Pipeline, StreamInput, TrajectoryItem};
-use pipeline_snapshot::{PlanStep, SnapshotError};
+use motion_pipeline::{Pipeline, StreamInput, TrajectoryItem};
+use pipeline_snapshot::SnapshotError;
 use trajectory::ContinuousSegment;
 
 const EXIT_FAILURE: i32 = 1;
@@ -257,27 +257,6 @@ fn load_mesh(path: &str) -> Result<SurfaceTransform, String> {
     .map_err(|e| format!("set_bed_mesh: {e}"))
 }
 
-fn stream_inputs(
-    steps: Vec<PlanStep>,
-    mesh: Option<Arc<SurfaceTransform>>,
-    gcode_z_rebase: f64,
-) -> Vec<StreamInput> {
-    let mut inputs = Vec::with_capacity(steps.len() + 1);
-    if let Some(mesh) = mesh {
-        inputs.push(StreamInput::Control(Control::SetMesh {
-            mesh: Some(mesh),
-            gcode_z_rebase,
-        }));
-    }
-    for step in steps {
-        step.feed(|input| {
-            inputs.push(input);
-            true
-        });
-    }
-    inputs
-}
-
 fn non_finite(seg: &ContinuousSegment) -> Option<String> {
     if !(seg.t_start.is_finite() && seg.t_end.is_finite()) {
         return Some(format!(
@@ -354,7 +333,7 @@ fn main() {
     MOVE_LINES
         .set(std::mem::take(&mut script.move_lines))
         .expect("the move lines are set once");
-    let inputs = stream_inputs(std::mem::take(&mut script.steps), mesh, gcode_z_rebase);
+    let inputs = script.take_inputs(mesh);
 
     let wall = Instant::now();
     let (arrival_tx, arrival_rx) = crossbeam_channel::unbounded::<(f64, f64)>();
