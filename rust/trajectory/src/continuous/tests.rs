@@ -2779,16 +2779,19 @@ fn steep_mesh() -> Arc<SurfaceTransform> {
     ))
 }
 
-fn span_leaving_the_mesh() -> AnalyticMoveSpan {
+fn span_leaving_the_mesh(distance_origin: f64) -> AnalyticMoveSpan {
     let line = Segment::Line(Line::try_new([150.0, 150.0, 0.2], [300.0, 150.0, 0.2]).unwrap());
+    let phase = |t0, dt, s0: f64, v0, a0| {
+        LawSegment::new(t0, dt, distance_origin + s0, v0, ScalarLaw::ConstAccel { a0 })
+    };
     AnalyticMoveSpan::try_new(
         move_with(line, vec![]),
         Arc::from([
-            LawSegment::new(0.0, 0.1, 0.0, 0.0, ScalarLaw::ConstAccel { a0: 10_000.0 }),
-            LawSegment::new(0.1, 0.05, 50.0, 1_000.0, ScalarLaw::ConstAccel { a0: 0.0 }),
-            LawSegment::new(0.15, 0.1, 100.0, 1_000.0, ScalarLaw::ConstAccel { a0: -10_000.0 }),
+            phase(0.0, 0.1, 0.0, 0.0, 10_000.0),
+            phase(0.1, 0.05, 50.0, 1_000.0, 0.0),
+            phase(0.15, 0.1, 100.0, 1_000.0, -10_000.0),
         ]),
-        0.0,
+        distance_origin,
         0.0,
         0.25,
         Arc::from([150.0, 150.0, 0.2, 0.0]),
@@ -2797,9 +2800,7 @@ fn span_leaving_the_mesh() -> AnalyticMoveSpan {
     .unwrap()
 }
 
-#[test]
-fn a_surface_seam_lies_where_the_warped_z_leaves_the_mesh() {
-    let span = span_leaving_the_mesh();
+fn assert_one_seam_where_the_warped_z_steps(span: &AnalyticMoveSpan) {
     let z_velocity = |t: f64| span.eval_axis(2, t).unwrap().velocity;
 
     let seams = span.surface_seam_times().expect("the edge crossing is located");
@@ -2814,4 +2815,14 @@ fn a_surface_seam_lies_where_the_warped_z_leaves_the_mesh() {
         "the warped Z steps {around} mm/s around the seam at {seam} but {across} mm/s across \
          its neighbouring ulps"
     );
+}
+
+#[test]
+fn a_surface_seam_lies_where_the_warped_z_leaves_the_mesh() {
+    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(0.0));
+}
+
+#[test]
+fn a_surface_seam_reads_the_phases_past_the_span_distance_origin() {
+    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(150.0));
 }
