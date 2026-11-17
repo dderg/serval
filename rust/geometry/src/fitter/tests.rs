@@ -1021,3 +1021,29 @@ fn facets_of_jittered_lengths_leave_no_line_body_briefer_than_the_floor() {
         );
     }
 }
+
+/// #936: a blend from an extrusion into a travel ramps the ratio down to
+/// the travel's zero. Read as `r_in + (0 − r_in)·s/total`, the end came out
+/// −6.9e-18 for these lengths: a retract and a ratio step of rounding,
+/// which the laid table smoothed apart from the advance table that holds
+/// negatives at zero, so the advance read two ratios at one join.
+#[test]
+fn a_blend_into_a_travel_ends_its_ratio_ramp_on_zero() {
+    let follower = [FollowerDemand::constant(3, 0.060_446)];
+    let inbound = emit::SeamSide {
+        followers: &follower,
+        seg_len: 1.0,
+        trim: 0.0,
+    };
+    let outbound = emit::SeamSide {
+        followers: &[],
+        seg_len: 1.0,
+        trim: 0.0,
+    };
+    let (first, second) = emit::blend_followers(&inbound, &outbound, 0.1257, 0.02169);
+    let ramp = [first[0], second[0]];
+    assert_eq!(ramp[0].ratio, 0.060_446);
+    assert_eq!(ramp[0].ratio_end, ramp[1].ratio);
+    assert_eq!(ramp[1].ratio_end, 0.0, "{ramp:?}");
+    assert!(ramp.iter().all(|demand| demand.ratio >= 0.0 && demand.ratio_end >= 0.0));
+}
