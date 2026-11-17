@@ -8,10 +8,12 @@ use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use trajectory::{AnalyticMoveSpan, SurfaceMode};
 
 use super::{
-    CrowdedVelocityBreaks, EdgeSlivers, FitTol, PostProcessError, TrackSignal, VelocityBreak,
-    cap_contact_seeds, coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration,
-    velocity_breaks_among,
+    AxisFit, CrowdedVelocityBreaks, EdgeSlivers, Enclosure, FitTol, LadderFloors, PostProcessError,
+    SignalBreak, TrackSignal, breaks_among, cap_contact_seeds, coalesce_degenerate_seeds,
+    edge_inset, edge_velocity_and_acceleration, fit_axis_from_signal, plan_over_seeds, seed_floors,
+    test_signals,
 };
+use crate::lowering::SeamContinuity;
 
 const FLOOR: f64 = 2e-9;
 const POSITION_TOL: f64 = 1e-4;
@@ -193,9 +195,9 @@ fn a_chain_of_sub_floor_seeds_never_rolls_past_a_velocity_break() {
     let mut seeds = vec![0.0, 1.0, ratio_step];
     seeds.extend((1..16).map(|k| ratio_step + f64::from(k) * 7.0 * FLOOR / 16.0));
     seeds.push(end);
-    let breaks = [VelocityBreak {
+    let breaks = [SignalBreak {
         t: ratio_step,
-        step: -3.4,
+        velocity_step: -3.4,
     }];
     let slivers = coalesce_degenerate_seeds(&mut seeds, &breaks, FLOOR, POSITION_TOL)
         .expect("the ratio step is a floor clear of the end");
@@ -215,14 +217,17 @@ fn velocity_breaks_within_the_floor_of_an_anchor_move_onto_it() {
     let (crowding, near_end) = (1.0 + 0.5 * FLOOR, 2.0 - 0.5 * FLOOR);
     let mut seeds = vec![0.0, 1.0, crowding, near_end, 2.0];
     let breaks = [
-        VelocityBreak { t: 1.0, step: 3.4 },
-        VelocityBreak {
-            t: crowding,
-            step: -1.0,
+        SignalBreak {
+            t: 1.0,
+            velocity_step: 3.4,
         },
-        VelocityBreak {
+        SignalBreak {
+            t: crowding,
+            velocity_step: -1.0,
+        },
+        SignalBreak {
             t: near_end,
-            step: 2.0,
+            velocity_step: 2.0,
         },
     ];
     let slivers = coalesce_degenerate_seeds(&mut seeds, &breaks, FLOOR, POSITION_TOL)
@@ -239,8 +244,14 @@ fn moving_a_velocity_break_past_the_position_tolerance_fails_loudly() {
     let mut seeds = vec![0.0, 1.0, crowding, 2.0];
     let step = 1e6;
     let breaks = [
-        VelocityBreak { t: 1.0, step: 1.0 },
-        VelocityBreak { t: crowding, step },
+        SignalBreak {
+            t: 1.0,
+            velocity_step: 1.0,
+        },
+        SignalBreak {
+            t: crowding,
+            velocity_step: step,
+        },
     ];
     assert_eq!(
         coalesce_degenerate_seeds(&mut seeds, &breaks, FLOOR, POSITION_TOL),
@@ -250,6 +261,140 @@ fn moving_a_velocity_break_past_the_position_tolerance_fails_loudly() {
             velocity_step: step,
             position_shift: step * (crowding - 1.0),
         })
+    );
+}
+
+/// The extruder's track where the toolhead turns around at `at`: slowing at
+/// `accel` into the reversal and speeding up at `accel` out of it, its
+/// velocity `accel·|t − at|` continuous and its acceleration stepping by
+/// `2·accel`.
+struct ReversingSpeed {
+    at: f64,
+    accel: f64,
+    position: f64,
+}
+
+impl TrackSignal for ReversingSpeed {
+    fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let since = t - self.at;
+        let acceleration = if since < 0.0 { -self.accel } else { self.accel };
+        (
+            0.5 * self.accel * since * since.abs() + self.position,
+            self.accel * since.abs(),
+            acceleration,
+        )
+    }
+
+    fn enclosure_on(&self, lo: f64, hi: f64, accuracy: [f64; 3]) -> Option<Enclosure<'_>> {
+        test_signals::modelled((lo, hi), accuracy, &[self.at], |window| {
+            let half_acceleration = if window.center < self.at {
+                -0.5 * self.accel
+            } else {
+                0.5 * self.accel
+            };
+            test_signals::polynomial(window, self.at, &[self.position, 0.0, half_acceleration])
+        })
+    }
+}
+
+/// The extruder's reversal on the first layers of the bench's advance-free
+/// chain (voron_first_layers on bench_no_advance.cfg at 125.63 s), its fit
+/// span ending on the support's end 24.6 ns past it.
+const FIRST_LAYERS_REVERSAL: ReversingSpeed = ReversingSpeed {
+    at: 125.630_145_291_922,
+    accel: 168.125,
+    position: 0.042_523_077_746,
+};
+const FIRST_LAYERS_SPAN: (f64, f64) = (125.625_357_523_8, 125.630_145_316_536);
+
+/// The fit of [`FIRST_LAYERS_REVERSAL`] seeded at the reversal and at a
+/// ratio crossing `crossing_floors` of a floor past it, where the crossing
+/// time is the odometer's rounding and the signal does not break.
+fn first_layers_seeds(crossing_floors: f64) -> (AxisFit<'static>, Vec<f64>) {
+    let fit = AxisFit {
+        axis: 3,
+        t_start: FIRST_LAYERS_SPAN.0,
+        t_end: FIRST_LAYERS_SPAN.1,
+        seed_breakpoints: &[],
+        fit_tol: TOL,
+        fit_context: "follower_source",
+        seam_continuity: SeamContinuity::Velocity,
+    };
+    let reversal = FIRST_LAYERS_REVERSAL.at;
+    let mut seeds = vec![fit.t_start, reversal, fit.t_end];
+    let floor = seed_floors(&fit, &FIRST_LAYERS_REVERSAL, &seeds).cubic;
+    seeds.insert(2, reversal + crossing_floors * floor);
+    (fit, seeds)
+}
+
+#[test]
+fn a_seed_within_a_floor_past_an_acceleration_break_does_not_coalesce_the_break_away() {
+    let (fit, seeds) = first_layers_seeds(0.85);
+    let crossing = seeds[2];
+    let plan = plan_over_seeds(&fit, &FIRST_LAYERS_REVERSAL, seeds).expect("the seeds plan");
+    assert!(
+        crossing - FIRST_LAYERS_REVERSAL.at < plan.floors.cubic,
+        "the crossing must crowd the reversal within the floor {}",
+        plan.floors.cubic
+    );
+    assert!(
+        plan.seeds.contains(&FIRST_LAYERS_REVERSAL.at),
+        "the reversal at {} steps the acceleration by {} and was coalesced onto the crossing \
+         at {crossing}: {:?}",
+        FIRST_LAYERS_REVERSAL.at,
+        2.0 * FIRST_LAYERS_REVERSAL.accel,
+        plan.seeds
+    );
+}
+
+#[test]
+fn the_fit_holds_the_acceleration_across_a_reversal_crowded_by_a_seed() {
+    let (fit, seeds) = first_layers_seeds(0.85);
+    let fit = AxisFit {
+        seed_breakpoints: &seeds[1..3],
+        ..fit
+    };
+    let track = fit_axis_from_signal(fit, &FIRST_LAYERS_REVERSAL)
+        .expect("a reversal crowded by a seed fits");
+    let around = (FIRST_LAYERS_REVERSAL.at - 25e-9, fit.t_end);
+    let samples = 2000;
+    let worst = (0..=samples)
+        .map(|k| around.0 + (around.1 - around.0) * f64::from(k) / f64::from(samples))
+        .filter(|&t| t != FIRST_LAYERS_REVERSAL.at)
+        .map(|t| {
+            let mut derivatives = [0.0; 3];
+            nurbs::eval::eval_derivatives(
+                track.control_points(),
+                track.knots(),
+                track.degree(),
+                t,
+                2,
+                &mut derivatives,
+            );
+            (
+                (derivatives[2] - FIRST_LAYERS_REVERSAL.eval_pva(t).2).abs(),
+                t,
+            )
+        })
+        .fold(
+            (0.0, 0.0),
+            |worst: (f64, f64), miss| {
+                if miss.0 > worst.0 { miss } else { worst }
+            },
+        );
+    assert!(
+        worst.0 <= fit.fit_tol.accel_mm_s2,
+        "the fit misses the acceleration by {} mm/s² at {} around the reversal at {}, past \
+         the {} mm/s² tolerance; knots {:?}",
+        worst.0,
+        worst.1,
+        FIRST_LAYERS_REVERSAL.at,
+        fit.fit_tol.accel_mm_s2,
+        track
+            .knots()
+            .iter()
+            .filter(|&&knot| knot >= around.0)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -277,11 +422,16 @@ fn a_velocity_break_that_reads_its_left_value_on_the_seed_is_found() {
         before: 7.2673,
         after: 4.5839,
     };
+    let floors = LadderFloors {
+        jerk_noise_cubed: 0.0,
+        high_degree: FLOOR,
+        cubic: FLOOR,
+    };
     assert_eq!(
-        velocity_breaks_among(&sig, &[0.0, sig.at, 0.02], 1e-6),
-        vec![VelocityBreak {
+        breaks_among(&sig, &[0.0, sig.at, 0.02], TOL, floors),
+        vec![SignalBreak {
             t: sig.at,
-            step: sig.after - sig.before,
+            velocity_step: sig.after - sig.before,
         }]
     );
 }
