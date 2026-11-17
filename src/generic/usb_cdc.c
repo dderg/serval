@@ -115,7 +115,6 @@ kalico_console_write_raw(const uint8_t *buf, uint16_t len)
 
 static struct task_wake usb_bulk_out_wake;
 static uint8_t receive_buf[128], receive_pos;
-static uint16_t receive_fed;
 
 void
 usb_notify_bulk_out(void)
@@ -135,13 +134,8 @@ usb_bulk_out_task(void)
                         diag_slot_usb_out_max_gap(),
                         timer_from_us(20000),
                         DIAG_EV_USB_OUT_GAP);
-    // A dispatch that shut the MCU down longjmped out of the last pump;
-    // the bytes behind its frame go before the next packet.
-    uint_fast8_t rpos = receive_pos - receive_fed;
-    memmove(receive_buf, &receive_buf[receive_fed], rpos);
-    receive_pos = rpos;
-    receive_fed = 0;
     // Read data
+    uint_fast8_t rpos = receive_pos;
     if (rpos + USB_CDC_EP_BULK_OUT_SIZE <= sizeof(receive_buf)) {
         int_fast8_t ret = usb_read_bulk_out(
             &receive_buf[rpos], USB_CDC_EP_BULK_OUT_SIZE);
@@ -154,8 +148,8 @@ usb_bulk_out_task(void)
     } else {
         usb_notify_bulk_out();
     }
-    receive_pos = rpos;
-    mcu_demux_pump(receive_buf, rpos, &receive_fed);
+    mcu_demux_pump(receive_buf, rpos);
+    receive_pos = 0;
 }
 DECL_TASK(usb_bulk_out_task);
 
@@ -567,6 +561,10 @@ DECL_TASK(usb_ep0_task);
 void
 usb_shutdown(void)
 {
+    // Without this reset, a stale shutdown-triggering command left in
+    // receive_buf re-fires sched_shutdown's longjmp every task-loop pass,
+    // wedging the MCU in an infinite longjmp cycle.
+    receive_pos = 0;
     usb_notify_bulk_in();
     usb_notify_bulk_out();
     usb_notify_ep0();

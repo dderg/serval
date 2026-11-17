@@ -130,7 +130,7 @@ console_setup(char *name, mode_t mode, gid_t group)
 
 static struct task_wake console_wake;
 static uint8_t receive_buf[4096];
-static uint16_t receive_len, receive_fed;
+static uint16_t receive_len;
 
 uint64_t console_rx_bytes, console_tx_bytes, console_tx_drops;
 
@@ -165,9 +165,9 @@ console_task(void)
 
     // A dispatch that shut the MCU down longjmped out of the last pump;
     // the bytes behind its frame go first.
-    receive_len -= receive_fed;
-    memmove(receive_buf, &receive_buf[receive_fed], receive_len);
-    receive_fed = 0;
+    uint16_t fed = mcu_demux_take_fed();
+    receive_len -= fed;
+    memmove(receive_buf, &receive_buf[fed], receive_len);
 
     // Read data
     int ret = read(main_pfd[MP_TTY_IDX].fd, &receive_buf[receive_len]
@@ -186,16 +186,15 @@ console_task(void)
 
     console_rx_bytes += (uint64_t)ret;
     receive_len += ret;
-    mcu_demux_pump(receive_buf, receive_len, &receive_fed);
+    mcu_demux_pump(receive_buf, receive_len);
 }
 DECL_TASK(console_task);
 
-// Unfed bytes a shutdown left have no new input to wake console_task.
+// Bytes a shutdown left unfed have no new input to wake console_task.
 void
 console_shutdown(void)
 {
-    if (receive_fed < receive_len)
-        sched_wake_task(&console_wake);
+    sched_wake_task(&console_wake);
 }
 DECL_SHUTDOWN(console_shutdown);
 

@@ -74,41 +74,38 @@ serial_get_tx_byte(uint8_t *pdata)
     return 0;
 }
 
-static uint16_t receive_fed;
-
-// Drops the bytes the demuxer was fed, keeping those the RX IRQ appended.
-// The memmove must run with IRQs masked: a fresh RX IRQ between reading
-// receive_pos and the move would write into a slot we are relocating.
-static void
-console_pop_fed(void)
-{
-    if (!receive_fed)
-        return;
-    irqstatus_t flag = irq_save();
-    receive_pos_t tail = read_rpos(&receive_pos) - receive_fed;
-    memmove(receive_buf, &receive_buf[receive_fed], tail);
-    receive_pos = tail;
-    receive_fed = 0;
-    irq_restore(flag);
-}
-
 // Process any incoming commands
 void
 console_task(void)
 {
-    // A dispatch that shut the MCU down longjmped out of the last pump
-    // before its pop; the bytes behind its frame are still to be fed.
-    console_pop_fed();
-    mcu_demux_pump(receive_buf, read_rpos(&receive_pos), &receive_fed);
-    console_pop_fed();
+    receive_pos_t rpos = read_rpos(&receive_pos);
+
+    mcu_demux_pump(receive_buf, rpos);
+
+    // The rebasing memmove must run with IRQs masked: a fresh RX IRQ
+    // between reading receive_pos and the move would write into a slot
+    // we are relocating.
+    irqstatus_t flag = irq_save();
+    receive_pos_t now = read_rpos(&receive_pos);
+    if (now == rpos) {
+        receive_pos = 0;
+    } else {
+        receive_pos_t tail = now - rpos;
+        memmove(receive_buf, &receive_buf[rpos], tail);
+        receive_pos = tail;
+    }
+    irq_restore(flag);
 }
 DECL_TASK(console_task);
 
-// Bytes a shutdown left unfed have no new input to wake console_task.
+// Without this reset, a stale shutdown-triggering command left in
+// receive_buf re-fires sched_shutdown's longjmp every task-loop pass,
+// wedging the MCU. Runs with IRQs already masked (ctr_run_shutdownfuncs),
+// so the RX IRQ cannot race the write.
 void
 serial_shutdown(void)
 {
-    sched_wake_tasks();
+    receive_pos = 0;
 }
 DECL_SHUTDOWN(serial_shutdown);
 
