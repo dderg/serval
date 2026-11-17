@@ -205,8 +205,9 @@ pacer_floor_min(void)
     if (used > VTIME_MAX_PACERS)
         used = VTIME_MAX_PACERS;
     for (uint32_t i = 0; i < used; i++) {
-        if (!atomic_load_explicit(&vshm->pacers[i].active,
-                                  memory_order_acquire))
+        if (atomic_load_explicit(&vshm->pacers[i].active,
+                                 memory_order_acquire)
+            != VTIME_PACER_ACTIVE)
             continue;
         uint64_t f = atomic_load_explicit(&vshm->pacers[i].floor_ns,
                                           memory_order_acquire)
@@ -382,6 +383,12 @@ link_slots_used(void)
     return used > VTIME_MAX_LINKS ? VTIME_MAX_LINKS : used;
 }
 
+static int
+link_in_use(uint32_t pts_plus_one)
+{
+    return pts_plus_one && pts_plus_one < VTIME_LINK_CLAIMING;
+}
+
 static int device_link_fd = -1;
 static int device_link_slot = -1;
 static __thread int device_handling;
@@ -402,7 +409,8 @@ device_input_floor(uint64_t now)
     uint32_t used = link_slots_used();
     for (uint32_t i = 0; i < used; i++) {
         struct vtime_device_link *link = &vshm->links[i];
-        if (!atomic_load_explicit(&link->pts_plus_one, memory_order_acquire))
+        if (!link_in_use(atomic_load_explicit(&link->pts_plus_one,
+                                              memory_order_acquire)))
             continue;
         if (atomic_load_explicit(&link->host_waiting, memory_order_acquire)
             && atomic_load_explicit(&link->reply_written, memory_order_acquire)
@@ -844,6 +852,31 @@ fault_bytes_due(void)
         || (fault.release_ns && vtime_now() >= fault.release_ns);
 }
 
+// A slot a device process released, else a fresh one: every
+// FIRMWARE_RESTART re-executes each MCU, and fresh slots alone ran out
+// after the second restart of a two-MCU world.
+static uint32_t
+claim_link_slot(void)
+{
+    uint32_t used = link_slots_used();
+    for (uint32_t i = 0; i < used; i++) {
+        uint32_t released = VTIME_LINK_RELEASED;
+        if (atomic_compare_exchange_strong_explicit(
+                &vshm->links[i].pts_plus_one, &released, VTIME_LINK_CLAIMING,
+                memory_order_acq_rel, memory_order_acquire))
+            return i;
+    }
+    return atomic_fetch_add_explicit(&vshm->link_slots_used, 1,
+                                     memory_order_acq_rel);
+}
+
+static void
+ignore_faults_posted_before_this_process(uint32_t slot)
+{
+    fault.seen_generation = atomic_load_explicit(
+        &vshm->link_faults[slot].generation, memory_order_acquire);
+}
+
 static void
 register_device_link(int master_fd)
 {
@@ -856,8 +889,7 @@ register_device_link(int master_fd)
         fprintf(stderr, "[vtime] TIOCGPTN failed: %s\n", strerror(errno));
         abort();
     }
-    uint32_t slot = atomic_fetch_add_explicit(&vshm->link_slots_used, 1,
-                                              memory_order_acq_rel);
+    uint32_t slot = claim_link_slot();
     if (slot >= VTIME_MAX_LINKS) {
         fprintf(stderr, "[vtime] more than %d device links\n",
                 VTIME_MAX_LINKS);
@@ -866,9 +898,14 @@ register_device_link(int master_fd)
     struct vtime_device_link *link = &vshm->links[slot];
     atomic_store_explicit(&link->written, 0, memory_order_release);
     atomic_store_explicit(&link->consumed, 0, memory_order_release);
+    atomic_store_explicit(&link->reply_written, 0, memory_order_release);
+    atomic_store_explicit(&link->reply_consumed, 0, memory_order_release);
+    atomic_store_explicit(&link->owner_stepping_to_ns, 0,
+                          memory_order_release);
     atomic_store_explicit(&link->pts_plus_one, pts + 1, memory_order_release);
     device_link_fd = master_fd;
     device_link_slot = (int)slot;
+    ignore_faults_posted_before_this_process(slot);
     VLOG("device link: master fd %d is pts%u, slot %u", master_fd, pts, slot);
 }
 
@@ -1186,13 +1223,30 @@ vtime_driver_main(void *arg)
 
 static void vtimer_check_and_fire(void);
 
+// A pacer slot a process released on exec or exit, else a fresh one: the
+// linux firmware re-registers its pacer after every config_reset.
+static uint32_t
+claim_pacer_slot(void)
+{
+    uint32_t used = atomic_load_explicit(&vshm->pacer_slots_used,
+                                         memory_order_acquire);
+    for (uint32_t i = 0; i < used && i < VTIME_MAX_PACERS; i++) {
+        uint32_t released = VTIME_PACER_RELEASED;
+        if (atomic_compare_exchange_strong_explicit(
+                &vshm->pacers[i].active, &released, VTIME_PACER_CLAIMING,
+                memory_order_acq_rel, memory_order_acquire))
+            return i;
+    }
+    return atomic_fetch_add_explicit(&vshm->pacer_slots_used, 1,
+                                     memory_order_acq_rel);
+}
+
 __attribute__((visibility("default"))) int
 vtime_pacer_register_slack(uint64_t period_ns, uint64_t slack_ns)
 {
     if (!vshm || period_ns == 0)
         return -1;
-    uint32_t slot = atomic_fetch_add_explicit(&vshm->pacer_slots_used, 1,
-                                              memory_order_acq_rel);
+    uint32_t slot = claim_pacer_slot();
     if (slot >= VTIME_MAX_PACERS)
         return -1;
     clock_lock();
@@ -1200,7 +1254,7 @@ vtime_pacer_register_slack(uint64_t period_ns, uint64_t slack_ns)
                           memory_order_release);
     atomic_store_explicit(&vshm->pacers[slot].floor_ns,
                           deadline_after(period_ns), memory_order_release);
-    atomic_store_explicit(&vshm->pacers[slot].active, 1,
+    atomic_store_explicit(&vshm->pacers[slot].active, VTIME_PACER_ACTIVE,
                           memory_order_release);
     clock_unlock();
     owned_pacer_slots[slot] = 1;
@@ -1299,12 +1353,12 @@ release_process_registrations(void)
         atomic_store_explicit(&vshm->host_present, 0, memory_order_release);
     for (int i = 0; i < VTIME_MAX_PACERS; i++)
         if (owned_pacer_slots[i])
-            atomic_store_explicit(&vshm->pacers[i].active, 0,
-                                  memory_order_release);
+            atomic_store_explicit(&vshm->pacers[i].active,
+                                  VTIME_PACER_RELEASED, memory_order_release);
     finish_device_handling();
     if (device_link_slot >= 0)
-        atomic_store_explicit(&vshm->links[device_link_slot].pts_plus_one, 0,
-                              memory_order_release);
+        atomic_store_explicit(&vshm->links[device_link_slot].pts_plus_one,
+                              VTIME_LINK_RELEASED, memory_order_release);
 }
 
 __attribute__((destructor))

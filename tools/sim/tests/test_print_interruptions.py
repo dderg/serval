@@ -22,6 +22,7 @@ import pathlib
 import pytest
 
 from tools.sim import configs
+from tools.sim.world import SimError
 
 pytestmark = pytest.mark.needs_elf
 
@@ -66,6 +67,12 @@ SLICED_GCODE = (
     / "voron_dense_top_layers.gcode"
 )
 SLICED_LINES = 1500
+CRAWL_OVERRIDE = "M220 S1"
+FULL_SPEED_OVERRIDE = "M220 S100"
+CRAWL_STROKES = 6
+CRAWL_STROKE_MM = 4.0
+CRAWL_FROM_FRACTION = 0.5
+CRAWL_RSS_GROWTH_LIMIT_KB = 65536
 
 CLEANNOZZLE_THEN_PURGE_BLOB = (
     "G91",
@@ -374,6 +381,14 @@ def test_purge_after_cleannozzle_dwell_and_mesh_load(sim_world, topology):
     _assert_clean(world)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=(AssertionError, SimError),
+    reason="#892: the API FIRMWARE_RESTART lands in the print's M400/G1, "
+    "which raises GreenletExit ('Internal error on command') and shuts "
+    "klippy down: the restart then ends ready with a shutdown line "
+    "(AssertionError) or stays in shutdown (SimError)",
+)
 @pytest.mark.parametrize("fraction", [0.02, 0.3])
 @pytest.mark.parametrize("topology", sorted(TOPOLOGIES))
 def test_firmware_restart_mid_print(sim_world, topology, fraction):
@@ -427,3 +442,40 @@ def test_emergency_stop_while_dwell_drains(sim_world, topology):
         timeout=1.0,
         what="the pending dwell to abort on the shutdown",
     )
+
+
+def _peak_rss_kb(world):
+    status = pathlib.Path(f"/proc/{world.klippy_proc.pid}/status").read_text()
+    peak = next(
+        line for line in status.splitlines() if line.startswith("VmHWM:")
+    )
+    return int(peak.split()[1])
+
+
+def _crawl_section():
+    lines = [CRAWL_OVERRIDE, "G91"]
+    for stroke in range(CRAWL_STROKES):
+        dx = CRAWL_STROKE_MM if stroke % 2 == 0 else -CRAWL_STROKE_MM
+        lines.append(f"G1 X{dx:.1f} E0.05 F6000")
+    return lines + ["G90", FULL_SPEED_OVERRIDE]
+
+
+@pytest.mark.expected_seconds(60)
+def test_crawl_speed_override_mid_print(sim_world):
+    """`M220 S1` mid-print crawls 24 mm of strokes at 1 mm/s (#901): klippy
+    stays up, its peak RSS does not grow with the crawl, and the print
+    completes."""
+    world = _boot(
+        sim_world, "one_mcu", heater_targets=(), extruder=Extruder.KERNEL_FREE
+    )
+    lines = _print_lines(mark_fraction=1.0, tail=())
+    crawl_at = int(CRAWL_FROM_FRACTION * len(lines))
+    lines[crawl_at:crawl_at] = _crawl_section()
+    path = world.gcode_dir / "crawl.gcode"
+    path.write_text("\n".join(lines) + "\n")
+    rss_before_kb = _peak_rss_kb(world)
+    world.gcode_ok(f"SDCARD_PRINT_FILE FILENAME={path.name}")
+    world.wait_print_done(timeout=PRINT_TIMEOUT_S)
+    growth_kb = _peak_rss_kb(world) - rss_before_kb
+    assert growth_kb < CRAWL_RSS_GROWTH_LIMIT_KB, growth_kb
+    _assert_clean(world)

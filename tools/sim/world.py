@@ -200,6 +200,17 @@ class SimError(Exception):
     pass
 
 
+SHUTDOWN_MARKERS = ("shutdown:", "transition to shutdown state:")
+
+
+def is_shutdown_line(line: str) -> bool:
+    """An MCU shutdown (`MCU 'mcu' shutdown: Timer too close`) or klippy's
+    own transition (`Transition to shutdown state: Internal error ...`),
+    which names no MCU and has no `shutdown:` in it."""
+    lowered = line.lower()
+    return any(marker in lowered for marker in SHUTDOWN_MARKERS)
+
+
 def vtime_shm_name_alloc() -> str:
     return f"/vtime-{os.getpid()}-{next(_vtime_shm_counter)}"
 
@@ -228,6 +239,8 @@ _LINK_SLOTS_USED_OFFSET = 3600
 _LINKS_OFFSET = 3608
 _LINK_SLOT_SIZE = 48
 _MAX_LINKS = 8
+_LINK_CLAIMING = 0xFFFFFFFE
+_PACER_ACTIVE = 1
 _LINK_FAULTS_OFFSET = 3992
 _LINK_FAULT_SIZE = 24
 FAULT_DELAY, FAULT_DROP, FAULT_STALL, FAULT_LATE = 1, 2, 3, 4
@@ -384,7 +397,7 @@ class VirtualClock:
             pts, _, written, consumed = struct.unpack_from(
                 "<IIQQ", shm, _LINKS_OFFSET + i * _LINK_SLOT_SIZE
             )
-            if pts and written != consumed:
+            if 0 < pts < _LINK_CLAIMING and written != consumed:
                 parts.append(
                     f"device pts{pts - 1} unread={written - consumed}B"
                 )
@@ -393,7 +406,7 @@ class VirtualClock:
             active, _, floor, slack = struct.unpack_from(
                 "<IIQQ", shm, _PACERS_OFFSET + i * _PACER_SLOT_SIZE
             )
-            if active:
+            if active == _PACER_ACTIVE:
                 parts.append(
                     f"pacer{i} floor+slack={(floor + slack - now) / 1e6:+.3f}ms"
                 )
@@ -477,10 +490,12 @@ class HarnessPacer:
     def sleep(
         self, seconds: float, stop: Optional[threading.Event] = None
     ) -> bool:
-        """Sleep `seconds` of printer time; False if `stop` was set."""
-        target = self._clock.now_ns() + int(seconds * 1e9)
-        self._clock.hold_at(self._slot, target)
-        while self._clock.now_ns() < target:
+        """Sleep `seconds` of printer time; False if `stop` was set. A
+        clock that stops short of the target is a wedge, not a sleep: it
+        fails like any other virtual wait instead of spinning forever."""
+        deadline = VirtualDeadline(self._clock, seconds)
+        self._clock.hold_at(self._slot, deadline.end_ns)
+        while not deadline.expired():
             if stop is None:
                 time.sleep(self.POLL_REAL_S)
             elif stop.wait(self.POLL_REAL_S):
@@ -500,6 +515,10 @@ class VirtualDeadline:
         self._last_ns = clock.now_ns()
         self._end_ns = self._last_ns + int(timeout * 1e9)
         self._last_progress = time.monotonic()
+
+    @property
+    def end_ns(self) -> int:
+        return self._end_ns
 
     def expired(self) -> bool:
         now_ns = self._clock.now_ns()
@@ -623,13 +642,24 @@ class SimControl:
             f"set_gpio_input chip={chip} line={line} value={value}"
         )
 
-    def gpio_edges(self, chip: int, line: int) -> int:
+    def _gpio_edge_reply(self, chip: int, line: int) -> dict[str, int]:
         response = self.send(f"get_gpio_edges chip={chip} line={line}")
-        if not response.startswith("edges="):
+        fields = response.split()
+        keys = [field.split("=", 1)[0] for field in fields]
+        if keys != ["edges", "value", "last_ns"]:
             raise SimError(
                 f"get_gpio_edges chip={chip} line={line}: {response!r}"
             )
-        return int(response.split()[0].split("=", 1)[1])
+        return {
+            key: int(field.split("=", 1)[1]) for key, field in zip(keys, fields)
+        }
+
+    def gpio_edges(self, chip: int, line: int) -> int:
+        return self._gpio_edge_reply(chip, line)["edges"]
+
+    def gpio_last_edge_ns(self, chip: int, line: int) -> int:
+        """Shared virtual time of the line's latest edge (0: none yet)."""
+        return self._gpio_edge_reply(chip, line)["last_ns"]
 
     def gpio_output(self, chip: int, line: int) -> int:
         response = self.send(f"get_gpio_output chip={chip} line={line}")
@@ -1190,7 +1220,8 @@ class SimWorld:
                 return
             time.sleep(READY_POLL_S)
         raise SimError(
-            f"FIRMWARE_RESTART left klippy in {state!r}:\n"
+            f"FIRMWARE_RESTART left klippy in {state!r} "
+            f"(first shutdown line: {self.shutdown_line()!r}):\n"
             f"{self.klippy_log_text()[-3000:]}"
         )
 
@@ -1303,7 +1334,7 @@ class SimWorld:
                     else ""
                 )
                 for line in lines:
-                    if "shutdown:" in line.lower():
+                    if is_shutdown_line(line):
                         raise SimError(f"printer shutdown: {line.strip()}")
             ps = self.status({"print_stats": None}).get("print_stats", {})
             state = ps.get("state", "")
@@ -1439,7 +1470,7 @@ class SimWorld:
 
     def shutdown_line(self) -> Optional[str]:
         for line in self.klippy_log_text().splitlines():
-            if "shutdown:" in line.lower():
+            if is_shutdown_line(line):
                 return line.strip()
         return None
 

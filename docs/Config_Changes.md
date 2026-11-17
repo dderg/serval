@@ -8,6 +8,15 @@ All dates in this document are approximate.
 
 ## Changes
 
+20261116: An `[axis <name>] max_accel` on an extruder axis whose
+pressure advance has no smoothing kernel after it is now refused below
+k * r * R, the room the turning guard keeps for the advance to rebuild
+its lead around a crawl. r is the extrusion ratio of a bead four nozzle
+diameters squared in cross section, R about 9844 mm/s^3 at the default fit
+tolerances. That is 79 mm/s^2 at k = 0.03 on a 0.4 mm nozzle with 1.75 mm
+filament. Such configs used to stop the print with a turning guard error
+at the first slow extrusion. The error names the minimum.
+
 20261106: The corner budget now bounds the path after the input shaper
 instead of the planned one (see "Corner budget on the shaped path" in
 Config_Reference_Motion.md). An explicit `corner_deviation` is now the
