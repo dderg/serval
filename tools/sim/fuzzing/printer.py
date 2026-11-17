@@ -30,6 +30,12 @@ HEATER_CHECK_GAIN_S = 3600
 EXTRUDER_TARGET_C = 150.0
 CHAMBER_TARGET_C = 100.0
 XY_PIN_LINES = range(0, 6)
+RUNOUT_SENSOR = "fz_runout"
+RUNOUT_PIN_LINE = 52
+RUNOUT_CHANCE = 0.4
+EXCLUDE_OBJECT_CHANCE = 0.5
+HOTEND_MODEL_CHANCE = 0.5
+HOTEND_SECTION = "extruder"
 
 
 class Base(enum.Enum):
@@ -185,6 +191,9 @@ class PrinterSpec:
     cancel_macro: CancelMacro
     end_steps: tuple[EndStep, ...]
     idle_timeout_s: Optional[float]
+    runout_sensor: bool = False
+    exclude_object: bool = False
+    hotend_model: bool = False
 
     @property
     def shape(self) -> BaseShape:
@@ -291,6 +300,18 @@ def draw_printer(rng: random.Random) -> PrinterSpec:
         cancel_macro=rng.choice(tuple(CancelMacro)),
         end_steps=_draw_end_steps(rng, mesh),
         idle_timeout_s=_maybe(rng, 0.2, lambda: _rounded(rng, 6.0, 10.0, 1)),
+    )
+
+
+def with_extras(rng: random.Random, spec: PrinterSpec) -> PrinterSpec:
+    """A filament runout switch, [exclude_object] and the hotend's thermal
+    model, drawn from a stream of their own so `draw_printer` draws the
+    printer it always did."""
+    return dataclasses.replace(
+        spec,
+        runout_sensor=rng.random() < RUNOUT_CHANCE,
+        exclude_object=rng.random() < EXCLUDE_OBJECT_CHANCE,
+        hotend_model=rng.random() < HOTEND_MODEL_CHANCE,
     )
 
 
@@ -594,6 +615,24 @@ def _apply_marks(cfg: _Sections) -> None:
         )
 
 
+def _apply_extras(spec: PrinterSpec, cfg: _Sections) -> None:
+    """The runout switch pauses an SD print on its own (`smart`: by
+    print_stats, not idle_timeout) and re-arms 0.5 s after an event."""
+    if spec.runout_sensor:
+        cfg.add(
+            f"filament_switch_sensor {RUNOUT_SENSOR}",
+            {
+                "switch_pin": f"gpiochip0/gpio{RUNOUT_PIN_LINE}",
+                "pause_on_runout": True,
+                "smart": True,
+                "event_delay": 0.5,
+                "pause_delay": 0.5,
+            },
+        )
+    if spec.exclude_object:
+        cfg.add("exclude_object", {})
+
+
 def render_config(
     spec: PrinterSpec, h7_pty: str, f4_pty: str, gcode_dir: str
 ) -> str:
@@ -604,6 +643,7 @@ def render_config(
     _apply_heaters(spec, cfg)
     _apply_macros(spec, cfg)
     _apply_marks(cfg)
+    _apply_extras(spec, cfg)
     if spec.idle_timeout_s is not None:
         cfg.add("idle_timeout", {"timeout": spec.idle_timeout_s})
     if spec.mesh is MeshKind.NONE:
@@ -643,3 +683,27 @@ def motors(spec: PrinterSpec, config_text: str) -> tuple[Motor, ...]:
             Motor(motor, axis, process, line, steps_per_rev / rotation)
         )
     return tuple(found)
+
+
+@dataclasses.dataclass(frozen=True)
+class HotendPins:
+    heater_line: int
+    adc_channel: int
+    sensor_type: str
+
+
+def hotend_pins(config_text: str) -> HotendPins:
+    """The extruder heater's output line and thermistor ADC channel, both
+    on the main MCU in every base."""
+    cfg = _Sections(config_text)
+    heater = cfg.get(HOTEND_SECTION, "heater_pin")
+    sensor = cfg.get(HOTEND_SECTION, "sensor_pin")
+    if not heater.startswith("gpiochip0/gpio") or not sensor.startswith(
+        "analog"
+    ):
+        raise ValueError(f"hotend pins off the main MCU: {heater}, {sensor}")
+    return HotendPins(
+        int(heater.rsplit("gpio", 1)[1]),
+        int(sensor.removeprefix("analog")),
+        cfg.get(HOTEND_SECTION, "sensor_type"),
+    )

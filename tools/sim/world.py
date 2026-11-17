@@ -642,6 +642,9 @@ class SimControl:
             f"set_gpio_input chip={chip} line={line} value={value}"
         )
 
+    def set_adc(self, channel: int, value: int) -> str:
+        return self.send(f"set_adc channel={channel} value={value}")
+
     def _gpio_edge_reply(self, chip: int, line: int) -> dict[str, int]:
         response = self.send(f"get_gpio_edges chip={chip} line={line}")
         fields = response.split()

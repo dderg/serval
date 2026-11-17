@@ -11,17 +11,19 @@ from __future__ import annotations
 
 import bisect
 import dataclasses
+import math
 import pathlib
 import threading
 import time
 from typing import Callable, Optional
 
-from tools.sim.fuzzing import printer, program
+from tools.sim.fuzzing import printer, program, thermal
 from tools.sim.fuzzing.checks import (
     DURATION_TOLERANCE,
     ENDPOINT_DEATH_GRACE_S,
     ESTOP_DEADLINE_S,
     ESTOP_REASON,
+    IDLE_BRAKE_CAUSE,
     MOTION_STILL_S,
     PACER_BRAKE,
     Check,
@@ -38,6 +40,7 @@ from tools.sim.fuzzing.printer import (
     DONE_PIN_LINE,
     MARK_PIN_LINE,
     MESH_PROFILE,
+    RUNOUT_PIN_LINE,
     MeshKind,
     Motor,
 )
@@ -66,6 +69,10 @@ EVENT_STAMP_NS = 1_000_000
 RESTARTING = "Restarting printer"
 UNKNOWN_COMMAND = 'Unknown command:"SET_INPUT_SHAPER"'
 MARK_CHIP = 0
+RUNOUT_ARM_S = 2.5
+RUNOUT_POLL_S = 0.05
+FILAMENT_PRESENT, FILAMENT_OUT = 1, 0
+FULL_PERCENT = 100.0
 
 
 def _motor_position(motor: Motor, position) -> float:
@@ -182,6 +189,15 @@ class Session:
         self.recheck: Optional[_Recheck] = None
         self.watching = False
         self.print_index = 0
+        self.excluded = False
+        self.extrude_scaled = False
+        self.host_waits: list[tuple[int, int]] = []
+        self.ready_ns = 0
+        self.hotend = None
+        if self.spec.hotend_model:
+            pins = printer.hotend_pins(config_text)
+            self.hotend = thermal.Hotend(self.marks, world.vclock, pins)
+            self.hotend.start()
 
     # ------------------------------------------------------------ clock
 
@@ -207,6 +223,8 @@ class Session:
     def stop_watchers(self) -> None:
         self.wall.stop()
         self.panics.stop()
+        if self.hotend is not None:
+            self.hotend.stop()
 
     def _hold(self, seconds: float, what: str) -> None:
         end_ns = self._now_ns() + int(seconds * NS_PER_S)
@@ -307,7 +325,8 @@ class Session:
         if unseen <= 0:
             return
         edge_age_ns = self._now_ns() - self._mark_edge_ns()
-        skipped = probes_to_skip(unseen, self.paused, edge_age_ns)
+        unwatched = self.paused or self.excluded
+        skipped = probes_to_skip(unseen, unwatched, edge_age_ns)
         if skipped:
             self._skip_probes(skipped, edge_age_ns)
             return
@@ -428,6 +447,10 @@ class Session:
     def _start_state(self) -> None:
         for command in printer.heater_targets(self.spec):
             self._gcode(command, Check.RECOVERY)
+        if self.spec.runout_sensor:
+            self.marks.set_gpio_input(
+                MARK_CHIP, RUNOUT_PIN_LINE, FILAMENT_PRESENT
+            )
         if self.spec.mesh is MeshKind.NONE:
             return
         mesh = (
@@ -442,7 +465,10 @@ class Session:
         self._gcode(f"SET_KINEMATIC_POSITION X={x} Y={y} Z={z}", Check.RECOVERY)
 
     def setup(self) -> None:
-        """After boot or a restart: unhomed, wherever the motors stand."""
+        """After boot or a restart: unhomed, wherever the motors stand, at
+        100 % extrusion."""
+        self.ready_ns = self._now_ns()
+        self.extrude_scaled = False
         self._start_state()
         self._home_here()
         self._rebase(self._toolhead())
@@ -482,13 +508,23 @@ class Session:
     def run(self) -> None:
         self.setup()
         for index, name in enumerate(self.scenario.prints):
-            if index:
+            idled = self._idle(self.scenario.lead(index).idle_s)
+            if index or idled:
                 self._start_state()
                 self._rehome()
             self._print(index, name)
+        self._check_hotend()
         self._compare_durations()
         self._check_idle_timeout()
         self._check_brakes()
+
+    def _idle(self, seconds: float) -> bool:
+        """The printer left alone before a print: an idle timeout may turn
+        the motors and heaters off in the gap."""
+        if not seconds:
+            return False
+        self._hold(seconds, "the idle gap before a print")
+        return True
 
     def _arm(self, lines: list[str]) -> None:
         self._gcode(
@@ -515,6 +551,7 @@ class Session:
         self.next_probe = 0
         self.edge_base = self._mark_edges()
         self.paused = False
+        self.excluded = False
         self.recheck = None
         self.watching = True
 
@@ -524,10 +561,13 @@ class Session:
         path = self.world.gcode_dir / f"fuzz_{name}.gcode"
         path.write_text("\n".join(lines) + "\n")
         self._arm(lines)
+        if self.scenario.lead(index).reset_file:
+            self._gcode("SDCARD_RESET_FILE", Check.COMMAND_RESULT)
         start_ns = self._now_ns()
         self._gcode(
             f"SDCARD_PRINT_FILE FILENAME={path.name}", Check.PRINT_OUTCOME
         )
+        self.host_waits.append((start_ns, self._heat_waits(name)))
         for action in self.scenario.actions_for(index):
             if not self._advance(
                 start_ns, start_ns + int(action.at_s * NS_PER_S)
@@ -569,6 +609,7 @@ class Session:
         if self.world.klippy_proc.poll() is not None:
             raise Violation(Check.KLIPPY_EXIT, "klippy exited during the print")
         self._check_no_panic()
+        self._check_hotend()
         stats = self._print_state()
         if stats.get("state") in ("error", "cancelled"):
             raise Violation(
@@ -587,6 +628,10 @@ class Session:
         never ending: stop at the panic instead of the print timeout."""
         if self.panics.found:
             raise Violation(Check.PANIC, self.panics.found)
+
+    def _check_hotend(self) -> None:
+        if self.hotend is not None and self.hotend.error:
+            raise Violation(Check.HARNESS, self.hotend.error)
 
     def _finish_print(self, index: int, start_ns: int) -> None:
         """The body ended (done pin): END_PRINT, if any, runs to the end of
@@ -611,16 +656,23 @@ class Session:
             f"print {index}: start {start_ns / NS_PER_S:.3f} s, body end "
             f"{body_end_ns / NS_PER_S:.3f} s, complete {self._now_ns() / NS_PER_S:.3f} s"
         )
-        self._check_final_position()
-        self._check_rest(
-            self._still_steps("print end"), self.final_position, "print end"
-        )
+        if self.excluded:
+            self._still_steps("print end")
+        else:
+            self._check_final_position()
+            self._check_rest(
+                self._still_steps("print end"), self.final_position, "print end"
+            )
         if index in self._compared_prints():
             self.durations[index] = self._motion_end_s() - start_ns / NS_PER_S
 
     def _check_final_position(self) -> None:
+        """E is the commanded one only at 100 % extrusion since the last
+        restart; a mesh moves Z."""
         position = self._toolhead()
         axes = "XYE" if self.spec.mesh is not MeshKind.NONE else "XYZE"
+        if self.extrude_scaled:
+            axes = axes.replace("E", "")
         for axis, measured, expected in zip(
             "XYZE", position, self.final_position
         ):
@@ -718,14 +770,17 @@ class Session:
         if self.spec.idle_timeout_s is None:
             return
         self._hold(self.spec.idle_timeout_s + IDLE_SLACK_S, "the idle timeout")
-        status = self._status("idle_timeout", "extruder")
+        status = self._status("idle_timeout", "extruder", "toolhead")
         state = status["idle_timeout"]["state"]
         target = status["extruder"]["target"]
         if state != "Idle" or target != 0.0:
+            toolhead = status["toolhead"]
             raise Violation(
                 Check.IDLE_TIMEOUT,
                 f"{self.spec.idle_timeout_s + IDLE_SLACK_S} s idle: state {state!r}, "
-                f"extruder target {target}",
+                f"extruder target {target}\ntoolhead print_time "
+                f"{toolhead['print_time']}, estimated_print_time "
+                f"{toolhead['estimated_print_time']}",
             )
 
     # ----------------------------------------------------------- brakes
@@ -741,6 +796,23 @@ class Session:
             start <= high_ns and low_ns <= end for start, end in self.windows
         )
 
+    def _heat_waits(self, name: str) -> int:
+        segments = self.scenario.program(name).segments
+        return sum(s.kind is program.Kind.HEAT_WAIT for s in segments)
+
+    def _spend_host_wait(self, at_ns: int) -> bool:
+        """A print waiting on its hotend (M109, TEMPERATURE_WAIT) sends no
+        moves, and the pacer brings the stream to rest at the end of the
+        queued ones once their runway runs out: one such brake per heat
+        wait of the print it falls in."""
+        starts = [start for start, _ in self.host_waits]
+        index = bisect.bisect_right(starts, at_ns) - 1
+        if index < 0 or self.host_waits[index][1] == 0:
+            return False
+        start, left = self.host_waits[index]
+        self.host_waits[index] = (start, left - 1)
+        return True
+
     def _check_brakes(self) -> None:
         self.wall.stop()
         for event in events_since(self.world.log_dir, self.offsets):
@@ -748,6 +820,12 @@ class Session:
                 continue
             low, high = self.wall.virtual_span(event_wall_ns(event))
             if self._allowed_brake(low, high):
+                continue
+            idle = event.get("cause") == IDLE_BRAKE_CAUSE
+            if idle and self._spend_host_wait(low):
+                self.notes.append(
+                    f"idle brake at {low / NS_PER_S:.3f} s in a heat wait"
+                )
                 continue
             fields = {
                 k: event.get(k)
@@ -778,6 +856,11 @@ class Session:
             ),
             Act.HEATER: self._heater,
             Act.LINK_FAULT: self._link_fault,
+            Act.SPEED_FACTOR: self._speed_factor,
+            Act.EXTRUDE_FACTOR: self._extrude_factor,
+            Act.VELOCITY_LIMIT: self._velocity_limit,
+            Act.RUNOUT: self._runout,
+            Act.EXCLUDE_OBJECT: self._exclude_object,
         }[action.act]
         handler(action)
 
@@ -802,6 +885,9 @@ class Session:
                 f"G91\nG1 X{dx} Y{dy} Z{dz} F{TRAVEL_FEED}\nG90\nM400",
                 Check.COMMAND_RESULT,
             )
+        self._resume(start_ns)
+
+    def _resume(self, start_ns: int) -> None:
         self._gcode("RESUME", Check.COMMAND_RESULT)
         self._service_probes()
         self.paused = False
@@ -811,6 +897,47 @@ class Session:
                 Check.STOP_STATE, f"after RESUME print_stats is {state!r}"
             )
         self._allow_brakes(start_ns)
+
+    def _runout(self, action: Action) -> None:
+        """The runout switch opens: the sensor pauses the print by itself
+        (klippy ignores the switch for 2 s after ready); the user loads
+        filament and resumes."""
+        armed_ns = self.ready_ns + int(RUNOUT_ARM_S * NS_PER_S)
+        if self._now_ns() < armed_ns:
+            self._hold(
+                (armed_ns - self._now_ns()) / NS_PER_S,
+                "the runout switch arming",
+            )
+        start_ns = self._now_ns()
+        self.paused = True
+        self.marks.set_gpio_input(MARK_CHIP, RUNOUT_PIN_LINE, FILAMENT_OUT)
+        state = self._await_runout_pause()
+        self._hold(float(action.param("hold_s")), "the runout hold")
+        self.marks.set_gpio_input(MARK_CHIP, RUNOUT_PIN_LINE, FILAMENT_PRESENT)
+        if state == "paused":
+            self._resume(start_ns)
+            return
+        self.notes.append(
+            f"runout after the print completed: {action.to_line()}"
+        )
+        self.paused = False
+        self._allow_brakes(start_ns)
+
+    def _await_runout_pause(self) -> str:
+        """A pause waits for the line the print is on, an M109 heat-up
+        included."""
+        deadline = self.world.vclock.deadline(COMMAND_TIMEOUT_S)
+        while True:
+            state = self._print_state().get("state")
+            if state in ("paused", "complete"):
+                return state
+            if deadline.expired():
+                raise Violation(
+                    Check.STOP_STATE,
+                    f"filament runout: print_stats still {state!r} after "
+                    f"{COMMAND_TIMEOUT_S} s",
+                )
+            self._hold(RUNOUT_POLL_S, "the runout pause")
 
     def _cancel(self, action: Action) -> None:
         start_ns = self._now_ns()
@@ -958,3 +1085,43 @@ class Session:
         self._allow_brakes(
             start_ns, self._now_ns() + int((by_s + FAULT_WINDOW_S) * NS_PER_S)
         )
+
+    def _speed_factor(self, action: Action) -> None:
+        percent = float(action.param("percent"))
+        self._gcode(f"M220 S{percent:g}", Check.COMMAND_RESULT)
+        self._expect_factor("speed_factor", percent, "M220")
+
+    def _extrude_factor(self, action: Action) -> None:
+        percent = float(action.param("percent"))
+        self._gcode(f"M221 S{percent:g}", Check.COMMAND_RESULT)
+        self.extrude_scaled = self.extrude_scaled or percent != FULL_PERCENT
+        self._expect_factor("extrude_factor", percent, "M221")
+
+    def _expect_factor(self, name: str, percent: float, command: str) -> None:
+        measured = self._status("gcode_move")["gcode_move"][name]
+        if not math.isclose(measured, percent / FULL_PERCENT):
+            raise Violation(
+                Check.COMMAND_RESULT,
+                f"{command} S{percent:g}: gcode_move {name} is {measured}",
+            )
+
+    def _velocity_limit(self, action: Action) -> None:
+        if action.param("reset"):
+            script = program.LIMIT_RESET
+        else:
+            words = (f"{key.upper()}={value}" for key, value in action.params)
+            script = "SET_VELOCITY_LIMIT " + " ".join(words)
+        self._gcode(script, Check.COMMAND_RESULT)
+
+    def _exclude_object(self, action: Action) -> None:
+        """Probes and the end position are not checked once part of the
+        print is skipped; motors must still come to rest."""
+        name = action.param("name")
+        self._gcode(f"EXCLUDE_OBJECT NAME={name}", Check.COMMAND_RESULT)
+        self.excluded = True
+        status = self._status("exclude_object")["exclude_object"]
+        if name.upper() not in status["excluded_objects"]:
+            raise Violation(
+                Check.COMMAND_RESULT,
+                f"EXCLUDE_OBJECT NAME={name}: excluded {status['excluded_objects']}",
+            )

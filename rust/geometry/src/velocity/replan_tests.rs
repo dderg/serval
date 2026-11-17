@@ -97,7 +97,10 @@ fn arb_step() -> impl Strategy<Value = (Step, f64, bool, f64, f64)> {
     )
 }
 
-fn arb_stream() -> impl Strategy<Value = Stream> {
+/// The raw moves of a random print and their limits. Fitting and planning
+/// them is the test's own work ([`Stream::fitted`]): a panic there is a
+/// failing case proptest persists, not a strategy that aborts the run.
+fn arb_raw() -> impl Strategy<Value = Vec<Move>> {
     (
         prop::collection::vec(arb_step(), 3..14),
         5_000.0f64..40_000.0,
@@ -105,7 +108,7 @@ fn arb_stream() -> impl Strategy<Value = Stream> {
         (30.0f64..60.0, 3_000.0f64..20_000.0, 0.0f64..0.05),
     )
         .prop_filter_map(
-            "the stream fits and plans",
+            "every move of the stream is a valid line",
             |(steps, accel, z_caps, (e_velocity, e_accel, slope))| {
                 let limits = limits(accel, z_caps, extruder(e_velocity, e_accel, slope));
                 let mut at = [100.0, 100.0, 0.2];
@@ -143,15 +146,18 @@ fn arb_stream() -> impl Strategy<Value = Stream> {
                     };
                     raw.push(m.ok()?);
                 }
-                Stream::fitted(&raw)
+                Some(raw)
             },
         )
 }
 
 impl Stream {
-    /// `raw` fitted, its stops and budgets, and the window planned over it.
-    fn fitted(raw: &[Move]) -> Option<Self> {
-        let moves = fit_corners(raw, CornerFitConfig::default()).ok()?.moves;
+    /// `raw` fitted, its stops and budgets, and the window planned over it;
+    /// a stream that does not fit or plan is rejected.
+    fn fitted(raw: &[Move]) -> Result<Self, TestCaseError> {
+        let moves = fit_corners(raw, CornerFitConfig::default())
+            .map_err(unplanned)?
+            .moves;
         let stop_before: Vec<bool> = (0..moves.len())
             .map(|k| {
                 k > 0 && seam_requires_stop(&moves[k - 1], &moves[k], CornerFitConfig::default())
@@ -166,8 +172,8 @@ impl Stream {
             &Serial,
             |_| moves.len(),
         )
-        .ok()?;
-        Some(Self {
+        .map_err(unplanned)?;
+        Ok(Self {
             moves,
             stop_before,
             budgets,
@@ -210,6 +216,10 @@ impl Stream {
         )
         .expect("the window planned these caps")
     }
+}
+
+fn unplanned<E>(_: E) -> TestCaseError {
+    TestCaseError::reject("the stream fits and plans")
 }
 
 fn close(what: &str, got: f64, want: f64) -> Result<(), TestCaseError> {
@@ -389,9 +399,10 @@ proptest! {
     /// stops, budgets and seam ceilings as the planner.
     #[test]
     fn an_unscaled_replan_is_the_windows_plan(
-        stream in arb_stream(),
+        raw in arb_raw(),
         span in (0.0f64..1.0, 0.0f64..1.0),
     ) {
+        let stream = Stream::fitted(&raw)?;
         let (lo, hi) = stream.span(span);
         let replanned = stream.replan((lo, hi), &vec![1.0; hi - lo]).expect("the window's own span replans");
         for (offset, (got, want)) in replanned.moves.iter().zip(&stream.window.moves[lo..hi]).enumerate() {
@@ -410,10 +421,11 @@ proptest! {
     /// raises no seam over the speed the window left there.
     #[test]
     fn a_replan_on_lowered_budgets_keeps_every_planner_limit(
-        stream in arb_stream(),
+        raw in arb_raw(),
         span in (0.0f64..1.0, 0.0f64..1.0),
         scales in prop::collection::vec(0.3f64..1.0, 64),
     ) {
+        let stream = Stream::fitted(&raw)?;
         let (lo, hi) = stream.span(span);
         let scales = &scales[..hi - lo];
         let replanned = match stream.replan((lo, hi), scales) {
@@ -463,10 +475,11 @@ proptest! {
     /// budgets re-plans from that seam's own speed.
     #[test]
     fn a_rest_at_the_far_end_leaves_the_brake_horizon_standing(
-        stream in arb_stream(),
+        raw in arb_raw(),
         reach in 0.0f64..1.0,
         scales in prop::collection::vec(0.3f64..1.0, 64),
     ) {
+        let stream = Stream::fitted(&raw)?;
         let n = stream.moves.len();
         let reach = 1 + ((reach * n as f64) as usize).min(n - 1);
         let scales = &scales[..reach];
@@ -493,10 +506,11 @@ proptest! {
     /// rail reaches back from the same exit speed through the move.
     #[test]
     fn a_brake_entry_stays_under_the_disk_rail(
-        stream in arb_stream(),
+        raw in arb_raw(),
         scales in prop::collection::vec(0.3f64..1.0, 64),
         exits in prop::collection::vec(0.0f64..1.0, 64),
     ) {
+        let stream = Stream::fitted(&raw)?;
         let n = stream.moves.len();
         let brakes = floor_brakes(&stream, &scales[..n]);
         let tol = params(0.0).integration_tol;
