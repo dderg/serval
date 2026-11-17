@@ -23,12 +23,12 @@ from tools.sim.fuzzing.checks import (
     ESTOP_REASON,
     MOTION_STILL_S,
     PACER_BRAKE,
-    first_panic,
     Check,
     Violation,
     event_offsets,
     event_wall_ns,
     events_since,
+    first_panic,
     lattice_counts,
     same_position,
 )
