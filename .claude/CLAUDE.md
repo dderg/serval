@@ -121,7 +121,10 @@ runs). Wrap your own loops: `python3 scripts/slots.py run [--exclusive] -- <cmd>
 chain of exclusive jobs cannot starve the others (it did, with the first version: a series
 of exclusive bench runs held every slot for 25+ minutes). An exclusive job still blocks all
 other heavy work while it runs: keep each one short and do not hold it across a session.
-Nested calls under a held slot do not take a second one.
+Nested calls under a held slot do not take a second one, in the holding process too (a
+`pending.run` cargo inside bench_compare's build slot once queued for a second slot behind an
+exclusive head that waited for the first: both sat until the 2 h timeout); an exclusive
+request inside a held slot fails at once.
 
 # Starting and shipping a change
 
