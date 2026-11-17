@@ -17,6 +17,7 @@ ENDPOINT_DEATH_GRACE_S = 5.0
 SIM_BARRIER_ACK_DEADLINE_S = 60.0
 MOVE_UNDERWAY_S = 1.0
 X_STEP_LINE = 18
+REPEATED_RESTARTS = 4
 
 
 def _kalico_native(sim_world):
@@ -53,6 +54,16 @@ def _host_rust_events(world):
 def test_firmware_restart_from_ready(sim_world, boot):
     world = boot(sim_world)
     world.firmware_restart()
+    _moves_after_restart(world)
+
+
+def test_repeated_firmware_restarts_of_two_mcus(sim_world):
+    """Each restart re-executes both MCU processes; the sim's device-link
+    table ran out on the second restart of a two-MCU world (scenario
+    fuzzer, seed 57)."""
+    world = _classic_stepcompress(sim_world)
+    for _ in range(REPEATED_RESTARTS):
+        world.firmware_restart()
     _moves_after_restart(world)
 
 

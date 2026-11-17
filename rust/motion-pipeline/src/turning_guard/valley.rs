@@ -1,9 +1,9 @@
-use std::cell::OnceCell;
-use std::collections::VecDeque;
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::{BTreeMap, VecDeque};
 
 use geometry::{
-    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RebuildsWithin, VALLEY_LEAD_BUDGET_S, turns_around,
-    valley_reach, widest_crawl_side_within,
+    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RebuildsWithin, VALLEY_LEAD_BUDGET_S, fit_speed_miss,
+    turns_around, valley_reach, widest_crawl_side_within,
 };
 
 use super::screen::ShapedBox;
@@ -12,9 +12,7 @@ use super::shadow::{CellMotion, norm};
 /// How far the fitted leaders the follower projection reads its valleys
 /// off may stray from the shaped motion the guard bounds: in position by
 /// the fit's tolerance, in acceleration by its acceleration tolerance, and
-/// in speed by `2·√(pos·accel)`, the fastest an error held within `pos`
-/// whose rate changes no faster than `accel` can change (Landau's
-/// inequality on a half-line).
+/// in speed by the [`fit_speed_miss`] of both.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct FitMiss {
     pub position: f64,
@@ -26,7 +24,7 @@ impl FitMiss {
     pub fn of(pos_mm: f64, accel_mm_s2: f64) -> Self {
         Self {
             position: pos_mm,
-            speed: 2.0 * (pos_mm * accel_mm_s2).sqrt(),
+            speed: fit_speed_miss(pos_mm, accel_mm_s2),
             accel: accel_mm_s2,
         }
     }
@@ -117,12 +115,17 @@ fn turn_rate(cross: f64, accel: f64, speed: f64) -> f64 {
 /// The cells of the guard's grid scanned for crawls, in order, with sums
 /// over them to each: the path the shaped motion covers at least and at
 /// most, and the terms the fitted leaders' odometer strays by
-/// ([`CellTrack::drift`]).
+/// ([`TrackView::drift`]). It tracks the cells from `base` on but stores
+/// only the last ones scanned, from `stored_from`, and at its anchors the
+/// sums before a cell: a [`TrackView`] reads the cells before those
+/// stored off their bounds, and their sums from the anchor before them.
 #[derive(Debug, Default)]
 pub(super) struct CellTrack {
     base: i64,
+    stored_from: i64,
     cells: VecDeque<TrackedCell>,
-    before_base: Odometer,
+    before_stored: Anchor,
+    anchors: VecDeque<Anchor>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,11 +135,20 @@ struct TrackedCell {
     through: Odometer,
 }
 
+/// The sums through the cell before `cell`, and whether that cell was a
+/// fast one when `cell` was tracked after it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Anchor {
+    cell: i64,
+    before: Odometer,
+    fast_before: bool,
+}
+
 /// Sums over tracked cells: the least and most path covered; the turning
 /// `Σ |a × v|/v²·h` and the speed miss's share `Σ δ²/(2(v − δ))·h` of the
 /// cells faster than twice the fit's speed miss `δ`, `Σ δ·h` of the
 /// others; and how many runs of fast cells start.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Odometer {
     floor: f64,
     ceiling: f64,
@@ -157,40 +169,15 @@ impl Odometer {
     }
 }
 
-impl CellTrack {
-    /// One past the last cell tracked.
-    pub fn end(&self) -> i64 {
-        self.base + self.cells.len() as i64
-    }
-
-    pub fn base(&self) -> i64 {
-        self.base
-    }
-
-    fn index(&self, n: i64) -> usize {
-        usize::try_from(n - self.base)
-            .ok()
-            .filter(|&index| index < self.cells.len())
-            .unwrap_or_else(|| {
-                panic!(
-                    "turning guard: cell {n} is not tracked, only [{}, {})",
-                    self.base,
-                    self.end()
-                )
-            })
-    }
-
-    pub fn get(&self, n: i64) -> CellBounds {
-        self.cells[self.index(n)].bounds
-    }
-
-    pub fn push(&mut self, n: i64, bounds: CellBounds, h: f64, fit: FitMiss) {
-        if self.cells.is_empty() {
-            self.base = n;
-        }
-        assert_eq!(n, self.end(), "turning guard: cells are tracked in order");
-        let previous = self.cells.back();
-        let before = previous.map_or(self.before_base, |cell| cell.through);
+impl TrackedCell {
+    /// The cell `bounds` describe, tracked after the sums `before` of a
+    /// cell `fast_before` says was fast.
+    fn after(anchor: Anchor, bounds: CellBounds, h: f64, fit: FitMiss) -> Self {
+        let Anchor {
+            before,
+            fast_before,
+            ..
+        } = anchor;
         let speed = bounds.speed.0;
         let fast = speed > 2.0 * fit.speed;
         let through = Odometer {
@@ -203,47 +190,328 @@ impl CellTrack {
                 } else {
                     fit.speed * h
                 },
-            fast_runs: before.fast_runs
-                + u32::from(fast && !previous.is_some_and(|cell| cell.fast)),
+            fast_runs: before.fast_runs + u32::from(fast && !fast_before),
         };
-        self.cells.push_back(TrackedCell {
+        Self {
             bounds,
             fast,
             through,
-        });
-    }
-
-    pub fn truncate_from(&mut self, n: i64) {
-        let keep = usize::try_from(n - self.base).unwrap_or(0);
-        self.cells.truncate(keep);
-    }
-
-    pub fn trim_before(&mut self, n: i64) {
-        while self.base < n {
-            let Some(cell) = self.cells.pop_front() else {
-                break;
-            };
-            self.before_base = cell.through;
-            self.base += 1;
         }
     }
 
-    pub fn clear(&mut self) {
-        self.cells.clear();
-        self.before_base = Odometer::default();
+    /// The anchor of the cell after this one.
+    fn anchor_next(&self, cell: i64) -> Anchor {
+        Anchor {
+            cell: cell + 1,
+            before: self.through,
+            fast_before: self.fast,
+        }
+    }
+}
+
+impl CellTrack {
+    /// One past the last cell tracked.
+    pub fn end(&self) -> i64 {
+        self.stored_from + self.cells.len() as i64
     }
 
+    pub fn base(&self) -> i64 {
+        self.base
+    }
+
+    pub fn stored_from(&self) -> i64 {
+        self.stored_from
+    }
+
+    /// The earliest cell a [`TrackView`] replays the sums from.
+    pub fn anchored_from(&self) -> i64 {
+        self.anchors.front().map_or(self.base, |anchor| anchor.cell)
+    }
+
+    #[cfg(test)]
+    pub fn stored_cells(&self) -> i64 {
+        self.cells.len() as i64
+    }
+
+    /// Tracks cell `n`, the next, anchoring the sums before it where
+    /// `anchored` or where it is the first.
+    pub fn push(&mut self, n: i64, bounds: CellBounds, (h, fit): (f64, FitMiss), anchored: bool) {
+        let first = self.end() == self.base;
+        if first {
+            self.base = n;
+            self.stored_from = n;
+            self.before_stored.cell = n;
+        }
+        assert_eq!(n, self.end(), "turning guard: cells are tracked in order");
+        let anchor = self
+            .cells
+            .back()
+            .map_or(self.before_stored, |cell| cell.anchor_next(n - 1));
+        if first || anchored {
+            self.anchors.push_back(anchor);
+        }
+        self.cells
+            .push_back(TrackedCell::after(anchor, bounds, h, fit));
+    }
+
+    /// Forgets the cells from `n` on, which are tracked anew; where `n`
+    /// lies before the cells stored, the track goes on from `anchor`, the
+    /// sums before `n`.
+    pub fn truncate_from(&mut self, n: i64, anchor: Option<Anchor>) {
+        assert!(
+            n >= self.base,
+            "turning guard: cell {n} is not tracked, only [{}, {})",
+            self.base,
+            self.end()
+        );
+        while self.anchors.back().is_some_and(|anchor| anchor.cell > n) {
+            self.anchors.pop_back();
+        }
+        if n >= self.stored_from {
+            self.cells.truncate((n - self.stored_from) as usize);
+            return;
+        }
+        let anchor = anchor.expect("turning guard: tracking anew before the cells stored");
+        assert_eq!(
+            anchor.cell, n,
+            "turning guard: the sums before cell {n} anchor cell {}",
+            anchor.cell
+        );
+        self.cells.clear();
+        self.stored_from = n;
+        self.before_stored = anchor;
+    }
+
+    /// Stops tracking the cells before `n`, keeping the last anchor at or
+    /// before it. A track trimmed of every cell starts afresh at the next,
+    /// as one whose first cell follows no fast one.
+    pub fn trim_before(&mut self, n: i64) {
+        let base = n.min(self.end()).max(self.base);
+        self.base = base;
+        let stored = !self.cells.is_empty();
+        while self.stored_from < base {
+            self.pop_stored();
+        }
+        if stored && self.cells.is_empty() {
+            self.before_stored.fast_before = false;
+        }
+        while self
+            .anchors
+            .get(1)
+            .is_some_and(|anchor| anchor.cell <= base)
+        {
+            self.anchors.pop_front();
+        }
+    }
+
+    /// Stores at most the last `count` cells.
+    pub fn store_last(&mut self, count: i64) {
+        while self.cells.len() as i64 > count {
+            self.pop_stored();
+        }
+    }
+
+    fn pop_stored(&mut self) {
+        let Some(cell) = self.cells.pop_front() else {
+            return;
+        };
+        self.before_stored = cell.anchor_next(self.stored_from);
+        self.stored_from += 1;
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn stored(&self, n: i64) -> Option<&TrackedCell> {
+        usize::try_from(n - self.stored_from)
+            .ok()
+            .and_then(|index| self.cells.get(index))
+    }
+
+    /// The anchor of cell `n` where one is kept or the stored cells start
+    /// there.
+    fn anchor_at(&self, n: i64) -> Option<Anchor> {
+        if n == self.stored_from {
+            return Some(self.before_stored);
+        }
+        self.stored(n - 1)
+            .map(|cell| cell.anchor_next(n - 1))
+            .or_else(|| self.kept_anchor(n))
+    }
+
+    /// The anchor kept at cell `n`, where the scan anchored one.
+    fn kept_anchor(&self, n: i64) -> Option<Anchor> {
+        let index = self.anchors.partition_point(|anchor| anchor.cell < n);
+        self.anchors
+            .get(index)
+            .filter(|anchor| anchor.cell == n)
+            .copied()
+    }
+
+    /// The last anchor at or before cell `n`.
+    fn anchor_before(&self, n: i64) -> Anchor {
+        let index = self.anchors.partition_point(|anchor| anchor.cell <= n);
+        assert!(
+            index > 0,
+            "turning guard: no anchor tracks cell {n}, the first is at {}",
+            self.anchored_from()
+        );
+        self.anchors[index - 1]
+    }
+}
+
+/// The crawl track as the crawl scan and the checks read it: the cells it
+/// stores, and before those the cells `bounds` gives, the sums through each
+/// replayed from the anchor before it as the track summed them, every cell
+/// replayed kept while the view lives.
+pub(super) struct TrackView<'a> {
+    track: &'a CellTrack,
+    bounds: &'a dyn Fn(i64) -> CellBounds,
+    h: f64,
+    fit: FitMiss,
+    replayed: RefCell<BTreeMap<i64, TrackedCell>>,
+}
+
+impl<'a> TrackView<'a> {
+    pub fn new(
+        track: &'a CellTrack,
+        bounds: &'a dyn Fn(i64) -> CellBounds,
+        (h, fit): (f64, FitMiss),
+    ) -> Self {
+        Self {
+            track,
+            bounds,
+            h,
+            fit,
+            replayed: RefCell::default(),
+        }
+    }
+
+    pub fn end(&self) -> i64 {
+        self.track.end()
+    }
+
+    pub fn base(&self) -> i64 {
+        self.track.base()
+    }
+
+    fn assert_tracked(&self, n: i64) {
+        assert!(
+            self.base() <= n && n < self.end(),
+            "turning guard: cell {n} is not tracked, only [{}, {})",
+            self.base(),
+            self.end()
+        );
+    }
+
+    pub fn get(&self, n: i64) -> CellBounds {
+        self.assert_tracked(n);
+        if let Some(cell) = self.track.stored(n).or(self.replayed.borrow().get(&n)) {
+            return cell.bounds;
+        }
+        (self.bounds)(n)
+    }
+
+    fn fast(&self, n: i64) -> bool {
+        self.assert_tracked(n);
+        if let Some(cell) = self.track.stored(n) {
+            return cell.fast;
+        }
+        if let Some(anchor) = self.track.kept_anchor(n + 1) {
+            return anchor.fast_before;
+        }
+        self.replayed(n).fast
+    }
+
+    /// The sums through the cell before `n`, a tracked cell or the one
+    /// past the last.
+    pub fn anchor(&self, n: i64) -> Anchor {
+        if let Some(anchor) = self.track.anchor_at(n) {
+            return anchor;
+        }
+        self.replayed(n - 1).anchor_next(n - 1)
+    }
+
+    fn through(&self, n: i64) -> Odometer {
+        self.anchor(n + 1).before
+    }
+
+    /// Cell `n`, one before those stored, as the track summed it: replayed
+    /// from the anchor before it, or from the last cell this view replayed
+    /// past that anchor.
+    fn replayed(&self, n: i64) -> TrackedCell {
+        assert!(
+            self.track.anchored_from() <= n && n < self.track.stored_from,
+            "turning guard: cell {n} is neither stored nor anchored, the track anchors \
+             [{}, {})",
+            self.track.anchored_from(),
+            self.track.stored_from
+        );
+        let mut replayed = self.replayed.borrow_mut();
+        if let Some(cell) = replayed.get(&n) {
+            return *cell;
+        }
+        let anchor = self.track.anchor_before(n);
+        let mut anchor = replayed
+            .range(anchor.cell..n)
+            .next_back()
+            .map_or(anchor, |(&m, cell)| cell.anchor_next(m));
+        loop {
+            let m = anchor.cell;
+            let cell = TrackedCell::after(anchor, (self.bounds)(m), self.h, self.fit);
+            replayed.insert(m, cell);
+            if m == n {
+                return cell;
+            }
+            anchor = cell.anchor_next(m);
+        }
+    }
+
+    /// Where the cells from `from` on start: the sums before it, and
+    /// whether it continues a run of fast cells.
+    pub fn start_of(&self, from: i64) -> RunStart {
+        RunStart {
+            from,
+            before: self.through(from - 1),
+            continues_a_run: from > self.base() && self.fast(from) && self.fast(from - 1),
+        }
+    }
+
+    /// The least path the fitted leaders cover from `start` through cell
+    /// `to`: [`Self::path`]'s least less [`Self::drift`] over those cells.
+    pub fn covered_since(&self, start: RunStart, to: i64, h: f64, fit: FitMiss) -> f64 {
+        let RunStart {
+            from,
+            before,
+            continues_a_run,
+        } = start;
+        self.assert_tracked(to);
+        let over = self.through(to).since(before);
+        let runs = over.fast_runs + u32::from(continues_a_run);
+        let linear = fit.speed * (to + 1 - from) as f64 * h;
+        over.floor - linear.min(fit.position * (2.0 * f64::from(runs) + over.turning) + over.stray)
+    }
+}
+
+/// The sums before a tracked cell `from` and whether it continues a run
+/// of fast cells: what the path and drift from it read of the cells before.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct RunStart {
+    from: i64,
+    before: Odometer,
+    continues_a_run: bool,
+}
+
+impl TrackView<'_> {
     /// The sums over the cells `from..=to`, none where the range is empty.
     fn over(&self, from: i64, to: i64) -> Odometer {
         if to < from {
             return Odometer::default();
         }
-        let before = if from == self.base {
-            self.before_base
-        } else {
-            self.cells[self.index(from - 1)].through
-        };
-        self.cells[self.index(to)].through.since(before)
+        self.assert_tracked(from);
+        self.assert_tracked(to);
+        self.through(to).since(self.through(from - 1))
     }
 
     /// The least and most path the shaped motion covers across the cells
@@ -265,22 +533,19 @@ impl CellTrack {
             return 0.0;
         }
         let over = self.over(from, to);
-        let first_continues_a_run = from > self.base
-            && self.cells[self.index(from)].fast
-            && self.cells[self.index(from - 1)].fast;
+        let first_continues_a_run = from > self.base() && self.fast(from) && self.fast(from - 1);
         let runs = over.fast_runs + u32::from(first_continues_a_run);
         let linear = fit.speed * (to + 1 - from) as f64 * h;
         linear.min(fit.position * (2.0 * f64::from(runs) + over.turning) + over.stray)
     }
 
-    /// The largest acceleration across the cells `from..=to`.
-    fn strongest(&self, from: i64, to: i64) -> f64 {
-        (from..=to).fold(0.0, |most: f64, n| most.max(self.get(n).accel.1))
-    }
-
-    /// The largest speed across the cells `from..=to`.
-    fn fastest(&self, from: i64, to: i64) -> f64 {
-        (from..=to).fold(0.0, |most: f64, n| most.max(self.get(n).speed.1))
+    /// The fastest speed and strongest acceleration across the cells
+    /// `from..=to`.
+    fn leaders(&self, from: i64, to: i64) -> (f64, f64) {
+        (from..=to).fold((0.0, 0.0), |(fastest, strongest): (f64, f64), n| {
+            let cell = self.get(n);
+            (fastest.max(cell.speed.1), strongest.max(cell.accel.1))
+        })
     }
 }
 
@@ -290,67 +555,120 @@ impl CellTrack {
 /// `cells`; the projection reads their speed and rate off the fitted
 /// leaders, which set the leaders' reach, the least each side spans
 /// ([`geometry::valley_reach`]), and the floor ([`geometry::crawl_floor`]).
+/// `leaders` holds the fastest speed and the strongest acceleration of the
+/// shaped motion across `cells`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Slot {
     pub cells: (i64, i64),
     pub width: (f64, f64),
     pub floor: (f64, f64),
     pub speed: f64,
+    pub leaders: (f64, f64),
+}
+
+/// A run of crawling cells as the scan reads it, cell by cell: the slot
+/// its cells lay, and the leaders across the cells past the slot's last,
+/// which join the slot with the next cell the fitted leaders may crawl in.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct RunScan {
+    slot: Option<Slot>,
+    since_last: (f64, f64),
+}
+
+impl RunScan {
+    /// Reads cell `n`, the run's next.
+    pub fn read(&mut self, n: i64, cell: CellBounds, fit: FitMiss) {
+        let leaders = (cell.speed.1, cell.accel.1);
+        let Some(here) = Slot::of_cell(n, cell, fit) else {
+            if self.slot.is_some() {
+                self.since_last = strongest_of(self.since_last, leaders);
+            }
+            return;
+        };
+        self.slot = Some(self.slot.map_or(here, |slot| Slot {
+            cells: (slot.cells.0, n),
+            width: (
+                slot.width.0.min(here.width.0),
+                slot.width.1.max(here.width.1),
+            ),
+            floor: (
+                slot.floor.0.min(here.floor.0),
+                slot.floor.1.max(here.floor.1),
+            ),
+            speed: slot.speed.max(here.speed),
+            leaders: strongest_of(strongest_of(slot.leaders, self.since_last), leaders),
+        }));
+        self.since_last = (0.0, 0.0);
+    }
+
+    /// The slot of the cells read, `None` where the fitted leaders cannot
+    /// crawl in any of them.
+    pub fn slot(&self) -> Option<Slot> {
+        self.slot
+    }
+}
+
+fn strongest_of(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0.max(b.0), a.1.max(b.1))
 }
 
 impl Slot {
-    /// The slot over the cells `from..=to`, `None` where the fitted
-    /// leaders cannot crawl in any of them.
-    pub fn over(track: &CellTrack, (from, to): (i64, i64), fit: FitMiss) -> Option<Self> {
-        let mut slot: Option<Self> = None;
-        for n in from..=to {
-            let cell = track.get(n);
-            let speed = (
-                (cell.speed.0 - fit.speed).max(0.0),
-                (cell.speed.1 + fit.speed).min(ADVANCE_VALLEY_SPEED_MM_S),
-            );
-            if speed.0 >= ADVANCE_VALLEY_SPEED_MM_S {
-                continue;
-            }
-            let rate = (
-                (cell.accel.0 - fit.accel).max(0.0),
-                cell.accel.1 + fit.accel,
-            );
-            let width = (valley_reach(speed.0, rate.0), valley_reach(speed.1, rate.1));
-            let floor = (
-                if speed.0 == 0.0 || turns_around(speed.0, rate.1) {
-                    0.0
-                } else {
-                    speed.0 * speed.0 / rate.1
-                },
-                if rate.0 == 0.0 {
-                    f64::INFINITY
-                } else {
-                    speed.1 * speed.1 / rate.0
-                },
-            );
-            let here = Self {
-                cells: (n, n),
-                width,
-                floor,
-                speed: speed.1,
-            };
-            slot = Some(slot.map_or(here, |slot| Self {
-                cells: (slot.cells.0, n),
-                width: (slot.width.0.min(width.0), slot.width.1.max(width.1)),
-                floor: (slot.floor.0.min(floor.0), slot.floor.1.max(floor.1)),
-                speed: slot.speed.max(here.speed),
-            }));
+    /// The slot of cell `n` alone, `None` where the fitted leaders cannot
+    /// crawl in it.
+    fn of_cell(n: i64, cell: CellBounds, fit: FitMiss) -> Option<Self> {
+        let speed = (
+            (cell.speed.0 - fit.speed).max(0.0),
+            (cell.speed.1 + fit.speed).min(ADVANCE_VALLEY_SPEED_MM_S),
+        );
+        if speed.0 >= ADVANCE_VALLEY_SPEED_MM_S {
+            return None;
         }
-        slot
+        let rate = (
+            (cell.accel.0 - fit.accel).max(0.0),
+            cell.accel.1 + fit.accel,
+        );
+        let width = (valley_reach(speed.0, rate.0), valley_reach(speed.1, rate.1));
+        let floor = (
+            if speed.0 == 0.0 || turns_around(speed.0, rate.1) {
+                0.0
+            } else {
+                speed.0 * speed.0 / rate.1
+            },
+            if rate.0 == 0.0 {
+                f64::INFINITY
+            } else {
+                speed.1 * speed.1 / rate.0
+            },
+        );
+        Some(Self {
+            cells: (n, n),
+            width,
+            floor,
+            speed: speed.1,
+            leaders: (cell.speed.1, cell.accel.1),
+        })
+    }
+
+    /// The fastest speed and strongest acceleration across `cells`, which
+    /// hold the slot's.
+    fn leaders_across(&self, track: &TrackView, cells: (i64, i64)) -> (f64, f64) {
+        let (m0, m1) = self.cells;
+        assert!(
+            cells.0 <= m0 && m1 <= cells.1,
+            "turning guard: a side over {cells:?} leaves out the slot over {:?}",
+            self.cells
+        );
+        let before = track.leaders(cells.0, m0 - 1);
+        let after = track.leaders(m1 + 1, cells.1);
+        strongest_of(strongest_of(before, self.leaders), after)
     }
 
     /// The path range from a point in cell `n` to the slot's centre, the
     /// fitted leaders' odometer straying from the shaped path's by at most
-    /// [`CellTrack::drift`] over the cells between. The odometer never
+    /// [`TrackView::drift`] over the cells between. The odometer never
     /// runs backwards, so the least reads only the cells between `n` and
     /// the run: the crawl lies inside it.
-    fn distance(&self, track: &CellTrack, n: i64, h: f64, fit: FitMiss) -> (f64, f64) {
+    fn distance(&self, track: &TrackView, n: i64, h: f64, fit: FitMiss) -> (f64, f64) {
         let (m0, m1) = self.cells;
         let most_drift = track.drift(n.min(m0), n.max(m1), h, fit);
         let (least, most) = if n < m0 {
@@ -374,16 +692,17 @@ impl Slot {
     /// only its size.
     fn leaders(
         &self,
-        track: &CellTrack,
+        track: &TrackView,
         cells: (i64, i64),
         (h, fit): (f64, FitMiss),
         shadow: &dyn Fn(i64) -> CellBounds,
     ) -> CrawlSide {
-        let accel = track.strongest(cells.0, cells.1) + fit.accel;
+        let (fastest, strongest) = self.leaders_across(track, cells);
+        let accel = strongest + fit.accel;
         let either_way = CrawlSide::either_way(
             self.speed,
             accel,
-            (track.fastest(cells.0, cells.1) + fit.speed).max(self.speed),
+            (fastest + fit.speed).max(self.speed),
             self.floor,
         );
         let (m0, m1) = self.cells;
@@ -432,28 +751,27 @@ pub(super) struct Reserve {
 /// and over all its cells, each of which bounds what the rebuild asks in
 /// any cell it joins ([`RebuildsWithin`] grows with the distance range, the
 /// speed and the acceleration); and the bound over the whole side
-/// ([`CrawlSide::rebuild`]) once read.
+/// ([`CrawlSide::rebuild`]) once read. The side's cells in the slot's run,
+/// `run`, all lie `run_distance` from the crawl: their speed and
+/// acceleration are read off the track as a check needs them, the last
+/// block and run cell read kept; the leaders in its other cells are kept
+/// in order.
 #[derive(Debug, Clone, PartialEq)]
 struct SideLeaders {
     side: CrawlSide,
     within: RebuildsWithin,
-    cells: Vec<CellLeaders>,
-    blocks: Vec<CellBlock>,
+    fit: FitMiss,
+    run: (i64, i64),
+    run_distance: (f64, f64),
+    outside: Vec<CellLeaders>,
     joined: f64,
     whole: OnceCell<f64>,
+    screened: Cell<Option<(i64, f64)>>,
+    run_within: Cell<Option<(i64, f64)>>,
 }
 
-/// How many neighbouring cells of a side one [`CellBlock`] joins.
-const REBUILD_SCREEN_CELLS: usize = 32;
-
-/// The fitted leaders over neighbouring cells of a crawl valley side,
-/// joined, and what [`RebuildsWithin`] bounds the rebuild by in any of them
-/// once read.
-#[derive(Debug, Clone, PartialEq)]
-struct CellBlock {
-    leaders: JoinedLeaders,
-    within: OnceCell<f64>,
-}
+/// How many neighbouring cells of a side one screen joins.
+const REBUILD_SCREEN_CELLS: i64 = 32;
 
 /// The distance range, the fastest speed and the strongest acceleration
 /// of the fitted leaders over some cells of a crawl valley side.
@@ -465,8 +783,8 @@ struct JoinedLeaders {
 }
 
 impl JoinedLeaders {
-    fn over(cells: &[CellLeaders]) -> Self {
-        cells.iter().fold(
+    fn over(cells: impl IntoIterator<Item = Self>) -> Self {
+        cells.into_iter().fold(
             Self {
                 distance: (f64::INFINITY, 0.0),
                 speed: 0.0,
@@ -494,10 +812,65 @@ impl JoinedLeaders {
 /// read.
 #[derive(Debug, Clone, PartialEq)]
 struct CellLeaders {
-    distance: (f64, f64),
-    speed: f64,
-    accel: f64,
+    leaders: JoinedLeaders,
     within: OnceCell<f64>,
+}
+
+impl SideLeaders {
+    /// The fitted leaders in cell `n` of the side starting at `first`.
+    fn at(&self, n: i64, first: i64, track: &TrackView) -> JoinedLeaders {
+        let (m0, m1) = self.run;
+        if (m0..=m1).contains(&n) {
+            let cell = track.get(n);
+            return JoinedLeaders {
+                distance: self.run_distance,
+                speed: cell.speed.1 + self.fit.speed,
+                accel: cell.accel.1 + self.fit.accel,
+            };
+        }
+        self.outside[self.outside_index(n, first)].leaders
+    }
+
+    fn outside_index(&self, n: i64, first: i64) -> usize {
+        let (m0, m1) = self.run;
+        let index = if n < m0 {
+            n - first
+        } else {
+            m0 - first + n - m1 - 1
+        };
+        usize::try_from(index).expect("a cell of the side")
+    }
+
+    /// What [`RebuildsWithin`] bounds the rebuild by over the cells
+    /// `from..=to` of the side starting at `first`, the last block read
+    /// kept.
+    fn screened(&self, (from, to): (i64, i64), first: i64, track: &TrackView) -> f64 {
+        if let Some((_, screened)) = self.screened.get().filter(|&(kept, _)| kept == from) {
+            return screened;
+        }
+        let screened = JoinedLeaders::over((from..=to).map(|n| self.at(n, first, track)))
+            .rebuild(&self.within);
+        self.screened.set(Some((from, screened)));
+        screened
+    }
+
+    /// What [`RebuildsWithin`] bounds the rebuild by in cell `n` of the
+    /// side starting at `first`.
+    fn within_at(&self, n: i64, first: i64, track: &TrackView) -> f64 {
+        let (m0, m1) = self.run;
+        if !(m0..=m1).contains(&n) {
+            let cell = &self.outside[self.outside_index(n, first)];
+            return *cell
+                .within
+                .get_or_init(|| cell.leaders.rebuild(&self.within));
+        }
+        if let Some((_, within)) = self.run_within.get().filter(|&(kept, _)| kept == n) {
+            return within;
+        }
+        let within = self.at(n, first, track).rebuild(&self.within);
+        self.run_within.set(Some((n, within)));
+        within
+    }
 }
 
 impl Reserve {
@@ -522,41 +895,55 @@ impl Reserve {
     /// set at their distance from the crawl ([`RebuildsWithin`]).
     fn over(
         slot: &Slot,
-        track: &CellTrack,
+        track: &TrackView,
         (cells, width): ((i64, i64), f64),
         (h, fit): (f64, FitMiss),
         shadow: &dyn Fn(i64) -> CellBounds,
     ) -> Self {
         let side = slot.leaders(track, cells, (h, fit), shadow);
-        let crossing: Vec<CellLeaders> = (cells.0..=cells.1)
+        let run = slot.cells;
+        let outside: Vec<CellLeaders> = (cells.0..run.0)
+            .chain(run.1 + 1..=cells.1)
             .map(|n| {
                 let cell = track.get(n);
                 CellLeaders {
-                    distance: slot.distance(track, n, h, fit),
-                    speed: cell.speed.1 + fit.speed,
-                    accel: cell.accel.1 + fit.accel,
+                    leaders: JoinedLeaders {
+                        distance: slot.distance(track, n, h, fit),
+                        speed: cell.speed.1 + fit.speed,
+                        accel: cell.accel.1 + fit.accel,
+                    },
                     within: OnceCell::new(),
                 }
             })
             .collect();
+        let run_distance = slot.distance(track, run.0, h, fit);
+        let across_run = JoinedLeaders {
+            distance: run_distance,
+            speed: slot.leaders.0 + fit.speed,
+            accel: slot.leaders.1 + fit.accel,
+        };
         let within = side.rebuilds_within(width);
-        let blocks = crossing
-            .chunks(REBUILD_SCREEN_CELLS)
-            .map(|cells| CellBlock {
-                leaders: JoinedLeaders::over(cells),
-                within: OnceCell::new(),
-            })
-            .collect();
+        let joined = JoinedLeaders::over(
+            outside
+                .iter()
+                .map(|cell| cell.leaders)
+                .chain(std::iter::once(across_run)),
+        )
+        .rebuild(&within);
         Self {
             width,
             cells,
             leaders: Some(SideLeaders {
                 side,
-                joined: JoinedLeaders::over(&crossing).rebuild(&within),
                 within,
-                cells: crossing,
-                blocks,
+                fit,
+                run,
+                run_distance,
+                outside,
+                joined,
                 whole: OnceCell::new(),
+                screened: Cell::new(None),
+                run_within: Cell::new(None),
             }),
         }
     }
@@ -565,7 +952,12 @@ impl Reserve {
     /// `binds` holds for a bound on it; `None` where a bound it does not
     /// hold for shows the rebuild cannot bind. `binds` holds for every
     /// bound past one it holds for.
-    pub fn rebuild_where(&self, n: i64, binds: impl Fn(f64) -> bool) -> Option<f64> {
+    pub fn rebuild_where(
+        &self,
+        n: i64,
+        track: &TrackView,
+        binds: impl Fn(f64) -> bool,
+    ) -> Option<f64> {
         assert!(
             self.cells.0 <= n && n <= self.cells.1,
             "turning guard: cell {n} lies outside the crawl side over {:?}",
@@ -577,18 +969,13 @@ impl Reserve {
         if !binds(leaders.joined) {
             return None;
         }
-        let index = usize::try_from(n - self.cells.0).expect("a cell of the side");
-        let block = &leaders.blocks[index / REBUILD_SCREEN_CELLS];
-        let screened = *block
-            .within
-            .get_or_init(|| block.leaders.rebuild(&leaders.within));
-        if !binds(screened) {
+        let (first, last) = self.cells;
+        let block = first + (n - first) / REBUILD_SCREEN_CELLS * REBUILD_SCREEN_CELLS;
+        let block_end = (block + REBUILD_SCREEN_CELLS - 1).min(last);
+        if !binds(leaders.screened((block, block_end), first, track)) {
             return None;
         }
-        let cell = &leaders.cells[index];
-        let within = *cell
-            .within
-            .get_or_init(|| leaders.within.at(cell.distance, cell.speed, cell.accel));
+        let within = leaders.within_at(n, first, track);
         binds(within).then(|| {
             within.min(
                 *leaders
@@ -622,6 +1009,7 @@ struct CoveredAfter {
     through: i64,
     most: f64,
     within_budget: f64,
+    start: Option<RunStart>,
 }
 
 impl CoveredAfter {
@@ -630,6 +1018,7 @@ impl CoveredAfter {
             through: last,
             most: 0.0,
             within_budget: 0.0,
+            start: None,
         }
     }
 }
@@ -680,7 +1069,7 @@ impl Crawl {
     pub fn found(
         slot: Slot,
         line: u32,
-        track: &CellTrack,
+        track: &TrackView,
         table_start: i64,
         (h, fit): (f64, FitMiss),
         shadow: &dyn Fn(i64) -> CellBounds,
@@ -753,7 +1142,7 @@ impl Crawl {
 
     /// Reads the least path the leaders cover past the run on through cell
     /// `to`, which the track holds.
-    fn cover_after_through(&mut self, track: &CellTrack, to: i64, (h, fit): (f64, FitMiss)) {
+    fn cover_after_through(&mut self, track: &TrackView, to: i64, (h, fit): (f64, FitMiss)) {
         let last = self.slot.cells.1;
         let horizon = last + (VALLEY_LEAD_BUDGET_S / h).floor() as i64;
         assert!(
@@ -767,9 +1156,10 @@ impl Crawl {
         while covered.through < to {
             covered.through += 1;
             let n = covered.through;
-            covered.most = covered
-                .most
-                .max(track.path(last + 1, n).0 - track.drift(last + 1, n, h, fit));
+            let start = *covered
+                .start
+                .get_or_insert_with(|| track.start_of(last + 1));
+            covered.most = covered.most.max(track.covered_since(start, n, h, fit));
             if n <= horizon {
                 covered.within_budget = covered.most;
             }
@@ -786,7 +1176,7 @@ impl Crawl {
     /// the side until it fits. `false` while it waits.
     pub fn resolve_after(
         &mut self,
-        track: &CellTrack,
+        track: &TrackView,
         all: bool,
         (h, fit): (f64, FitMiss),
         shadow: &dyn Fn(i64) -> CellBounds,

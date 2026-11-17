@@ -7,6 +7,8 @@
 #   ./scripts/ci.sh -v <job>        # stream the gate's output live
 #   ./scripts/ci.sh throughput-gate [--accept --reason R]
 #                                   # replay Ir and a live 2-core replay vs tools/bench/throughput_baseline.json
+#   ./scripts/ci.sh sim-fuzz [fuzz.py args]
+#                                   # SIM_FUZZ_SEEDS (500) fresh scenario-fuzzer seeds in ~10 min slot batches, failures in .sim-fuzz/
 #
 # Output policy: a terminal, GitHub Actions and `-v` get the live stream.
 # Everywhere else (agents, scripts capturing stdout) a gate prints one PASS
@@ -47,12 +49,12 @@ slot_kind() {
         *) echo build ;;
     esac
 }
-case "${1:-}" in
-    install-hooks|-h|--help|help) ;;
+job_name="${1:-all}"
+case "$job_name" in -v|--verbose) job_name="${2:-all}" ;; esac
+case "$job_name" in
+    install-hooks|-h|--help|help|sim-fuzz) ;;
     *)
         if [ -z "${SERVAL_SLOT_HELD:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI_NO_SLOT:-}" ]; then
-            job_name="${1:-all}"
-            case "$job_name" in -v|--verbose) job_name="${2:-all}" ;; esac
             exec python3 "$ROOT/scripts/slots.py" run --kind "$(slot_kind "$job_name")" -- "$0" "$@"
         fi
         ;;
@@ -432,6 +434,17 @@ job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
 job_sim_image() { "$ROOT/tools/sim/run.sh" save-image; }
 job_sim_fresh() { python3 "$ROOT/tools/sim/check_fresh.py"; }
 
+# Fresh seeds every run (SIM_FUZZ_FIRST pins the range): the fixed smoke set
+# runs in sim-e2e. Not in `quick` or `all`: 500 seeds take ~1-2 h of slot time
+# under load, so tools/sim/hunt.py takes a slot per ~10-minute batch and
+# releases it between batches (the job itself holds none, see the case above).
+job_sim_fuzz() {
+    local count="${SIM_FUZZ_SEEDS:-500}"
+    local first="${SIM_FUZZ_FIRST:-$(( $(date +%s) % 100000000 * 10 ))}"
+    python3 "$ROOT/tools/sim/hunt.py" --seeds "$first..$((first + count - 1))" \
+        --run-name "sim-fuzz-$first" "$@"
+}
+
 # The producer must outrun the printer everywhere; the committed asset is the
 # dense top-layer region that exhausted the bench's 0.25 s anchor lead,
 # replayed with the bench printer.cfg exactly as the live path builds it
@@ -670,6 +683,7 @@ case "$name" in
     sim-e2e)          job=(job_sim_e2e ${@+"$@"}) ;;
     sim-image)        job=(job_sim_image) ;;
     sim-fresh)        job=(job_sim_fresh) ;;
+    sim-fuzz)         job=(job_sim_fuzz ${@+"$@"}) ;;
     replay-budget)    job=(job_replay_budget) ;;
     throughput-gate)  job=(job_throughput_gate ${@+"$@"}) ;;
     snapshot)         job=(job_snapshot) ;;

@@ -1,6 +1,6 @@
 use geometry::{CrawlSide, VALLEY_LEAD_BUDGET_S, widest_crawl_side_within};
 
-use super::{CellBounds, CellTrack, Crawl, FitMiss, Reserve, Slot};
+use super::{CellBounds, CellTrack, Crawl, FitMiss, Reserve, RunScan, Slot, TrackView};
 
 const H: f64 = 2.5e-4;
 
@@ -22,6 +22,24 @@ fn crawling() -> CellBounds {
     }
 }
 
+fn unstored(n: i64) -> CellBounds {
+    panic!("a test track stores every cell it tracks, not cell {n}")
+}
+
+/// A view of `track`, which stores every cell it tracks.
+fn view(track: &CellTrack, fit: FitMiss) -> TrackView<'_> {
+    TrackView::new(track, &unstored, (H, fit))
+}
+
+/// The slot the run of cells `from..=to` lays, read in order.
+fn slot_over(track: &TrackView, (from, to): (i64, i64), fit: FitMiss) -> Option<Slot> {
+    let mut run = RunScan::default();
+    for n in from..=to {
+        run.read(n, track.get(n), fit);
+    }
+    run.slot()
+}
+
 /// A track at `cruise` mm/s but for the cells `crawl` at a crawl, up to
 /// cell `end`.
 fn track_with_crawl(cruise: f64, crawl: (i64, i64), end: i64, fit: FitMiss) -> CellTrack {
@@ -32,7 +50,7 @@ fn track_with_crawl(cruise: f64, crawl: (i64, i64), end: i64, fit: FitMiss) -> C
         } else {
             cell(cruise, 300.0)
         };
-        track.push(n, bounds, H, fit);
+        track.push(n, bounds, (H, fit), false);
     }
     track
 }
@@ -42,7 +60,8 @@ fn a_crawl_leaves_room_for_the_widest_grid_side_the_lead_budget_covers_before_it
     let fit = FitMiss::of(0.005, 50.0);
     let crawl_cells = (800, 810);
     let track = track_with_crawl(10.0, crawl_cells, 1200, fit);
-    let slot = Slot::over(&track, crawl_cells, fit).expect("the run crawls");
+    let track = view(&track, fit);
+    let slot = slot_over(&track, crawl_cells, fit).expect("the run crawls");
     let crawl = Crawl::found(slot, 1, &track, -1, (H, fit), &|n| track.get(n))
         .expect("the side fits the budget");
     let budget_cells = (VALLEY_LEAD_BUDGET_S / H).floor() as i64;
@@ -62,7 +81,7 @@ fn a_crawl_leaves_room_for_the_widest_grid_side_the_lead_budget_covers_before_it
             .rebuild(widest);
     let (first, last) = crawl.before.cells;
     let most = (first..=last)
-        .filter_map(|n| crawl.before.rebuild_where(n, |_| true))
+        .filter_map(|n| crawl.before.rebuild_where(n, &track, |_| true))
         .fold(0.0, f64::max);
     assert!(
         0.0 < most && most <= whole_side,
@@ -82,18 +101,17 @@ fn the_block_screen_leaves_every_cell_s_rebuild_as_its_own_bound_reads_it() {
             let wave = libm::sin(n as f64 * 0.05);
             cell(10.0 + 4.0 * wave, 300.0 + 250.0 * wave)
         };
-        track.push(n, bounds, H, fit);
+        track.push(n, bounds, (H, fit), false);
     }
-    let slot = Slot::over(&track, crawl_cells, fit).expect("the run crawls");
+    let track = view(&track, fit);
+    let slot = slot_over(&track, crawl_cells, fit).expect("the run crawls");
     let crawl = Crawl::found(slot, 1, &track, -1, (H, fit), &|n| track.get(n))
         .expect("the side fits the budget");
     let side = &crawl.before;
     let leaders = side.leaders.as_ref().expect("the side leaves room");
     let whole = leaders.side.rebuild(side.width);
-    let own: Vec<f64> = leaders
-        .cells
-        .iter()
-        .map(|cell| leaders.within.at(cell.distance, cell.speed, cell.accel))
+    let own: Vec<f64> = (side.cells.0..=side.cells.1)
+        .map(|n| leaders.at(n, side.cells.0, &track).rebuild(&leaders.within))
         .collect();
     let (least, most) = own
         .iter()
@@ -101,7 +119,7 @@ fn the_block_screen_leaves_every_cell_s_rebuild_as_its_own_bound_reads_it() {
             (lo.min(rebuild), hi.max(rebuild))
         });
     assert!(
-        least < most && own.len() > 2 * super::REBUILD_SCREEN_CELLS,
+        least < most && own.len() as i64 > 2 * super::REBUILD_SCREEN_CELLS,
         "the side's cells read one rebuild, {least}..{most}, over {} cells",
         own.len()
     );
@@ -111,7 +129,7 @@ fn the_block_screen_leaves_every_cell_s_rebuild_as_its_own_bound_reads_it() {
             let n = side.cells.0 + offset as i64;
             let expected = (rebuild > threshold).then(|| rebuild.min(whole));
             assert_eq!(
-                side.rebuild_where(n, |bound| bound > threshold),
+                side.rebuild_where(n, &track, |bound| bound > threshold),
                 expected,
                 "cell {n} over the threshold {threshold}"
             );
@@ -125,7 +143,8 @@ fn a_crawl_s_after_side_waits_for_the_lead_budget_past_its_run() {
     let crawl_cells = (800, 810);
     let budget_cells = (VALLEY_LEAD_BUDGET_S / H).floor() as i64;
     let short = track_with_crawl(10.0, crawl_cells, crawl_cells.1 + budget_cells / 4, fit);
-    let slot = Slot::over(&short, crawl_cells, fit).expect("the run crawls");
+    let short = view(&short, fit);
+    let slot = slot_over(&short, crawl_cells, fit).expect("the run crawls");
     let mut crawl = Crawl::found(slot, 1, &short, -1, (H, fit), &|n| short.get(n))
         .expect("the side fits the budget");
     assert!(
@@ -133,6 +152,7 @@ fn a_crawl_s_after_side_waits_for_the_lead_budget_past_its_run() {
         "the after side settled before its budget's cells were tracked"
     );
     let long = track_with_crawl(10.0, crawl_cells, crawl_cells.1 + budget_cells + 1, fit);
+    let long = view(&long, fit);
     assert!(crawl.resolve_after(&long, false, (H, fit), &|n| long.get(n)));
     let after = crawl.after.clone().expect("the after side settled");
     assert!(after.cells.0 == crawl_cells.0 && after.cells.1 > crawl_cells.1);
@@ -146,7 +166,8 @@ fn a_crawl_with_a_rest_inside_its_budget_leaves_no_room_before_it() {
     let fit = FitMiss::of(0.005, 50.0);
     let crawl_cells = (800, 810);
     let track = track_with_rest(crawl_cells, 780, fit);
-    let slot = Slot::over(&track, crawl_cells, fit).expect("the run crawls");
+    let track = view(&track, fit);
+    let slot = slot_over(&track, crawl_cells, fit).expect("the run crawls");
     let crawl = Crawl::found(slot, 1, &track, -1, (H, fit), &|n| track.get(n))
         .expect("a rest bounds the side");
     assert_eq!(crawl.before, Reserve::none(crawl_cells));
@@ -161,7 +182,8 @@ fn a_rest_within_the_slot_s_reach_past_the_budget_bounds_the_side() {
     let budget_cells = (VALLEY_LEAD_BUDGET_S / H).floor() as i64;
     let rest = crawl_cells.0 - budget_cells - 5;
     let track = track_with_rest(crawl_cells, rest, fit);
-    let mut slot = Slot::over(&track, crawl_cells, fit).expect("the run crawls");
+    let track = view(&track, fit);
+    let mut slot = slot_over(&track, crawl_cells, fit).expect("the run crawls");
     let past_rest =
         track.path(rest + 1, crawl_cells.0 - 1).1 + track.drift(rest + 1, crawl_cells.1, H, fit);
     let without = Crawl::found(slot, 1, &track, -1, (H, fit), &|n| track.get(n));
@@ -187,7 +209,7 @@ fn track_with_rest(crawl: (i64, i64), rest: i64, fit: FitMiss) -> CellTrack {
         } else {
             cell(1.0, 300.0)
         };
-        track.push(n, bounds, H, fit);
+        track.push(n, bounds, (H, fit), false);
     }
     track
 }
