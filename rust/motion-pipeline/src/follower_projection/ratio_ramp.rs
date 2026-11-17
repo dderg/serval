@@ -2404,9 +2404,9 @@ impl RatioSmoothing {
     /// would multiply their weights and rebuild it steeper than either.
     /// Laid crawl valleys never overlap. The turning guard leaves room for
     /// the sides from the same rule, so a new crawl valley reaches back all
-    /// of `before`, and a widened one holds zero from its end, on path the
-    /// projection has not taken, or fails loudly: the guard cannot see what
-    /// the projection has taken.
+    /// of `before`, and one an advance reads widened holds zero from its
+    /// end, on path the projection has not taken, or fails loudly: the
+    /// guard cannot see what the projection has taken.
     fn place_valley(
         &mut self,
         turn: f64,
@@ -2427,6 +2427,7 @@ impl RatioSmoothing {
             );
         }
         let back = self.back_reach_limit(turn);
+        let read = self.advance_reads_the_weight();
         let overlapped = self
             .valleys
             .iter_mut()
@@ -2441,7 +2442,7 @@ impl RatioSmoothing {
                      crawl valley {last:?}"
                 );
                 assert!(
-                    back + SPAN_LOOKUP_SLACK_MM >= turn - last.end,
+                    !read || back + SPAN_LOOKUP_SLACK_MM >= turn - last.end,
                     "follower projection: the crawl at s={turn} widens the crawl valley {last:?} \
                      from {} mm back, but the projection has taken the path to {back} mm before it",
                     turn - last.end
@@ -2497,11 +2498,7 @@ impl RatioSmoothing {
     /// leaders rest, whose zero speed leaves its steps unread; a follower
     /// with no advance reads none.
     fn assert_weight_continuous(&self) {
-        if self
-            .width
-            .rule
-            .is_none_or(|rule| rule.advance_slope_s == 0.0)
-        {
+        if !self.advance_reads_the_weight() {
             return;
         }
         let crawls = self
@@ -2529,6 +2526,14 @@ impl RatioSmoothing {
                 );
             }
         }
+    }
+
+    /// Whether an advance reads the weight the valleys make: a follower
+    /// with no advance reads none.
+    fn advance_reads_the_weight(&self) -> bool {
+        self.width
+            .rule
+            .is_some_and(|rule| rule.advance_slope_s != 0.0)
     }
 
     /// Records the seams of both tables' spans not yet examined, and
@@ -2655,7 +2660,8 @@ impl RatioSmoothing {
     /// from the end alone would let the projection take its path. A crawl
     /// valley a valley still to come may reach widens instead
     /// ([`Self::place_valley`]), holding the weight at zero from its end, so
-    /// the path from there stays untaken while one can.
+    /// where an advance reads the weight the path from there stays untaken
+    /// while one can.
     fn unlaid_valley_reach(&self, table_end: f64) -> f64 {
         let budget_back_from = |s: f64| {
             self.trail
@@ -2678,7 +2684,7 @@ impl RatioSmoothing {
             .iter()
             .rev()
             .find(|valley| valley.kind == ValleyKind::Crawl)
-            .filter(|last| last.reach_end() > table_end - unlaid)
+            .filter(|last| self.advance_reads_the_weight() && last.reach_end() > table_end - unlaid)
             .map_or(table_end, |last| last.end);
         unlaid.max(table_end - widened_from)
     }

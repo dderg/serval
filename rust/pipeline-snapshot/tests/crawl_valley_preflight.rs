@@ -734,3 +734,22 @@ fn a_crawl_valley_widens_from_the_edge_of_the_taken_path() {
         &config,
     );
 }
+
+/// `voron_first_layers_zhop.gcode` on the straight-line snapshot printer,
+/// whose extruder has no advance: a crawl here widens the last crawl
+/// valley over path the projection has taken, which nothing reads.
+const PRIME_AFTER_A_HOP: &str = "G90
+M83
+G1 X119.827 Y125.753 Z2 F30000
+G1 X124.431 Y101.534 F9000
+G1 Z2.2
+G1 E.8 F1500
+G1 X124.414 Y101.674 E.00476
+G1 X124.427 Y102.682 E.03391
+";
+
+#[test]
+fn a_follower_without_an_advance_widens_crawl_valleys_over_taken_path() {
+    let config = corpus::repo().join("snapshots/cases/straight_line/printer.cfg");
+    corpus::plan("prime_after_a_hop", PRIME_AFTER_A_HOP, &config).expect("the print plans");
+}
