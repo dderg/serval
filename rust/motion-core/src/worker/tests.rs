@@ -588,6 +588,101 @@ fn a_start_hold_delays_the_next_move_to_the_held_instant() {
     h.shutdown();
 }
 
+const DWELL_S: f64 = 1.5;
+
+struct MockedWorker {
+    h: TestWorker,
+    sink: AnchoredSink,
+    clock: Arc<host_rt::clock::MockClock>,
+}
+
+impl MockedWorker {
+    fn spawn() -> Self {
+        let clock = host_rt::clock::MockClock::new();
+        let router = host_rt::passthrough_queue::PassthroughRouter::with_clock(
+            Arc::clone(&clock) as Arc<dyn host_rt::clock::Clock + Send + Sync>
+        );
+        let timeline = ExecutionTimeline {
+            frontier: Arc::new(CommittedFrontier::unexecuted()),
+            anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+            router: Arc::new(Mutex::new(router)),
+        };
+        let sink = AnchoredSink::on(&timeline);
+        let h = spawn_on_timeline(
+            cfg(),
+            AxisChainSet::default(),
+            vec![0.0, 0.0, 0.0, 0.0],
+            sink.clone(),
+            timeline,
+        );
+        Self { h, sink, clock }
+    }
+
+    fn host_now(&self) -> f64 {
+        self.sink.router.lock_ok().host_now_secs()
+    }
+
+    fn start_after_dwell(&self, start: [f64; 3]) -> f64 {
+        self.h.dwell_try_start(DWELL_S).unwrap().recv().unwrap();
+        let before = self.sink.starts_host.lock_ok().len();
+        let end = [start[0] + 30.0, start[1], start[2]];
+        self.h.submit_move(line(2, start, end)).unwrap();
+        self.h.flush().unwrap();
+        self.sink.starts_host.lock_ok()[before]
+    }
+}
+
+#[test]
+fn a_dwell_long_after_the_last_move_counts_from_a_fresh_start() {
+    let mut w = MockedWorker::spawn();
+    w.h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    w.h.flush().unwrap();
+    w.clock.advance(Duration::from_secs(10));
+    let ordered = w.host_now();
+
+    let move_start = w.start_after_dwell([30.0, 0.0, 0.0]);
+
+    let earliest = ordered + crate::anchor::DEFAULT_LEAD_SECS + DWELL_S;
+    assert!(
+        move_start >= earliest - 1e-9,
+        "the move after the dwell starts at {move_start}, before {earliest}: the dwell \
+         counted from the stream's stale end"
+    );
+    w.h.shutdown();
+}
+
+#[test]
+fn a_dwell_before_the_first_move_counts_from_a_fresh_start() {
+    let mut w = MockedWorker::spawn();
+    let ordered = w.host_now();
+
+    let move_start = w.start_after_dwell([0.0, 0.0, 0.0]);
+
+    let earliest = ordered + crate::anchor::DEFAULT_LEAD_SECS + DWELL_S;
+    assert!(
+        move_start >= earliest - 1e-9,
+        "the first move starts at {move_start}, before {earliest}: the dwell ahead of it \
+         was lost"
+    );
+    w.h.shutdown();
+}
+
+#[test]
+fn a_dwell_after_a_start_hold_counts_from_the_hold() {
+    let mut w = MockedWorker::spawn();
+    let held = w.host_now() + 3.0;
+    w.h.hold_start_until_try_start(held).unwrap().recv().unwrap();
+
+    let move_start = w.start_after_dwell([0.0, 0.0, 0.0]);
+
+    assert!(
+        move_start >= held + DWELL_S - 1e-9,
+        "the move starts at {move_start}, before the hold {held} plus the dwell"
+    );
+    w.h.shutdown();
+}
+
 #[test]
 fn finite_homing_admission_and_cancellation_preserve_backpressure() {
     struct BlockedEndpoint;
