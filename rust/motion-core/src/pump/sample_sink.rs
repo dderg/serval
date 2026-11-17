@@ -911,6 +911,7 @@ pub struct SampleEndpoint {
     mcu_retired: Arc<RetiredRuns>,
     buzz: Option<ActiveBuzz>,
     fatal: Option<String>,
+    mcu_shut_down: bool,
 }
 
 impl SampleEndpoint {
@@ -946,6 +947,7 @@ impl SampleEndpoint {
             next_outbound_order: 0,
             mcu_retired: Arc::new(RetiredRuns::new()),
             fatal: None,
+            mcu_shut_down: false,
             buzz: None,
         })
     }
@@ -996,6 +998,12 @@ impl SampleEndpoint {
 
     pub fn owns_oid(&self, oid: u32) -> bool {
         self.lanes.iter().any(|lane| lane.cfg.oid == oid)
+    }
+
+    /// The mcu drops every command from here on and acks no barrier, so the
+    /// endpoint stops sending and stops waiting on the barriers outstanding.
+    pub fn on_mcu_shutdown(&mut self) {
+        self.mcu_shut_down = true;
     }
 
     fn reject_latched_fatal(&self) -> Result<(), SendError> {
@@ -1963,6 +1971,9 @@ impl SampleEndpoint {
     }
 
     pub fn tick(&mut self) -> Result<(), SendError> {
+        if self.mcu_shut_down {
+            return Ok(());
+        }
         self.reject_latched_fatal()?;
         let (now, freq) = self.clock_now()?;
         self.check_barrier_deadline(now, freq)

@@ -258,3 +258,31 @@ def test_every_command_the_live_host_refuses_is_refused_by_the_planner():
 
 def test_a_curve_the_live_host_runs_is_not_reported_as_dropped():
     assert treatment("G5") == Treatment.CURVE
+
+
+class CheckedBench(FailingBench):
+    """The bench as it passes the planner check; timing must not run."""
+
+    def check(self, arguments):
+        return preflight.BenchRun(0, "", "")
+
+
+def test_verdict_only_skips_the_exclusive_timing_pass(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(
+        preflight.engine_build_id, "tree_build_id", lambda root: "tree"
+    )
+    gcode = tmp_path / "print.gcode"
+    gcode.write_text("G90\nG1 X1 F600\nG1 X2\n")
+    verdict = preflight.main(
+        [
+            str(gcode),
+            "--config",
+            str(printer_cfg(tmp_path, MACROS)),
+            "--verdict-only",
+        ],
+        bench_factory=lambda: CheckedBench({}),
+    )
+    assert verdict != preflight.Verdict.FAIL
+    assert "VERDICT" in capsys.readouterr().out
