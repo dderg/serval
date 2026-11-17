@@ -35,11 +35,17 @@ fn plans_within_the_extruder_limits(name: &str, gcode: &str, config: &std::path:
     assert!(excesses.is_empty(), "{}: {excesses:#?}", audit.summary());
 }
 
-/// A zigzag of `count` moves `pitch_mm` long along X, each `pitch_mm`
-/// across Y, at 100 mm/s; move `index` extrudes what `extrude(index)` says.
-fn zigzag(pitch_mm: f64, count: usize, extrude: impl Fn(usize) -> Option<f64>) -> String {
-    let (x0, y0) = (100.0, 100.0);
-    let mut gcode = format!("G90\nM83\nG1 X{x0} Y{y0} F6000\n");
+/// `lead_in`, then a zigzag of `count` moves `pitch_mm` long along X, each
+/// `pitch_mm` across Y, at 100 mm/s; move `index` extrudes what
+/// `extrude(index)` says.
+fn zigzag(
+    lead_in: &str,
+    pitch_mm: f64,
+    count: usize,
+    extrude: impl Fn(usize) -> Option<f64>,
+) -> String {
+    let (x0, y0) = (ZIGZAG_START_X, ZIGZAG_Y);
+    let mut gcode = format!("G90\nM83\n{lead_in}G1 X{x0} Y{y0} F6000\n");
     for index in 1..=count {
         let x = x0 + pitch_mm * index as f64;
         let y = if index % 2 == 1 { y0 + pitch_mm } else { y0 };
@@ -48,6 +54,9 @@ fn zigzag(pitch_mm: f64, count: usize, extrude: impl Fn(usize) -> Option<f64>) -
     }
     gcode
 }
+
+const ZIGZAG_START_X: f64 = 100.0;
+const ZIGZAG_Y: f64 = 100.0;
 
 const TRIAGE_PITCH_MM: f64 = 0.0125;
 const TRIAGE_MOVES: usize = 200;
@@ -62,7 +71,7 @@ const ZIGZAG_E_PER_MOVE: f64 = 0.0005;
 #[test]
 fn an_unshaped_travel_zigzag_plans() {
     let config = unshaped_bench_printer("unshaped_travel_zigzag");
-    let gcode = zigzag(TRIAGE_PITCH_MM, TRIAGE_MOVES, |_| None);
+    let gcode = zigzag("", TRIAGE_PITCH_MM, TRIAGE_MOVES, |_| None);
     corpus::plan("unshaped_travel_zigzag", &gcode, &config).expect("the zigzag plans");
 }
 
@@ -71,7 +80,7 @@ fn an_unshaped_travel_zigzag_plans() {
 #[test]
 fn an_unshaped_sweep_zigzag_plans() {
     let config = unshaped_bench_printer("unshaped_sweep_zigzag");
-    let gcode = zigzag(SWEEP_PITCH_MM, SWEEP_MOVES, |_| None);
+    let gcode = zigzag("", SWEEP_PITCH_MM, SWEEP_MOVES, |_| None);
     corpus::plan("unshaped_sweep_zigzag", &gcode, &config).expect("the zigzag plans");
 }
 
@@ -80,21 +89,28 @@ fn an_unshaped_sweep_zigzag_plans() {
 #[test]
 fn an_unshaped_extruding_zigzag_fits_the_extruder() {
     let config = unshaped_bench_printer("unshaped_extruding_zigzag");
-    let gcode = zigzag(TRIAGE_PITCH_MM, TRIAGE_MOVES, |_| Some(ZIGZAG_E_PER_MOVE));
+    let gcode = zigzag("", TRIAGE_PITCH_MM, TRIAGE_MOVES, |_| Some(ZIGZAG_E_PER_MOVE));
     plans_within_the_extruder_limits("unshaped_extruding_zigzag", &gcode, &config);
 }
 
-/// The triage's zigzag with one extruding move in its middle: the crawls
-/// whose read range holds it lay valleys and the guard sizes them; those
-/// past it lay none.
+/// The triage's travel zigzag after an extruding line and a straight
+/// travel `TRAVEL_PAST_REACH_MM` long, past the 4.6 mm reach of its crawls
+/// and the ramp of the line's ratio step (`0.5·v·RATIO_RAMP_MAX_TIME_S`,
+/// 1.5 mm at 100 mm/s): its crawls lay no valley, and the line extrudes
+/// within the extruder's limits.
 #[test]
-fn an_unshaped_zigzag_with_one_extrusion_fits_the_extruder() {
-    let config = unshaped_bench_printer("unshaped_zigzag_one_extrusion");
-    let middle = TRIAGE_MOVES / 2;
-    let gcode = zigzag(TRIAGE_PITCH_MM, TRIAGE_MOVES, |index| {
-        (index == middle).then_some(ZIGZAG_E_PER_MOVE)
-    });
-    plans_within_the_extruder_limits("unshaped_zigzag_one_extrusion", &gcode, &config);
+fn an_unshaped_travel_zigzag_past_an_extrusion_fits_the_extruder() {
+    const LINE_MM: f64 = 4.0;
+    const TRAVEL_PAST_REACH_MM: f64 = 8.0;
+    const LINE_E: f64 = 0.15;
+    let config = unshaped_bench_printer("unshaped_zigzag_past_extrusion");
+    let line_end = ZIGZAG_START_X - TRAVEL_PAST_REACH_MM;
+    let line_start = line_end - LINE_MM;
+    let lead_in = format!(
+        "G1 X{line_start} Y{ZIGZAG_Y} F6000\nG1 X{line_end} Y{ZIGZAG_Y} E{LINE_E}\n"
+    );
+    let gcode = zigzag(&lead_in, TRIAGE_PITCH_MM, TRIAGE_MOVES, |_| None);
+    plans_within_the_extruder_limits("unshaped_zigzag_past_extrusion", &gcode, &config);
 }
 
 /// #903's minimized scenario fuzz case (seed 8): the `heaters` sim base,

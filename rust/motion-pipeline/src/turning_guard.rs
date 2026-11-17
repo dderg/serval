@@ -16,6 +16,7 @@ use crate::types::{
 mod kernel_cells;
 mod screen;
 mod shadow;
+mod travel;
 mod valley;
 mod variation;
 
@@ -24,6 +25,7 @@ use shadow::{
     AdvanceDemand, CellMotion, FollowerKernels, GridMemo, GridSample, PlannedGrid, Ride,
     ShapedSample, shaped_at,
 };
+use travel::{Ahead, ExtrudingCells, TravelCrawl};
 use valley::{CellBounds, CellTrack, Crawl, FitMiss, RunScan, TrackView};
 use variation::{PhaseSpan, phase_spans, variation_over};
 
@@ -135,11 +137,15 @@ pub(crate) struct TurningGuard {
 
 /// Where the follower projection may lay advance valleys: the grid cells
 /// scanned for crawls, in order up to `scanned`, the run of crawling cells
-/// still open from `run` as `run_scan` reads it, and the crawls found
-/// whose valleys a cell still to check may read.
+/// still open from `run` as `run_scan` reads it, the crawls found whose
+/// valleys a cell still to check may read, the runs of crawling cells
+/// along which the follower may extrude nothing within the projection's
+/// read range, and where it extrudes.
 struct Valleys {
     track: CellTrack,
     crawls: Vec<Crawl>,
+    travels: Vec<TravelCrawl>,
+    extruding: ExtrudingCells,
     scanned: i64,
     run: Option<i64>,
     run_scan: RunScan,
@@ -399,6 +405,8 @@ impl TurningGuard {
             valleys: Valleys {
                 track: CellTrack::default(),
                 crawls: Vec::new(),
+                travels: Vec::new(),
+                extruding: ExtrudingCells::default(),
                 scanned: 0,
                 run: None,
                 run_scan: RunScan::default(),
@@ -503,6 +511,8 @@ impl TurningGuard {
         self.standing = None;
         self.valleys.track.clear();
         self.valleys.crawls.clear();
+        self.valleys.travels.clear();
+        self.valleys.extruding.clear();
         self.valleys.scanned = 0;
         self.valleys.run = None;
         self.valleys.run_scan = RunScan::default();
@@ -626,11 +636,17 @@ impl TurningGuard {
 
     /// Whether every crawl whose valley may reach back to cell `n` is
     /// found: the cells are scanned past it and no run of crawling cells
-    /// starting by it is still open.
+    /// starting by it is still open or waits to learn whether the follower
+    /// extrudes in reach of it.
     fn scanned_through(&self, n: i64) -> bool {
         let valleys = &self.valleys;
         let all = self.entries.closed && valleys.scanned >= self.last_cell();
-        (all || valleys.scanned > n) && valleys.run.is_none_or(|start| start > n)
+        (all || valleys.scanned > n)
+            && valleys.run.is_none_or(|start| start > n)
+            && valleys
+                .travels
+                .iter()
+                .all(|travel| travel.cleared.is_some() || travel.cells().0 > n)
     }
 
     /// Scans the cells the planned motion has arrived for in order, each
@@ -671,9 +687,14 @@ impl TurningGuard {
                 }
             }
             let anchored = bounds_a_run || n.rem_euclid(window) == 0;
+            let read = ((n - self.span.0) as f64 * h, (n + 1 + ahead) as f64 * h);
+            let extrudes = self.extrudes_over(read);
             let track = &mut self.valleys.track;
+            let floor_before = track.floor_through_end();
             track.push(n, bounds, (h, fit), anchored);
             track.store_last(window);
+            let floors = (floor_before, track.floor_through_end());
+            self.valleys.extruding.push(n, extrudes, floors);
             self.valleys.scanned += 1;
         }
         let all = self.entries.closed && self.valleys.scanned >= last_cell;
@@ -683,6 +704,9 @@ impl TurningGuard {
                     return Some(binding);
                 }
             }
+        }
+        if let Some(binding) = self.decide_travels(all) {
+            return Some(binding);
         }
         let fit = self.valleys.fit;
         let mut crawls = std::mem::take(&mut self.valleys.crawls);
@@ -784,14 +808,10 @@ impl TurningGuard {
         Some(crawling)
     }
 
-    /// Closes the run of crawling cells `start..=end` into a crawl, the
-    /// one valley the projection lays across the crawls along it, with
-    /// room left for its before side ([`Crawl::found`]). Where that side
-    /// may reach back past [`VALLEY_LEAD_BUDGET_S`] of motion, the run is
-    /// scanned again after the back-off it returns, which lowers the
-    /// budgets its kernels read and with them the rate the side's width
-    /// grows with; where even a crawl at the fit's tolerance of a rate
-    /// would, it fails loudly.
+    /// Closes the run of crawling cells `start..=end`: into a crawl where
+    /// the follower extrudes along it or within the leaders' reach behind
+    /// it ([`ExtrudingCells::behind`]), else into a [`TravelCrawl`] that
+    /// waits to read the reach ahead ([`Self::decide_travels`]).
     fn close_run(&mut self, start: i64, end: i64) -> Option<Binding> {
         let h = self.h();
         let (back, ahead) = self.span;
@@ -806,6 +826,72 @@ impl TurningGuard {
             self.valleys.run_scan.slot().expect(
                 "turning guard: a run of crawling cells holds a cell the leaders may crawl in",
             );
+        let floor_before_start = {
+            let bounds = |n: i64| self.tracked_bounds(n);
+            TrackView::new(&self.valleys.track, &bounds, (h, fit)).floor_through(start - 1)
+        };
+        let extrudes_behind = self.valleys.extruding.behind(
+            (start, end),
+            floor_before_start,
+            slot.width.1,
+            (h, fit),
+        );
+        if extrudes_behind {
+            return self.lay_crawl(slot, line);
+        }
+        let floor_through_end = self.valleys.track.floor_through_end();
+        self.valleys
+            .travels
+            .push(TravelCrawl::new(slot, line, floor_through_end));
+        None
+    }
+
+    /// Decides each [`TravelCrawl`] still waiting off the cells tracked
+    /// past it: one whose reach ahead extrudes is laid as a crawl
+    /// ([`Self::lay_crawl`]), one whose reach ahead is clear stays, cleared
+    /// through the cell that proved it, until a re-plan rescans that cell.
+    fn decide_travels(&mut self, all: bool) -> Option<Binding> {
+        let h = self.h();
+        let fit = self.valleys.fit;
+        let track = &self.valleys.track;
+        let last = (track.end() - 1, track.floor_through_end());
+        let mut index = 0;
+        while index < self.valleys.travels.len() {
+            let travel = self.valleys.travels[index];
+            if travel.cleared.is_some() {
+                index += 1;
+                continue;
+            }
+            match travel.ahead(&self.valleys.extruding, last, all, (h, fit)) {
+                Ahead::Waits => index += 1,
+                Ahead::Clear(cell) => {
+                    self.valleys.travels[index].cleared = Some(cell);
+                    index += 1;
+                }
+                Ahead::Extrudes => {
+                    self.valleys.travels.remove(index);
+                    if let Some(binding) = self.lay_crawl(travel.slot, travel.line) {
+                        return Some(binding);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Lays the crawl over `slot`, the one valley the projection lays
+    /// across the crawls along its run, with room left for its before side
+    /// ([`Crawl::found`]). Where that side may reach back past
+    /// [`VALLEY_LEAD_BUDGET_S`] of motion, the run is scanned again after
+    /// the back-off it returns, which lowers the budgets its kernels read
+    /// and with them the rate the side's width grows with; where even a
+    /// crawl at the fit's tolerance of a rate would, it fails loudly.
+    fn lay_crawl(&mut self, slot: valley::Slot, line: u32) -> Option<Binding> {
+        let h = self.h();
+        let (back, ahead) = self.span;
+        let fit = self.valleys.fit;
+        let (start, end) = slot.cells;
+        let (from, to) = (start as f64 * h, (end + 1) as f64 * h);
         let segment_table_start = -1;
         let found = {
             let bounds = |n: i64| self.tracked_bounds(n);
@@ -819,8 +905,7 @@ impl TurningGuard {
                 None
             }
             Err(overreach) => {
-                self.valleys.scanned = start;
-                self.truncate_track_from(start);
+                self.rescan_from(start);
                 if overreach.width_at_rest > overreach.covered {
                     ValleyStuck {
                         crawl: from,
@@ -842,13 +927,54 @@ impl TurningGuard {
         }
     }
 
+    /// Scans the cells from `start` on anew, the run of crawling cells
+    /// starting there and every crawl and [`TravelCrawl`] after it with
+    /// them; a [`TravelCrawl`] before it cleared by those cells reads them
+    /// again.
+    fn rescan_from(&mut self, start: i64) {
+        let valleys = &mut self.valleys;
+        valleys.scanned = start;
+        valleys.run = None;
+        valleys.crawls.retain(|crawl| crawl.cells().0 < start);
+        valleys.travels.retain(|travel| travel.cells().0 < start);
+        for travel in &mut valleys.travels {
+            if travel.cleared.is_some_and(|cell| cell >= start) {
+                travel.cleared = None;
+            }
+        }
+        self.truncate_track_from(start);
+    }
+
+    /// Whether a guarded follower extrudes on a move over the planned time
+    /// `[from, to]`, by its ratio in reach.
+    fn extrudes_over(&self, (from, to): (f64, f64)) -> bool {
+        let guarded = |summary: &MoveSummary| {
+            summary.ratio.is_some_and(|(axis, ratio)| {
+                ratio > 0.0 && self.followers.iter().any(|(guarded, _)| *guarded == axis)
+            })
+        };
+        let emitted = self.history.partition_point(|summary| summary.t1 <= from);
+        let held = self
+            .entries
+            .summaries
+            .partition_point(|summary| summary.t1 <= from);
+        self.history
+            .range(emitted..)
+            .chain(&self.entries.summaries[held..])
+            .take_while(|summary| summary.t0 < to)
+            .any(guarded)
+    }
+
     /// Forgets the cells tracked from `n` on, which are scanned anew.
     fn truncate_track_from(&mut self, n: i64) {
-        let anchor = (n < self.valleys.track.stored_from()).then(|| {
+        let (anchor, floor_before) = {
             let bounds = |m: i64| self.tracked_bounds(m);
-            TrackView::new(&self.valleys.track, &bounds, (self.h(), self.valleys.fit)).anchor(n)
-        });
+            let track = TrackView::new(&self.valleys.track, &bounds, (self.h(), self.valleys.fit));
+            let anchor = (n < self.valleys.track.stored_from()).then(|| track.anchor(n));
+            (anchor, track.floor_through(n - 1))
+        };
         self.valleys.track.truncate_from(n, anchor);
+        self.valleys.extruding.truncate_from(n, floor_before);
         for crawl in &mut self.valleys.crawls {
             crawl.forget_track_from(n);
         }
@@ -1263,14 +1389,24 @@ impl TurningGuard {
         let rescan_from = valleys
             .crawls
             .iter()
-            .filter(|crawl| crawl.cells().1 >= n)
-            .map(|crawl| crawl.cells().0)
+            .map(Crawl::cells)
+            .chain(valleys.travels.iter().map(TravelCrawl::cells))
+            .filter(|cells| cells.1 >= n)
+            .map(|cells| cells.0)
             .chain(valleys.run.take())
             .fold(n, i64::min);
         valleys.crawls.retain(|crawl| crawl.cells().1 < rescan_from);
         for crawl in &mut valleys.crawls {
             if crawl.reach().1 >= rescan_from {
                 crawl.reopen_after();
+            }
+        }
+        valleys
+            .travels
+            .retain(|travel| travel.cells().1 < rescan_from);
+        for travel in &mut valleys.travels {
+            if travel.cleared.is_some_and(|cell| cell >= rescan_from) {
+                travel.cleared = None;
             }
         }
         valleys.scanned = valleys.scanned.min(rescan_from);
@@ -1290,21 +1426,26 @@ impl TurningGuard {
         let Valleys {
             track,
             crawls,
+            travels,
+            extruding,
             scanned,
             run,
             ..
         } = &mut self.valleys;
         crawls.retain(|crawl| crawl.reach().1 >= first_cell);
+        travels.retain(|travel| travel.cleared.is_none_or(|cell| cell >= first_cell));
         let budget_cells = (VALLEY_LEAD_BUDGET_S / h).ceil() as i64;
         let keep = crawls
             .iter()
             .map(|crawl| crawl.cells().0)
+            .chain(travels.iter().map(|travel| travel.cells().0))
             .chain(*run)
             .fold(first_cell.min(*scanned), i64::min)
             - ahead
             - 3
             - budget_cells;
         track.trim_before(keep);
+        extruding.trim_before(keep);
         keep
     }
 
@@ -1655,7 +1796,15 @@ impl TurningGuard {
         let h = self.h();
         let (back, ahead) = self.span;
         let timing = &self.entries.timing;
-        let crawls_found_to = self.valleys.run.unwrap_or(self.valleys.scanned) as f64 * h;
+        let crawls_found_to = self
+            .valleys
+            .travels
+            .iter()
+            .filter(|travel| travel.cleared.is_none())
+            .map(|travel| travel.cells().0)
+            .chain(self.valleys.run)
+            .fold(self.valleys.scanned, i64::min) as f64
+            * h;
         let unchecked_from = self
             .entries
             .unproven
@@ -1665,12 +1814,25 @@ impl TurningGuard {
             .min(crawls_found_to);
         let unchecked_cell = (unchecked_from / h).floor() as i64;
         let budget_cells = (VALLEY_LEAD_BUDGET_S / h).ceil() as i64;
-        let sides_from = self
+        let reopens = |(_, last): (i64, i64), reach: i64| {
+            last + budget_cells + ahead + 2 >= unchecked_cell
+                || reach.saturating_add(ahead + 2) >= unchecked_cell
+        };
+        let crawl_sides = self
             .valleys
             .crawls
             .iter()
             .filter(|crawl| crawl.cells().1 + budget_cells + ahead + 2 >= unchecked_cell)
-            .map(|crawl| crawl.before.cells.0 as f64 * h)
+            .map(|crawl| crawl.before.cells.0);
+        let travel_runs = self
+            .valleys
+            .travels
+            .iter()
+            .filter(|travel| reopens(travel.cells(), travel.cleared.unwrap_or(i64::MAX)))
+            .map(|travel| travel.cells().0);
+        let sides_from = crawl_sides
+            .chain(travel_runs)
+            .map(|cell| cell as f64 * h)
             .fold(unchecked_from, f64::min);
         let touched_from = sides_from - (back + 2) as f64 * h;
         let earliest = touched_from - (ahead + back + 2) as f64 * h - VALLEY_LEAD_BUDGET_S;

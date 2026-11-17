@@ -228,6 +228,13 @@ impl CellTrack {
         self.anchors.front().map_or(self.base, |anchor| anchor.cell)
     }
 
+    /// The least path summed through the last cell tracked.
+    pub fn floor_through_end(&self) -> f64 {
+        self.cells
+            .back()
+            .map_or(self.before_stored.before.floor, |cell| cell.through.floor)
+    }
+
     #[cfg(test)]
     pub fn stored_cells(&self) -> i64 {
         self.cells.len() as i64
@@ -435,6 +442,12 @@ impl<'a> TrackView<'a> {
 
     fn through(&self, n: i64) -> Odometer {
         self.anchor(n + 1).before
+    }
+
+    /// The least path summed through cell `n`, a tracked cell or the one
+    /// before the first.
+    pub fn floor_through(&self, n: i64) -> f64 {
+        self.through(n).floor
     }
 
     /// Cell `n`, one before those stored, as the track summed it: replayed
