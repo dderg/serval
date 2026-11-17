@@ -141,13 +141,14 @@ impl ExtrudingCells {
 /// within the leaders' reach ahead too. `through_end` is the
 /// [`Odometer`] reading through its last cell; `cleared` the cell through
 /// which the track proved the reach ahead extrudes nothing, `None` while
-/// it waits.
+/// it waits, and `through_cleared` the reading through it.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TravelCrawl {
     pub slot: Slot,
     pub line: u32,
     through_end: f64,
     pub cleared: Option<i64>,
+    through_cleared: f64,
 }
 
 /// What the track says of a [`TravelCrawl`]'s reach ahead.
@@ -164,6 +165,7 @@ impl TravelCrawl {
             line,
             through_end,
             cleared: None,
+            through_cleared: through_end,
         }
     }
 
@@ -193,17 +195,28 @@ impl TravelCrawl {
         Ahead::Waits
     }
 
+    /// Marks the reach ahead clear through cell `cell`, the odometer
+    /// reading `through` through it.
+    pub fn clear(&mut self, cell: i64, through: f64) {
+        self.cleared = Some(cell);
+        self.through_cleared = through;
+    }
+
     /// Fails loudly where the ramps of an extrusion starting at cell `n`,
     /// up to `ramp` wide, the odometer reading `before` it, reach within
-    /// the leaders' reach of a run cleared through `n` or later: the
-    /// projection lays a valley there the guard left no room for.
+    /// the leaders' reach of a cleared run: the projection would lay a
+    /// valley there the guard left no room for. The leaders' path only
+    /// grows, so the path to `n` is at least the path to the cleared cell,
+    /// which the clear proved longer than the reach and the widest ramp of
+    /// a move then admitted: this fails only for a ramp wider than that,
+    /// past a velocity limit raised mid-stream above every limit before.
     pub fn assert_clear_of(&self, n: i64, before: f64, ramp: f64) {
         let Some(cleared) = self.cleared else {
             return;
         };
-        let path = before - ramp - self.through_end;
+        let path = before.max(self.through_cleared) - ramp - self.through_end;
         assert!(
-            n > self.slot.cells.1 && path > self.slot.width.1,
+            path > self.slot.width.1,
             "turning guard: the crawl run over cells {:?} (line {}), cleared through cell {cleared}, \
              has an extrusion at cell {n} whose {ramp} mm ramp reaches {path} mm of it, within its \
              {} mm reach",

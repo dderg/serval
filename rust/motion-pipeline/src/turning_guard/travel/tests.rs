@@ -127,13 +127,29 @@ fn a_rescan_forgets_the_extruding_cells_it_reads_again() {
     ));
 }
 
+/// A run cleared once the path ahead outgrew its reach and the widest
+/// ramp then admitted: an extrusion after it whose ramp is no wider passes
+/// however low the fitted odometer's bound reads there (leaders slower
+/// than the fit's speed miss lower it), one wider fails loudly.
+fn cleared_travel() -> (TravelCrawl, i64) {
+    let cell = RUN.1 + cells_over(REACH_MM + RAMP_CAP_MM);
+    let mut cleared = travel();
+    cleared.clear(cell, reading(cell));
+    (cleared, cell)
+}
+
+#[test]
+fn an_extrusion_past_a_cleared_run_within_the_ramp_cap_passes() {
+    let (cleared, cell) = cleared_travel();
+    let below_the_clear = reading(RUN.1);
+
+    cleared.assert_clear_of(cell + 1, below_the_clear, RAMP_CAP_MM);
+}
+
 #[test]
 #[should_panic(expected = "within its 1 mm reach")]
-fn an_extrusion_within_the_reach_of_a_cleared_run_fails_loudly() {
-    let mut cleared = travel();
-    cleared.cleared = Some(RUN.1 + 1);
-    let wide_ramp = 4.0 * RAMP_CAP_MM;
-    let n = RUN.1 + cells_over(REACH_MM + RAMP_CAP_MM) + 1;
+fn an_extrusion_past_a_cleared_run_with_a_wider_ramp_fails_loudly() {
+    let (cleared, cell) = cleared_travel();
 
-    cleared.assert_clear_of(n, reading(n - 1), wide_ramp);
+    cleared.assert_clear_of(cell + 1, reading(cell), 4.0 * RAMP_CAP_MM);
 }

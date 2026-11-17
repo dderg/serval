@@ -879,7 +879,7 @@ impl TurningGuard {
             match travel.ahead(&self.valleys.extruding, last, ramp_cap, all) {
                 Ahead::Waits => index += 1,
                 Ahead::Clear(cell) => {
-                    self.valleys.travels[index].cleared = Some(cell);
+                    self.valleys.travels[index].clear(cell, last.1);
                     index += 1;
                 }
                 Ahead::Extrudes => {
