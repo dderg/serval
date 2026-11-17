@@ -30,7 +30,9 @@ STROKE_GAP_MM = 10.0
 START_XY = (40.0, 50.0)
 SQUARE_HEADINGS = ((1, 0), (0, 1), (-1, 0), (0, -1))
 PRINT_TIMEOUT_S = 600.0
-CRAWL_EXPECTED_S = 60
+CRAWL_EXPECTED_S = 30
+SLOW_SECTION_PLAYED_S = 5.0
+SHUTDOWN_POLL_S = 0.1
 BENCH_AB_STEP_LINES = (0, 3)
 NS_PER_S = 1e9
 FIRST_LAYERS = (
@@ -118,6 +120,18 @@ def _crawl_print(row: CrawlPrint) -> list[str]:
     return lines + lead_out + ["G1 E-0.5 F2400", "G1 Z5 F600", "M400"]
 
 
+def _lead_s(row: CrawlPrint) -> float:
+    """Printer time from the first step to the slow section, at cruise."""
+    pair_mm = 2 * STROKE_MM + STROKE_GAP_MM
+    return row.lead_pairs * pair_mm / (PRINT_FEED / 60.0) + row.rest_ms / 1000.0
+
+
+def _played_since_first_step(control, now_ns: int) -> float:
+    stepped = [control.get_step_times(line) for line in BENCH_AB_STEP_LINES]
+    firsts = [times["first_ns"] for times in stepped if times["count"]]
+    return (now_ns - min(firsts)) / NS_PER_S if firsts else 0.0
+
+
 def _events(world) -> list[dict]:
     events = []
     for line in world.events_text().splitlines():
@@ -152,6 +166,10 @@ def _first_step_after(control, issued_s: float) -> float:
     ],
 )
 def test_a_slow_section_starts_on_a_pi(sim_world, monkeypatch, row):
+    """Plays the lead-in and SLOW_SECTION_PLAYED_S of the slow section, then
+    cancels: the start is what overran on the bench, within 3 s of it, and
+    what the planning front holds before the set-off is planned whether or
+    not the rest of the run plays."""
     monkeypatch.setenv("SERVAL_HOST_COMPUTE_SCALE", str(PI_COMPUTE_SCALE))
     world = sim_world(
         lambda w: configs.bench_print_config(w.h7_pty, str(w.gcode_dir)),
@@ -163,9 +181,20 @@ def test_a_slow_section_starts_on_a_pi(sim_world, monkeypatch, row):
         control.reset_step_times(line)
     gcode = world.gcode_dir / "crawl.gcode"
     gcode.write_text("\n".join(_crawl_print(row)) + "\n")
+    played_s = _lead_s(row) + SLOW_SECTION_PLAYED_S
 
     issued_s = world.vclock.now_ns() / NS_PER_S
-    world.print_file(gcode, timeout=PRINT_TIMEOUT_S)
+    world.gcode_ok(f"SDCARD_PRINT_FILE FILENAME={gcode.name}")
+    world.wait_until(
+        lambda: (
+            world.shutdown_line() is not None
+            or _played_since_first_step(control, world.vclock.now_ns())
+            >= played_s
+        ),
+        timeout=FIRST_STEP_TIMEOUT_S + played_s,
+        what=f"{played_s:.1f}s of the print played",
+        poll=SHUTDOWN_POLL_S,
+    )
 
     with (world.log_dir / "start_latency.jsonl").open("a") as stream:
         stream.write(
@@ -182,6 +211,9 @@ def test_a_slow_section_starts_on_a_pi(sim_world, monkeypatch, row):
     fatal = [name for name in FATAL_EVENTS if name in names]
     assert not fatal, world.log_tail()[-3000:]
     assert world.shutdown_line() is None, world.log_tail()[-3000:]
+    state = world.status({"print_stats": None})["print_stats"]["state"]
+    assert state == "printing", state
+    world.gcode_ok("CANCEL_PRINT", timeout=PRINT_TIMEOUT_S)
 
 
 def _first_step_s(world, control, issue) -> float:
