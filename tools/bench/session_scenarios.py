@@ -39,8 +39,8 @@ DWELL_PENDING_S = 2.0
 ESTOP_RECOVERY_AFTER_S = 5.5
 RESTART_WATCH_S = 10.0
 TIMELINE_TIMEOUT_S = 1800.0
-SOAK_PAUSE_AFTER_S = soak_gcode.PLANNED_PRINT_S / 2
-SOAK_TIMELINE_TIMEOUT_S = 3 * soak_gcode.PLANNED_PRINT_S
+SOAK_PAUSE_AFTER_S = soak_gcode.SESSION_PRINT.planned_print_s / 2
+SOAK_TIMELINE_TIMEOUT_S = 3 * soak_gcode.SESSION_PRINT.planned_print_s
 
 
 class Unit(enum.Enum):
@@ -419,7 +419,7 @@ SOAK_SCENARIOS = (
     Scenario(
         "soak_mesh_session",
         PACER_ISSUE,
-        Gcode(source=soak_gcode.PATH, setup=(LOAD_WAVY_MESH,)),
+        Gcode(source=soak_gcode.SESSION_PRINT.path, setup=(LOAD_WAVY_MESH,)),
         (
             START,
             Action(Act.PAUSE, SOAK_PAUSE_AFTER_S),

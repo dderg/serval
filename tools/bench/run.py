@@ -206,12 +206,14 @@ def start_run(
     config.write_text(config_text)
 
     deployed = read_deployed()
+    settled = throttle.settle_host()
     prepare_printer(config)
     remote_name = f"bench_{run_dir.name}.gcode"
     upload(remote_name, sanitized)
     summary: dict = {
         **source,
         "deployed": deployed,
+        "settled_host": settled,
         "sanitized_lines": len(lines),
         "step_benchmarks": mcu_step_benchmarks(),
     }

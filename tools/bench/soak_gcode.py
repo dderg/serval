@@ -1,31 +1,48 @@
-"""The soak print: a long slicer-like print stacked from the sim prints.
+"""Soak prints: long slicer-like prints stacked from the sim prints.
 
-uv run python tools/bench/soak_gcode.py    # writes PATH and prints it
+uv run python tools/bench/soak_gcode.py    # writes every soak print, prints them
 
-voron_first_layers.gcode whole, then BODY_REPEATS times its layers above
+voron_first_layers.gcode whole, then `body_repeats` times its layers above
 the first followed by voron_dense_top_layers.gcode, each block's Z shifted
 to start one LAYER_HEIGHT_MM above the block before: perimeters and dense
-top infill alternating for PLANNED_PRINT_S at the printer's pace (what
+top infill alternating for `planned_print_s` at the printer's pace (what
 gcode_replay_bench plans for the file on printer.cfg), from gcode the repo
-already has. The file is generated, never committed (2.5 MB); the same
-sources give the same bytes.
+already has. Each print is sized so its soak row fits one bench hold
+(hold_plan.py): SESSION_PRINT runs twice in one klippy session, LONG_PRINT
+once, the longest continuous print a hold leaves room for. The files are
+generated, never committed; the same sources give the same bytes.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
 SIM_GCODE = BENCH.parents[1] / "tools" / "sim" / "gcode"
 FIRST_LAYERS = SIM_GCODE / "voron_first_layers.gcode"
 DENSE_TOP = SIM_GCODE / "voron_dense_top_layers.gcode"
-PATH = BENCH / "gcode" / "generated" / "soak.gcode"
+GENERATED = BENCH / "gcode" / "generated"
 LAYER_CHANGE = ";LAYER_CHANGE"
 LAYER_HEIGHT_MM = 0.2
-BODY_REPEATS = 8
-PLANNED_PRINT_S = 1283.0
 Z_WORD = re.compile(r"(?<=\s)Z(-?\d*\.?\d+)")
+
+
+@dataclass(frozen=True)
+class SoakPrint:
+    name: str
+    body_repeats: int
+    planned_print_s: float
+
+    @property
+    def path(self) -> Path:
+        return GENERATED / f"{self.name}.gcode"
+
+
+SESSION_PRINT = SoakPrint("soak_session", 2, 427.8)
+LONG_PRINT = SoakPrint("soak_long", 6, 997.8)
+SOAK_PRINTS = (SESSION_PRINT, LONG_PRINT)
 
 
 def code_of(line: str) -> str:
@@ -62,24 +79,28 @@ def upper_layers(lines: list[str]) -> list[str]:
     return lines[changes[1] :]
 
 
-def soak_lines() -> list[str]:
+def soak_lines(body_repeats: int) -> list[str]:
     first = FIRST_LAYERS.read_text().splitlines()
     blocks = (upper_layers(first), DENSE_TOP.read_text().splitlines())
     lines, top_mm = list(first), max(z_values(first))
-    for _ in range(BODY_REPEATS):
+    for _ in range(body_repeats):
         for block in blocks:
             moved, top_mm = stacked(block, top_mm)
             lines.extend(moved)
     return lines
 
 
-def ensure() -> Path:
-    text = "\n".join(soak_lines()) + "\n"
-    if not PATH.exists() or PATH.read_text() != text:
-        PATH.parent.mkdir(parents=True, exist_ok=True)
-        PATH.write_text(text)
-    return PATH
+def ensure(soak: SoakPrint) -> Path:
+    text = "\n".join(soak_lines(soak.body_repeats)) + "\n"
+    if not soak.path.exists() or soak.path.read_text() != text:
+        soak.path.parent.mkdir(parents=True, exist_ok=True)
+        soak.path.write_text(text)
+    return soak.path
+
+
+def ensure_all() -> list[Path]:
+    return [ensure(soak) for soak in SOAK_PRINTS]
 
 
 if __name__ == "__main__":
-    print(ensure())
+    print("\n".join(str(path) for path in ensure_all()))
