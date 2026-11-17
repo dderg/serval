@@ -1,9 +1,10 @@
 #![cfg(any(test, feature = "test-support"))]
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub use geometry::Move;
-use geometry::{CornerFitConfig, GcodePos, VelocityLimits};
+use geometry::{CornerFitConfig, GcodePos, SurfaceTransform, VelocityLimits};
 use pipeline_snapshot::waypoints::WaypointError;
 use pipeline_snapshot::{PlanStep, SnapshotError};
 use trajectory::{AxisChainSet, ClockedMotorSpan, ContinuousSegment};
@@ -14,7 +15,7 @@ use crate::pump::{
     JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionTracker, MAX_LEAD_SECS,
 };
 use crate::types::AxisKey;
-use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
+use motion_pipeline::{Control, Pipeline, StreamConfig, StreamInput, TrajectoryItem};
 
 const HARNESS_MCU_ID: u32 = 0;
 const HARNESS_MCU_FREQ_HZ: f64 = 64.0e6;
@@ -199,6 +200,27 @@ impl LiveScript {
             steps,
             move_lines: trace.lines.into_iter().skip(1).collect(),
         })
+    }
+
+    /// The inputs the live host feeds for the steps, with `mesh` active and
+    /// the toolhead standing where the plan starts, as the live host holds
+    /// it after loading the mesh and moving there.
+    pub fn take_inputs(&mut self, mesh: Option<Arc<SurfaceTransform>>) -> Vec<StreamInput> {
+        let steps = std::mem::take(&mut self.steps);
+        let mut inputs = Vec::with_capacity(steps.len() + 1);
+        if let Some(mesh) = mesh {
+            inputs.push(StreamInput::Control(Control::SetMesh {
+                mesh: Some(mesh),
+                gcode_z_rebase: self.home[2],
+            }));
+        }
+        for step in steps {
+            step.feed(|input| {
+                inputs.push(input);
+                true
+            });
+        }
+        inputs
     }
 }
 
