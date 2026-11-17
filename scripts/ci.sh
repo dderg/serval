@@ -9,6 +9,7 @@
 #                                   # replay Ir and a live 2-core replay vs tools/bench/throughput_baseline.json
 #   ./scripts/ci.sh sim-fuzz [fuzz.py args]
 #                                   # SIM_FUZZ_SEEDS (500) fresh scenario-fuzzer seeds in ~10 min slot batches, failures in .sim-fuzz/
+#   ./scripts/ci.sh ruff-format     # format Python with the ruff the gate checks with (ship.py runs it)
 #
 # Output policy: a terminal, GitHub Actions and `-v` get the live stream.
 # Everywhere else (agents, scripts capturing stdout) a gate prints one PASS
@@ -52,7 +53,7 @@ slot_kind() {
 job_name="${1:-all}"
 case "$job_name" in -v|--verbose) job_name="${2:-all}" ;; esac
 case "$job_name" in
-    install-hooks|-h|--help|help|sim-fuzz) ;;
+    install-hooks|-h|--help|help|sim-fuzz|ruff-format) ;;
     *)
         if [ -z "${SERVAL_SLOT_HELD:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI_NO_SLOT:-}" ]; then
             exec python3 "$ROOT/scripts/slots.py" run --kind "$(slot_kind "$job_name")" -- "$0" "$@"
@@ -367,21 +368,27 @@ job_watchdog_canary() {
     grep -qF 'runtime_liveness_ok' "$ROOT/src/stm32/watchdog.c"
 }
 
-# Keep in lockstep with .github/workflows/ci-lintformat.yaml: an unpinned
-# ruff drifts to whatever released last, so the local gate and CI disagree
-# the moment a new rule ships. Bump both together.
+# Keep in lockstep with .github/workflows/ci-lintformat.yaml, the uv dev group
+# (pyproject.toml, uv.lock) and .pre-commit-config.yaml; scripts/test_ci_ruff.py
+# holds them to it. An unpinned ruff drifts to whatever released last, so the
+# local gate and CI disagree the moment a new rule ships, and ship.py's
+# formatting commit fails the gate that runs right after it.
 RUFF_VERSION="0.15.21"
 
-job_ruff() {
-    if command -v uvx >/dev/null 2>&1; then
-        uvx "ruff@$RUFF_VERSION" check "$ROOT" &&
-            uvx "ruff@$RUFF_VERSION" format --check "$ROOT"
-    elif command -v ruff >/dev/null 2>&1; then
-        ruff check "$ROOT" && ruff format --check "$ROOT"
-    else
-        echo "ruff not installed (pip install ruff / uvx ruff)"
+pinned_ruff() {
+    if ! command -v uvx >/dev/null 2>&1; then
+        echo "uvx not found: the ruff jobs run ruff $RUFF_VERSION through uvx (install uv)"
         return 1
     fi
+    uvx "ruff@$RUFF_VERSION" "$@"
+}
+
+job_ruff() {
+    pinned_ruff check "$ROOT" && pinned_ruff format --check "$ROOT"
+}
+
+job_ruff_format() {
+    pinned_ruff format "$ROOT"
 }
 
 job_py_typecheck() {
@@ -672,6 +679,7 @@ case "$name" in
     panic-grep)       job=(job_panic_grep) ;;
     watchdog-canary)  job=(job_watchdog_canary) ;;
     ruff)             job=(job_ruff) ;;
+    ruff-format)      job=(job_ruff_format) ;;
     py)               job=(job_py "${1:-3.13}") ;;
     py-typecheck)     job=(job_py_typecheck) ;;
     docs)             job=(job_docs) ;;

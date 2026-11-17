@@ -140,7 +140,7 @@ def sync_main(branch: str) -> None:
 
 def format_tree(root: Path) -> None:
     run(["cargo", "fmt", "--all"], root / "rust")
-    run(["uv", "run", "ruff", "format", "."], root)
+    run(["./scripts/ci.sh", "ruff-format"], root)
     if git("status", "--porcelain", "--untracked-files=no"):
         git("add", "-u")
         git("commit", "-q", "-m", "Apply cargo fmt and ruff format")
