@@ -12,7 +12,7 @@
 //! layer planned on its own from rest reproduces the mechanism at the
 //! layers listed here.
 
-use corpus::extruder::{ExtruderExcess, ToolheadPhase};
+use corpus::extruder::{Commanded, ExtruderExcess};
 
 mod corpus;
 
@@ -57,7 +57,7 @@ fn assert_ramp_ends_hold(config: &str, layers: &[usize]) {
                             matches!(
                                 excess,
                                 ExtruderExcess::Acceleration {
-                                    phase: ToolheadPhase::Moving,
+                                    command: Commanded::Following,
                                     ..
                                 }
                             )

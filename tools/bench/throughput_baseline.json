@@ -1,18 +1,18 @@
 {
   "slice_lines": 1000,
-  "commit": "a4cc62f503d3895ba8383a80e2533195c9e3594c",
-  "reason": "the reachable speed plans trident_kernel's gate slice 7.8 % faster; the faster plan costs +4.6 % Ir; 2-core shortfall pinned to #836, Pi 3-core 2.34x",
+  "commit": "456ccfb7711e04d4ae03ebb9bf5d7b052fc0754e",
+  "reason": "leader sources carry acceleration at their seams: removes an extruder acceleration excess up to 1.71x on direct drive and 1.36x on bowden and brings shaped X/Y inside max_accel_deviation; quintic source start on extruding segments costs +1.95 % Ir on the ramp config; trident +0.15 %",
   "configs": {
     "tools/bench/configs/profiles/p3_voron_direct_drive_ramp.cfg": {
-      "ir": 12729386202,
+      "ir": 13117547463,
       "stream_secs": 5.807
     },
     "tools/bench/configs/profiles/p3_voron_direct_drive_kernel.cfg": {
-      "ir": 11364354667,
+      "ir": 11431850667,
       "stream_secs": 5.751
     },
     "tools/bench/configs/trident_kernel.cfg": {
-      "ir": 20560367963,
+      "ir": 20597359650,
       "stream_secs": 4.305
     }
   },
