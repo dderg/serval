@@ -210,7 +210,11 @@ rests, G92, relative/absolute E, step-lattice coordinates;
 raises the first violated invariant (`fuzzing/checks.py` names each and
 where its threshold comes from). Rest probes in the print file (M400, a
 mark pin, a dwell) let a paced wait read every motor's step counter at
-each rest. Worlds run 8 at a time (`--jobs`, `SIM_FUZZ_JOBS`); a failure
+each rest; probes are counted by mark-pin edges, and a flip during a
+PAUSE hold is counted without a check. Motors that move within 0.3 s of
+the pin fail `pin_order` (the pin flipped after the next move began);
+motors still at the wrong position fail `rest_steps`. Worlds run 8 at a
+time (`--jobs`, `SIM_FUZZ_JOBS`); a failure
 keeps `.sim-fuzz/<run>/seed-N/` with the scenario (`scenario.json`,
 `timeline.txt`, rendered `printer.cfg` and `print_*.gcode`), the world's
 logs, `result.json` and `repro.txt`; `--minimize` shrinks it into
