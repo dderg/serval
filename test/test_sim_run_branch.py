@@ -64,7 +64,11 @@ def run_sim(repo: Path, *args: str) -> tuple[int, str, Path]:
     result = subprocess.run(
         ["bash", str(repo / "tools" / "sim" / "run.sh"), "test", *args],
         cwd=repo,
-        env={**os.environ, "PATH": f"{fakes}:{os.environ['PATH']}", "OUT": str(out)},
+        env={
+            **os.environ,
+            "PATH": f"{fakes}:{os.environ['PATH']}",
+            "OUT": str(out),
+        },
         capture_output=True,
         text=True,
     )
