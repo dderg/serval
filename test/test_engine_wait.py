@@ -57,6 +57,20 @@ def test_shutdown_aborts_the_wait():
         engine_wait.wait_for(printer, poll, "stuck", engine_wait.UNBOUNDED)
 
 
+def test_a_result_served_after_shutdown_still_aborts_the_wait():
+    """#869: once an MCU reports shutdown the engine halts execution and a
+    drain-backed request resolves on the halted pipeline; it must not read as
+    done once the printer is shut down."""
+    printer = FakePrinter()
+
+    def poll():
+        printer.invoke_shutdown("emergency stop")
+        return True
+
+    with pytest.raises(FakeCommandError, match="dwell: shutdown while"):
+        engine_wait.wait_for(printer, poll, "dwell", engine_wait.UNBOUNDED)
+
+
 def test_slow_wait_emits_structured_log_events(monkeypatch):
     events = []
     monkeypatch.setattr(

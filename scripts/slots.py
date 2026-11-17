@@ -45,6 +45,10 @@ class SlotTimeout(RuntimeError):
     pass
 
 
+class NestedExclusive(RuntimeError):
+    pass
+
+
 def slot_count() -> int:
     count = int(os.environ.get(ENV_SLOTS, DEFAULT_SLOTS))
     if count < 1:
@@ -227,13 +231,20 @@ def slot(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     label: str = "",
 ):
-    if os.environ.get(ENV_HELD) and not exclusive:
+    if os.environ.get(ENV_HELD):
+        if exclusive:
+            raise NestedExclusive(
+                f"{label or 'an exclusive job'} asked for every slot inside a "
+                "held one: it would wait for itself"
+            )
         yield
         return
     lease = acquire(exclusive=exclusive, timeout=timeout, label=label)
+    os.environ[ENV_HELD] = "1"
     try:
         yield
     finally:
+        del os.environ[ENV_HELD]
         lease.release()
 
 
@@ -241,8 +252,7 @@ def run(command: list[str], exclusive: bool, timeout: float) -> int:
     with slot(
         exclusive=exclusive, timeout=timeout, label=" ".join(command)[:80]
     ):
-        env = {**os.environ, ENV_HELD: "1"}
-        return subprocess.run(command, env=env).returncode
+        return subprocess.run(command).returncode
 
 
 def main() -> int:
@@ -271,5 +281,5 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except SlotTimeout as exc:
+    except (SlotTimeout, NestedExclusive) as exc:
         sys.exit(f"slots: {exc}")
