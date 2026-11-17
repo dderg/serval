@@ -115,13 +115,43 @@ timed out nextest and distorted benchmarks. Heavy commands queue for one of
 except in CI takes one for its whole run (`CI_NO_SLOT=1` opts out), the `make`/`cargo` builds in
 `pending_baselines`, the fit audit and the fuzz replay take one, and `bench_compare.py`
 builds in a normal slot but measures in an exclusive one (all slots, nothing else heavy
-runs). Wrap your own loops: `python3 scripts/slots.py run [--exclusive] -- <cmd>`;
-`slots.py status` shows who holds the slots. Waiting is queued, prints the holders every
-60 s and fails after 2 h. Waiters are served first come, first served (a pid queue), so a
-chain of exclusive jobs cannot starve the others (it did, with the first version: a series
-of exclusive bench runs held every slot for 25+ minutes). An exclusive job still blocks all
-other heavy work while it runs: keep each one short and do not hold it across a session.
-Nested calls under a held slot do not take a second one.
+runs). Wrap your own loops: `python3 scripts/slots.py run --kind build|sim|sweep [--exclusive]
+-- <cmd>`. Every admitted job runs in its own transient systemd user scope
+(`serval-slot-<pid>-*.scope`, `scripts/job_scope.py`) with a hard memory cap per kind
+(`slots.CAPS`: build 8/12 GiB high/max, sim 1/2, sweep 12/14, 1-2 GiB swap; sweep also runs
+with RLIMIT_CORE=0, so systemd-coredump logs the crash but stores no core). On 11-17 at 00:44
+and 00:52 a ~55 GB sweep inside the SSH login session scope made systemd-oomd kill that whole
+scope, every agent with it. Now a job over its cap is OOM-killed alone, and `slots.py` exits
+99 with the job's name and peak. Without a user manager it fails loudly; a container sets
+`SERVAL_SLOT_UNCAPPED=1`. Heavy work started beside the slots still runs in the session scope:
+start it under `slots.py run`.
+Each admission is capped in time: 2400 s (`MAX_HOLD_S`), 900 s exclusive
+(`MAX_EXCLUSIVE_HOLD_S`), shorter with `--max-hold S`. At the cap the job's processes get
+SIGTERM, then SIGKILL 10 s later, and `slots.py` exits 98 naming the job. Long work is chunked
+into separate admissions: a sim fuzz hunt by seed range, a sweep by manifest slice, `ci.sh all`
+by job. 11-17: an exclusive preflight timing pass reached the queue head while a
+`run.sh fuzz --seeds 1000..2999` hunt held a slot for hours, and every waiter sat behind it with
+two slots idle. Now an exclusive head waits at most 2400 s for the drain, and a waiter behind it
+at most 2400 + 900 s per exclusive ahead of it. Holders of older slots.py copies have no cap,
+so `status` names them as unbounded. `scripts/preflight.py --verdict-only` skips the
+exclusive timing pass when only the planner check and verdict are needed.
+`slots.py status` prints the wait graph: each holder with its held seconds and cap, the queue
+with what each waiter wants, and what the head waits for.
+Waiting is queued, prints the graph every 60 s and fails after 2 h, or after 5 min when the
+queue head has not moved although it could start, or while a holder (or a process under one)
+sits in the queue: it would wait for itself. Waiters are served first come, first served (a pid
+queue), so a chain of exclusive jobs cannot starve the others (it did, with the first version: a
+series of exclusive bench runs held every slot for 25+ minutes). An exclusive job still blocks
+all other heavy work while it runs: keep each one short and do not hold it across a session.
+Nested calls under a held slot do not take a second one, in the holding process too (a
+`pending.run` cargo inside bench_compare's build slot once queued for a second slot behind an
+exclusive head that waited for the first: both sat until the 2 h timeout); an exclusive
+request inside a held slot fails at once, and so does a holder's descendant that lost
+`SERVAL_SLOT_HELD`. Take the slot before any other lock (`pending_baselines` takes it before
+`scratch.lock`, #906): a process holding a lock while it queues blocks everyone behind that lock.
+Slot counting does not bound load (11-17: load1 p50 79 with 3 slots, 52 % of the CPU outside
+any slot). Run sweeps and verification under `slots.py run` rather than beside it, and do not
+count on `nice -n 19`: ananicy-cpp renices `bash` to -4 here, and every child inherits it.
 
 # Starting and shipping a change
 
@@ -157,9 +187,16 @@ in one `edit`, and take the tag from the previous edit's response. Do not fall b
 edits reviewable and silently match more than you meant.
 # Hardware lock
 
-The Pi bench is shared: every use goes through `tools/bench/lock.py hold -- <cmd>`, which
-queues behind the current holder and prints who holds it and for how long (waits of
-20 minutes were seen). Hold it for the whole session script, not per command.
+The Pi bench is shared: every use takes `~/bench/.lock` (`tools/bench/lock.py hold -- <cmd>` or a
+bench tool's own lock), which queues behind the current holder and prints who holds it and for
+how long (waits of 20-47 minutes were seen). One hold = one self-contained unit of at most 30
+minutes that starts by restoring its deploy (sync, F401 firmware, `deploy.py settle`: printer.cfg,
+no bench drop-in or cpufreq cap, no orphaned Pi job, klippy idle). `lock.MAX_HOLD_S` = 1800 s from
+acquisition is the policy, no flag raises it: at the cap the hold's process tree is killed and it
+exits 124 naming the command and its elapsed time; nested holds share the outer deadline. Builds,
+`analyze.py`, checkers and reports run outside holds. `suite.py`, `qualify.py`, `ab.py`,
+`throughput_pi.py` and `throughput_recheck.py` split themselves into such holds and release the
+lock between them: never wrap them in `lock.py hold`.
 
 # Qualification
 
@@ -169,10 +206,15 @@ and prints `DEFERRED to qualification` for the two that needed the Pi per PR (th
 config's exact-tree `PINNED_CORES` window, the calibration's age, now 10 days). A PR that
 commits a `pi_window.json` for its exact tree is still held to it.
 
-A tag is gated by `uv run python scripts/qualify.py run [REV]` (one bench hold: deploy + F401
-identity, full suite, soak group, `throughput_pi.py`, calibration; README "Qualification").
-A pass pushes `qualified-<UTC date>[-n]`; a failure prints the bisect command.
-`qualify.py status` shows the debt; `land-pr.sh` prints it after each landing.
+A tag is gated by `uv run python scripts/qualify.py run [REV]`: resumable units `deploy`,
+`suite-1..4`, `soak-<row>` x2, `pi`, `calibration` (README "Qualification"), each one or more
+holds of at most 30 minutes, ~9 holds and ~1.5 h of bench in all instead of one 2.5 h hold.
+Each unit's record lives under `~/bench/qualifications/<rev>/units/`; a rerun skips a unit that
+passed for the same rev, F401 build id, expect-fail issues of its rows and Pi identity (serial,
+kernel, OS, dpkg status, boot config, toolchain, capture board) within 24 h, so a reboot or a lost
+lock costs one hold. A failed unit stops the run and prints the bisect command (one suite hold
+per candidate). `qualified-<UTC date>[-n]` is pushed only when every unit passed inside the
+window. `qualify.py status` shows the debt; `land-pr.sh` prints it after each landing.
 **Print from the latest `qualified-*` tag, not from main.**
 
 How far CI decides per config is the gate's `trust:` line (lowest prediction lowered by the worst

@@ -29,6 +29,7 @@ test-support = []
 [dev-dependencies]
 proptest = "1"
 planner-config = { path = "../planner-config", features = ["doc"] }
+source-tree = { path = "../source-tree" }
 
 [lints]
 workspace = true

@@ -2757,3 +2757,128 @@ fn a_span_keeps_its_velocity_into_its_rounded_end() {
     );
     close(span.eval_axis(0, end).unwrap().position, length);
 }
+
+fn steep_mesh() -> Arc<SurfaceTransform> {
+    let mut mesh = MeshGrid::new(
+        MeshGridSpec {
+            x_min: 10.0,
+            y_min: 10.0,
+            dx: 140.0,
+            dy: 140.0,
+            nx: 3,
+            ny: 3,
+            tension: 0.2,
+        },
+        vec![0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5],
+    )
+    .unwrap();
+    mesh.zero_at(110.0, 110.0);
+    Arc::new(SurfaceTransform::new(
+        mesh,
+        Fade::new(1.0, 10.0, 0.0).unwrap(),
+    ))
+}
+
+fn span_leaving_the_mesh(end_x: f64, distance_origin: f64) -> AnalyticMoveSpan {
+    let line = Segment::Line(Line::try_new([150.0, 150.0, 0.2], [end_x, 150.0, 0.2]).unwrap());
+    let phase = |t0, dt, s0: f64, v0, a0| {
+        LawSegment::new(
+            t0,
+            dt,
+            distance_origin + s0,
+            v0,
+            ScalarLaw::ConstAccel { a0 },
+        )
+    };
+    AnalyticMoveSpan::try_new(
+        move_with(line, vec![]),
+        Arc::from([
+            phase(0.0, 0.1, 0.0, 0.0, 10_000.0),
+            phase(0.1, 0.05, 50.0, 1_000.0, 0.0),
+            phase(0.15, 0.1, 100.0, 1_000.0, -10_000.0),
+        ]),
+        distance_origin,
+        0.0,
+        0.25,
+        Arc::from([150.0, 150.0, 0.2, 0.0]),
+        SurfaceMode::Variable(steep_mesh()),
+    )
+    .unwrap()
+}
+
+fn assert_one_seam_where_the_warped_z_steps(span: &AnalyticMoveSpan) {
+    let z_velocity = |t: f64| span.eval_axis(2, t).unwrap().velocity;
+
+    let seams = span
+        .surface_seam_times()
+        .expect("the edge crossing is located");
+
+    let [seam] = seams[..] else {
+        panic!("one crossing of a mesh edge, got seams {seams:?}");
+    };
+    let across = z_velocity(next_toward(seam, f64::INFINITY)) - z_velocity(next_toward(seam, 0.0));
+    let around = z_velocity(seam + 1e-6) - z_velocity(seam - 1e-6);
+    assert!(
+        around.abs() > 0.5 && (across - around).abs() < 1e-3,
+        "the warped Z steps {around} mm/s around the seam at {seam} but {across} mm/s across \
+         its neighbouring ulps"
+    );
+}
+
+#[test]
+fn a_surface_seam_lies_where_the_warped_z_leaves_the_mesh() {
+    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(300.0, 0.0));
+}
+
+#[test]
+fn a_surface_seam_reads_the_phases_past_the_span_distance_origin() {
+    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(300.0, 150.0));
+}
+
+#[test]
+fn a_patch_change_at_the_span_start_is_not_a_surface_seam() {
+    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(0.0, 0.0));
+}
+
+#[test]
+fn a_surface_seam_in_the_rounding_gap_between_two_phases_is_located() {
+    let line = Segment::Line(Line::try_new([240.0, 150.0, 0.2], [300.0, 150.0, 0.2]).unwrap());
+    let edge_distance = 50.0;
+    let accel = 10_000.0;
+    let speed_up_dt = next_toward(0.1, 0.0);
+    let speed_up = LawSegment::new(
+        0.0,
+        speed_up_dt,
+        0.0,
+        0.0,
+        ScalarLaw::ConstAccel { a0: accel },
+    );
+    let gap = edge_distance - speed_up.end_distance();
+    assert!(
+        gap > 0.0,
+        "the speed-up reaches {}",
+        speed_up.end_distance()
+    );
+    let cruise_start = edge_distance + gap;
+    let cruise_speed = accel * speed_up_dt;
+    let cruise_dt = (60.0 - cruise_start) / cruise_speed;
+    let cruise = LawSegment::new(
+        speed_up_dt,
+        cruise_dt,
+        cruise_start,
+        cruise_speed,
+        ScalarLaw::ConstAccel { a0: 0.0 },
+    );
+    let span = AnalyticMoveSpan::try_new(
+        move_with(line, vec![]),
+        Arc::from([speed_up, cruise]),
+        0.0,
+        0.0,
+        speed_up_dt + cruise_dt,
+        Arc::from([240.0, 150.0, 0.2, 0.0]),
+        SurfaceMode::Variable(steep_mesh()),
+    )
+    .unwrap();
+
+    assert_one_seam_where_the_warped_z_steps(&span);
+}

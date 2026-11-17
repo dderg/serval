@@ -159,7 +159,7 @@ class Bench:
     in a machine-wide slot, timed in all of them (scripts/slots.py)."""
 
     def build(self) -> None:
-        with slots.slot(label="preflight build"):
+        with slots.slot(slots.Kind.BUILD, label="preflight build"):
             built = subprocess.run(
                 [
                     "cargo",
@@ -182,11 +182,13 @@ class Bench:
             )
 
     def check(self, arguments: list[str]) -> BenchRun:
-        with slots.slot(label="preflight check"):
+        with slots.slot(slots.Kind.SWEEP, label="preflight check"):
             return bench_run([*arguments, "--synchronous", "--check"])
 
     def time(self, arguments: list[str]) -> BenchRun:
-        with slots.slot(exclusive=True, label="preflight timing"):
+        with slots.slot(
+            slots.Kind.SWEEP, exclusive=True, label="preflight timing"
+        ):
             return bench_run(arguments, ["taskset", "-c", gate.LIVE_CORES])
 
 
@@ -340,12 +342,23 @@ def bench_arguments(
     return arguments
 
 
+class Timing(enum.Enum):
+    MEASURE = "measure"
+    SKIP = "skip"
+
+
 def replay_print(
-    bench: Bench, arguments: list[str], replay: Replay, outcome: Outcome
+    bench: Bench,
+    arguments: list[str],
+    replay: Replay,
+    outcome: Outcome,
+    timing: Timing,
 ) -> Throughput | None:
     checked = replay_failure(bench.check(arguments))
     if checked is not None:
         judge_failure(checked, replay, outcome)
+        return None
+    if timing is Timing.SKIP:
         return None
     live = bench.time(arguments)
     staged = replay_failure(live)
@@ -372,11 +385,13 @@ def calibration_costs(commit: str) -> dict[str, float]:
         return cached[cpu][commit]
     gate.gate_cores()
     target = RUST / "target"
-    with slots.slot(label="preflight calibration build"):
+    with slots.slot(slots.Kind.BUILD, label="preflight calibration build"):
         gate.extract_commit(commit, target)
         tree = gate.commit_tree(target, commit)
         bench = gate.build_in_lab(tree / "rust", "calibration")
-    with slots.slot(exclusive=True, label="preflight calibration replay"):
+    with slots.slot(
+        slots.Kind.SWEEP, exclusive=True, label="preflight calibration replay"
+    ):
         costs = {
             config: gate.fastest_mean(
                 [
@@ -554,6 +569,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--no-pi", action="store_true", help="skip the Pi 5 estimate"
     )
+    parser.add_argument(
+        "--verdict-only",
+        action="store_true",
+        help="skip the exclusive timing pass: the planner check and verdict only",
+    )
     return parser.parse_args(argv)
 
 
@@ -596,7 +616,13 @@ def main(
     bench.build()
     with tempfile.TemporaryDirectory(prefix="preflight-") as scratch:
         arguments = bench_arguments(Path(scratch), front, replay, mesh)
-        timing = replay_print(bench, arguments, replay, outcome)
+        timing = replay_print(
+            bench,
+            arguments,
+            replay,
+            outcome,
+            Timing.SKIP if args.verdict_only else Timing.MEASURE,
+        )
     pi = None
     if timing is not None and timing.worst_x is not None and not args.no_pi:
         pi = pi_estimate(timing.worst_x, args.config)

@@ -2672,6 +2672,37 @@ fn a_lost_barrier_ack_trips_the_deadline_instead_of_waiting_forever() {
     );
 }
 
+/// #869: once its mcu reports shutdown, the barrier the mcu will never ack is
+/// moot, not lost, and nothing more reaches the wire.
+#[test]
+fn a_shut_down_mcu_leaves_its_barrier_unacked_without_a_fatal() {
+    let deadline_ticks = (BARRIER_ACK_DEADLINE_SECONDS * CYCLES_PER_SECOND) as u64;
+    let (mut h, _) = four_motor_harness();
+    let issued = run_cohort(&mut h, 2_000, 0.0);
+    h.endpoint.barrier_ack_deadline_secs = BARRIER_ACK_DEADLINE_SECONDS;
+    let (oid, seq) = *issued.last().expect("the cohort issued barriers");
+    let sent_clock = h
+        .endpoint
+        .barriers
+        .sent_clock_of(BarrierId { oid, seq })
+        .expect("the barrier reached the wire");
+
+    h.endpoint.on_mcu_shutdown();
+    let attempts = h.attempts.lock_ok().len();
+    h.now.store(sent_clock + deadline_ticks, Ordering::Relaxed);
+    h.endpoint
+        .tick()
+        .expect("a shut-down mcu's silence is not an endpoint failure");
+
+    assert!(
+        !h.heartbeats
+            .try_iter()
+            .any(|msg| matches!(msg, PumpMsg::StepcompressFatal { .. })),
+        "a shut-down mcu must not escalate to the fatal-transport action"
+    );
+    assert_eq!(h.attempts.lock_ok().len(), attempts);
+}
+
 /// The pacer used to only log a fatal tick, so a frame the egress guard
 /// refused was retried every 10 ms forever: the backlog froze, the retirement
 /// cohort never released and klippy's `wait_moves` hung with the hotend parked

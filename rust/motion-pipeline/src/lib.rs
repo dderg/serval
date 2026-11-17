@@ -54,7 +54,7 @@ impl Pipeline {
         Self {
             front: PlanningFront {
                 fit: FitStage::new(config.corner).into_driver(),
-                guard: TurningGuard::new(config.clone(), &chains),
+                guard: TurningGuard::new(config.clone(), &chains, &home_pos),
                 planner: Planner::new(config, Arc::clone(&workers)),
                 lowerer: Lowerer::new(chains.rest_support(), home_pos, t_start),
                 fitted_tap: None,
