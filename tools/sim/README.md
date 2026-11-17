@@ -220,7 +220,10 @@ keeps `.sim-fuzz/<run>/seed-N/` with the scenario (`scenario.json`,
 logs, `result.json` and `repro.txt`; `--minimize` shrinks it into
 `minimized/` while the same check still fails. `test_fuzz_smoke.py` runs
 a fixed seed set in the e2e suite; `./scripts/ci.sh sim-fuzz` runs fresh
-seeds.
+seeds through `hunt.py`: batches of about 10 minutes, each its own
+`slots.py run --kind sim` admission. A batch slots.py ends at its hold cap
+(exit 98) or memory cap (exit 99) stops the hunt with that exit, its
+unrecorded seeds left pending for a rerun of the same command.
 
 ## CI
 

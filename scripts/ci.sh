@@ -49,12 +49,12 @@ slot_kind() {
         *) echo build ;;
     esac
 }
-case "${1:-}" in
+job_name="${1:-all}"
+case "$job_name" in -v|--verbose) job_name="${2:-all}" ;; esac
+case "$job_name" in
     install-hooks|-h|--help|help|sim-fuzz) ;;
     *)
         if [ -z "${SERVAL_SLOT_HELD:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI_NO_SLOT:-}" ]; then
-            job_name="${1:-all}"
-            case "$job_name" in -v|--verbose) job_name="${2:-all}" ;; esac
             exec python3 "$ROOT/scripts/slots.py" run --kind "$(slot_kind "$job_name")" -- "$0" "$@"
         fi
         ;;
