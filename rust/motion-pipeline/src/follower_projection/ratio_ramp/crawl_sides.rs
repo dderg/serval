@@ -9,8 +9,11 @@ use geometry::{
 use super::super::{RatioSpan, SPAN_LOOKUP_SLACK_MM, Table};
 use super::{Crossing, NODE_SPACING_S, RampLeg, RatioSmoothing, Seam, StepRamps};
 
-/// Probes per leg the side trail reads the leaders at, both ends included
-/// once more.
+/// The fewest intervals per leg the side trail reads the leaders at; a
+/// longer leg gets one per [`NODE_SPACING_S`]. The most the leaders can be
+/// between two probes, `(v₁ + v₂ + A·Δt)/2`, is a side's crossing speed
+/// ([`crawl_side`]), so the spacing keeps it within `A·Δt/2` of the
+/// probes' own.
 const TRAIL_PROBES_PER_LEG: usize = 16;
 
 /// How far from its crawl, in step windows, a crawl valley owns ratio
@@ -61,11 +64,12 @@ impl SideTrail {
     pub(super) fn record(&mut self, leg: &RampLeg, table_end: f64) {
         let (t_start, t_end) = leg.support;
         self.legs += 1;
-        for index in 0..=TRAIL_PROBES_PER_LEG {
-            let t = if index == TRAIL_PROBES_PER_LEG {
+        let intervals = TRAIL_PROBES_PER_LEG.max(((t_end - t_start) / NODE_SPACING_S).ceil() as usize);
+        for index in 0..=intervals {
+            let t = if index == intervals {
                 t_end
             } else {
-                t_start + (t_end - t_start) * index as f64 / TRAIL_PROBES_PER_LEG as f64
+                t_start + (t_end - t_start) * index as f64 / intervals as f64
             };
             let s = (leg.start_s + leg.odometer.covered_until(t)).min(table_end);
             let (speed, path_accel) = Crossing::speed_and_path_accel(leg.shaped_leaders, t);
