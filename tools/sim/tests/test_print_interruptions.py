@@ -22,6 +22,7 @@ import pathlib
 import pytest
 
 from tools.sim import configs
+from tools.sim.world import SimError
 
 pytestmark = pytest.mark.needs_elf
 
@@ -376,9 +377,11 @@ def test_purge_after_cleannozzle_dwell_and_mesh_load(sim_world, topology):
 
 @pytest.mark.xfail(
     strict=True,
-    raises=AssertionError,
+    raises=(AssertionError, SimError),
     reason="#892: the API FIRMWARE_RESTART lands in the print's M400/G1, "
-    "which raises GreenletExit: 'Internal error on command' and a shutdown",
+    "which raises GreenletExit ('Internal error on command') and shuts "
+    "klippy down: the restart then ends ready with a shutdown line "
+    "(AssertionError) or stays in shutdown (SimError)",
 )
 @pytest.mark.parametrize("fraction", [0.02, 0.3])
 @pytest.mark.parametrize("topology", sorted(TOPOLOGIES))

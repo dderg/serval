@@ -1220,7 +1220,8 @@ class SimWorld:
                 return
             time.sleep(READY_POLL_S)
         raise SimError(
-            f"FIRMWARE_RESTART left klippy in {state!r}:\n"
+            f"FIRMWARE_RESTART left klippy in {state!r} "
+            f"(first shutdown line: {self.shutdown_line()!r}):\n"
             f"{self.klippy_log_text()[-3000:]}"
         )
 
