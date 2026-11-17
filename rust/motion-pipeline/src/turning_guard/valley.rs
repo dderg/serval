@@ -256,8 +256,32 @@ impl CellTrack {
             .push_back(TrackedCell::after(anchor, bounds, h, fit));
     }
 
-    pub fn get(&self, n: i64) -> CellBounds {
-        self.cells[self.index(n)].bounds
+    /// Forgets the cells from `n` on, which are tracked anew; where `n`
+    /// lies before the cells stored, the track goes on from `anchor`, the
+    /// sums before `n`.
+    pub fn truncate_from(&mut self, n: i64, anchor: Option<Anchor>) {
+        assert!(
+            n >= self.base,
+            "turning guard: cell {n} is not tracked, only [{}, {})",
+            self.base,
+            self.end()
+        );
+        while self.anchors.back().is_some_and(|anchor| anchor.cell > n) {
+            self.anchors.pop_back();
+        }
+        if n >= self.stored_from {
+            self.cells.truncate((n - self.stored_from) as usize);
+            return;
+        }
+        let anchor = anchor.expect("turning guard: tracking anew before the cells stored");
+        assert_eq!(
+            anchor.cell, n,
+            "turning guard: the sums before cell {n} anchor cell {}",
+            anchor.cell
+        );
+        self.cells.clear();
+        self.stored_from = n;
+        self.before_stored = anchor;
     }
 
     /// Stops tracking the cells before `n`, keeping the last anchor at or
@@ -270,25 +294,92 @@ impl CellTrack {
         while self.stored_from < base {
             self.pop_stored();
         }
-        assert_eq!(n, self.end(), "turning guard: cells are tracked in order");
-        let previous = self.cells.back();
-        let before = previous.map_or(self.before_base, |cell| cell.through);
-        let speed = bounds.speed.0;
-        let fast = speed > 2.0 * fit.speed;
-        let through = Odometer {
-            floor: before.floor + speed * h,
-            ceiling: before.ceiling + bounds.speed.1 * h,
-            turning: before.turning + if fast { bounds.turn * h } else { 0.0 },
-            stray: before.stray
-                + if fast {
-                    fit.speed * fit.speed / (2.0 * (speed - fit.speed)) * h
-                } else {
-                    fit.speed * h
-                },
-            fast_runs: before.fast_runs
-                + u32::from(fast && !previous.is_some_and(|cell| cell.fast)),
+        if stored && self.cells.is_empty() {
+            self.before_stored.fast_before = false;
+        }
+        while self
+            .anchors
+            .get(1)
+            .is_some_and(|anchor| anchor.cell <= base)
+        {
+            self.anchors.pop_front();
+        }
+    }
+
+    /// Stores at most the last `count` cells.
+    pub fn store_last(&mut self, count: i64) {
+        while self.cells.len() as i64 > count {
+            self.pop_stored();
+        }
+    }
+
+    fn pop_stored(&mut self) {
+        let Some(cell) = self.cells.pop_front() else {
+            return;
         };
-        self.cells.push_back(TrackedCell {
+        self.before_stored = cell.anchor_next(self.stored_from);
+        self.stored_from += 1;
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn stored(&self, n: i64) -> Option<&TrackedCell> {
+        usize::try_from(n - self.stored_from)
+            .ok()
+            .and_then(|index| self.cells.get(index))
+    }
+
+    /// The anchor of cell `n` where one is kept or the stored cells start
+    /// there.
+    fn anchor_at(&self, n: i64) -> Option<Anchor> {
+        if n == self.stored_from {
+            return Some(self.before_stored);
+        }
+        self.stored(n - 1)
+            .map(|cell| cell.anchor_next(n - 1))
+            .or_else(|| {
+                let index = self.anchors.partition_point(|anchor| anchor.cell < n);
+                self.anchors
+                    .get(index)
+                    .filter(|anchor| anchor.cell == n)
+                    .copied()
+            })
+    }
+
+    /// The last anchor at or before cell `n`.
+    fn anchor_before(&self, n: i64) -> Anchor {
+        let index = self.anchors.partition_point(|anchor| anchor.cell <= n);
+        assert!(
+            index > 0,
+            "turning guard: no anchor tracks cell {n}, the first is at {}",
+            self.anchored_from()
+        );
+        self.anchors[index - 1]
+    }
+}
+
+/// The crawl track as the crawl scan and the checks read it: the cells it
+/// stores, and before those the cells `bounds` gives, the sums through each
+/// replayed from the anchor before it as the track summed them, every cell
+/// replayed kept while the view lives.
+pub(super) struct TrackView<'a> {
+    track: &'a CellTrack,
+    bounds: &'a dyn Fn(i64) -> CellBounds,
+    h: f64,
+    fit: FitMiss,
+    replayed: RefCell<BTreeMap<i64, TrackedCell>>,
+}
+
+impl<'a> TrackView<'a> {
+    pub fn new(
+        track: &'a CellTrack,
+        bounds: &'a dyn Fn(i64) -> CellBounds,
+        (h, fit): (f64, FitMiss),
+    ) -> Self {
+        Self {
+            track,
             bounds,
             h,
             fit,
@@ -487,35 +578,45 @@ impl RunScan {
             if self.slot.is_some() {
                 self.since_last = strongest_of(self.since_last, leaders);
             }
-            let rate = (
-                (cell.accel.0 - fit.accel).max(0.0),
-                cell.accel.1 + fit.accel,
-            );
-            let width = (valley_reach(speed.0, rate.0), valley_reach(speed.1, rate.1));
-            let floor = (
-                if speed.0 == 0.0 || turns_around(speed.0, rate.1) {
-                    0.0
-                } else {
-                    speed.0 * speed.0 / rate.1
-                },
-                if rate.0 == 0.0 {
-                    f64::INFINITY
-                } else {
-                    speed.1 * speed.1 / rate.0
-                },
-            );
-            let here = Self {
-                cells: (n, n),
-                width,
-                floor,
-                speed: speed.1,
-            };
-            slot = Some(slot.map_or(here, |slot| Self {
-                cells: (slot.cells.0, n),
-                width: (slot.width.0.min(width.0), slot.width.1.max(width.1)),
-                floor: (slot.floor.0.min(floor.0), slot.floor.1.max(floor.1)),
-                speed: slot.speed.max(here.speed),
-            }));
+            return;
+        };
+        self.slot = Some(self.slot.map_or(here, |slot| Slot {
+            cells: (slot.cells.0, n),
+            width: (
+                slot.width.0.min(here.width.0),
+                slot.width.1.max(here.width.1),
+            ),
+            floor: (
+                slot.floor.0.min(here.floor.0),
+                slot.floor.1.max(here.floor.1),
+            ),
+            speed: slot.speed.max(here.speed),
+            leaders: strongest_of(strongest_of(slot.leaders, self.since_last), leaders),
+        }));
+        self.since_last = (0.0, 0.0);
+    }
+
+    /// The slot of the cells read, `None` where the fitted leaders cannot
+    /// crawl in any of them.
+    pub fn slot(&self) -> Option<Slot> {
+        self.slot
+    }
+}
+
+fn strongest_of(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0.max(b.0), a.1.max(b.1))
+}
+
+impl Slot {
+    /// The slot of cell `n` alone, `None` where the fitted leaders cannot
+    /// crawl in it.
+    fn of_cell(n: i64, cell: CellBounds, fit: FitMiss) -> Option<Self> {
+        let speed = (
+            (cell.speed.0 - fit.speed).max(0.0),
+            (cell.speed.1 + fit.speed).min(ADVANCE_VALLEY_SPEED_MM_S),
+        );
+        if speed.0 >= ADVANCE_VALLEY_SPEED_MM_S {
+            return None;
         }
         let rate = (
             (cell.accel.0 - fit.accel).max(0.0),
@@ -1050,9 +1151,10 @@ impl Crawl {
         while covered.through < to {
             covered.through += 1;
             let n = covered.through;
-            covered.most = covered
-                .most
-                .max(track.path(last + 1, n).0 - track.drift(last + 1, n, h, fit));
+            let start = *covered
+                .start
+                .get_or_insert_with(|| track.start_of(last + 1));
+            covered.most = covered.most.max(track.covered_since(start, n, h, fit));
             if n <= horizon {
                 covered.within_budget = covered.most;
             }

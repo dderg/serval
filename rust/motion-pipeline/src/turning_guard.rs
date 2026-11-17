@@ -315,7 +315,8 @@ impl CellCheck<'_> {
                     ),
                     0.0,
                 );
-                let binding = side.binding_ask(weighted, valley_cell, self.caps.max_accel_mm_s2);
+                let binding =
+                    side.binding_ask(weighted, valley_cell, self.caps.max_accel_mm_s2, self.track);
                 (
                     binding.map_or(asked, |binding| asked.max(binding)),
                     (window.0.min(side.window.0), window.1.max(side.window.1)),
@@ -699,7 +700,40 @@ impl TurningGuard {
             .timing
             .partition_point(|timing| timing.t1() <= from);
         while index < self.entries.timing.len() && self.entries.timing[index].t0 < to {
-            match self.crawling_of(index)? {
+            if let Crawling::Maybe = self.crawling_of(index)? {
+                break;
+            }
+            index += 1;
+        }
+        Some(self.tracked_bounds(n))
+    }
+
+    /// The shaped motion's bounds across cell `n`, a cell the scan has
+    /// read: the box of the moves it crosses where none may crawl, its
+    /// shadow convolution otherwise, joined over the followers.
+    fn tracked_bounds(&self, n: i64) -> CellBounds {
+        let h = self.h();
+        let (from, to) = (n as f64 * h, (n + 1) as f64 * h);
+        let emitted_from = self
+            .emitted
+            .partition_point(|emitted| emitted.timing.t1() <= from);
+        let held_from = self
+            .entries
+            .timing
+            .partition_point(|timing| timing.t1() <= from);
+        let emitted = self
+            .emitted
+            .range(emitted_from..)
+            .map(|emitted| (emitted.timing.t0, emitted.crawling));
+        let held = self.entries.timing[held_from..]
+            .iter()
+            .zip(&self.entries.crawling[held_from..])
+            .map(|(timing, crawling)| (timing.t0, *crawling));
+        let mut boxed: Option<CellBounds> = None;
+        for (_, crawling) in emitted.chain(held).take_while(|&(t0, _)| t0 < to) {
+            match crawling
+                .expect("turning guard: a tracked cell crosses a move the scan did not read")
+            {
                 Crawling::Never(bounds) => {
                     boxed = Some(boxed.map_or(bounds, |boxed| boxed.union(bounds)));
                 }
@@ -759,9 +793,10 @@ impl TurningGuard {
         let line = self.entries.moves[first.min(timing.len() - 1)]
             .source
             .start_line;
-        let track = &self.valleys.track;
-        let slot = Slot::over(track, (start, end), fit)
-            .expect("turning guard: a run of crawling cells holds a cell the leaders may crawl in");
+        let slot =
+            self.valleys.run_scan.slot().expect(
+                "turning guard: a run of crawling cells holds a cell the leaders may crawl in",
+            );
         let segment_table_start = -1;
         let found = {
             let bounds = |n: i64| self.tracked_bounds(n);

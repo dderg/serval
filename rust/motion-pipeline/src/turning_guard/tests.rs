@@ -90,7 +90,13 @@ fn most_held_over_slow_strokes(held: impl Fn(&TurningGuard) -> i64) -> i64 {
     let mut guard = TurningGuard::new(chain.config.clone(), &chain.chains, &HOME);
     let mut lines = vec![line(1, HOME, SLOW_STROKES[0], 0.0, CRAWL_FEED_MM_S)];
     for (seq, ends) in SLOW_STROKES.windows(2).enumerate() {
-        lines.push(line(seq + 2, ends[0], ends[1], STROKE_E_MM, CRAWL_FEED_MM_S));
+        lines.push(line(
+            seq + 2,
+            ends[0],
+            ends[1],
+            STROKE_E_MM,
+            CRAWL_FEED_MM_S,
+        ));
     }
     let mut most = 0;
     for item in chain.plan(&lines) {
