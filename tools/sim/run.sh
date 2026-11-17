@@ -92,8 +92,12 @@ esac
 while [[ $# -gt 0 ]]; do
     case $1 in
         --replay)
-            EXTRA_ARGS+=("$1" "$(realpath "$2")")
-            shift 2
+            EXTRA_ARGS+=("$1")
+            shift
+            while [[ $# -gt 0 && "$1" != -* ]]; do
+                EXTRA_ARGS+=("$(realpath "$1")")
+                shift
+            done
             ;;
         --branch|-b)
             BRANCH="$2"
