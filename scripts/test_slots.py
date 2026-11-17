@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import subprocess
@@ -28,7 +29,7 @@ def env(tmp_path, count):
     }
 
 
-def start(tmp_path, count, name, *flags):
+def start(tmp_path, count, name, *flags, hold=HOLD_SECONDS):
     return subprocess.Popen(
         [
             sys.executable,
@@ -41,7 +42,7 @@ def start(tmp_path, count, name, *flags):
             JOB,
             str(tmp_path / "log"),
             name,
-            str(HOLD_SECONDS),
+            str(hold),
         ],
         env=env(tmp_path, count),
     )
@@ -289,3 +290,133 @@ def test_a_build_holder_and_an_exclusive_queue_head_do_not_deadlock(
         for process in (holder, exclusive):
             if process is not None and process.poll() is None:
                 process.kill()
+
+
+def wait_until_held(tmp_path, pid):
+    board = lambda: slots.read_board(  # noqa: E731
+        tmp_path / "slots", slots.slot_count(), slots.Queue(tmp_path / "slots")
+    )
+    wait_for(lambda: pid in board().holders)
+
+
+def test_a_holder_waiting_in_the_queue_is_reported_as_a_stall(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SERVAL_SLOTS_DIR", str(tmp_path / "slots"))
+    monkeypatch.setenv("SERVAL_SLOTS", "1")
+    monkeypatch.delenv("SERVAL_SLOT_HELD", raising=False)
+    monkeypatch.setattr(slots, "STALL_SECONDS", 0.5)
+    (tmp_path / "slots").mkdir()
+    holder = start(tmp_path, 1, "h", hold=20)
+    try:
+        wait_until_held(tmp_path, holder.pid)
+        (tmp_path / "slots" / "queue").write_text(f"{holder.pid}\n")
+        with pytest.raises(slots.SlotStall, match=f"pid {holder.pid} HOLDS"):
+            slots.acquire(exclusive=True, timeout=20)
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_a_head_that_could_start_but_does_not_is_reported_as_a_stall(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SERVAL_SLOTS_DIR", str(tmp_path / "slots"))
+    monkeypatch.setenv("SERVAL_SLOTS", "1")
+    monkeypatch.delenv("SERVAL_SLOT_HELD", raising=False)
+    monkeypatch.setattr(slots, "STALL_SECONDS", 0.5)
+    stuck = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    try:
+        directory = tmp_path / "slots"
+        (directory / "waiting").mkdir(parents=True)
+        request = dict(exclusive=False, label="stuck", since=0)
+        (directory / "waiting" / f"{stuck.pid}.json").write_text(
+            json.dumps(request)
+        )
+        (directory / "queue").write_text(f"{stuck.pid}\n")
+        with pytest.raises(slots.SlotStall, match="does not move"):
+            slots.acquire(timeout=20)
+    finally:
+        stuck.kill()
+        stuck.wait()
+
+
+def test_a_child_that_lost_the_held_marker_fails_instead_of_queueing(tmp_path):
+    inner = (
+        "import os, subprocess, sys\n"
+        "env = {k: v for k, v in os.environ.items() if k != 'SERVAL_SLOT_HELD'}\n"
+        f"cmd = [sys.executable, {str(SCRIPT)!r}, 'run', '--timeout', '5',\n"
+        "       '--', sys.executable, '-c', 'pass']\n"
+        "done = subprocess.run(cmd, env=env, capture_output=True, text=True)\n"
+        "sys.stderr.write(done.stderr)\n"
+        "sys.exit(done.returncode)\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "run",
+            "--",
+            sys.executable,
+            "-c",
+            inner,
+        ],
+        env=env(tmp_path, 3),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "holds a slot" in result.stderr
+
+
+def test_status_shows_the_wait_graph(tmp_path):
+    holder = start(tmp_path, 3, "h", "--exclusive", hold=3)
+    try:
+        wait_for(
+            lambda: (
+                "0 of 3 slots free"
+                in subprocess.run(
+                    [sys.executable, str(SCRIPT), "status"],
+                    env=env(tmp_path, 3),
+                    capture_output=True,
+                    text=True,
+                ).stdout
+            )
+        )
+        shown = subprocess.run(
+            [sys.executable, str(SCRIPT), "status"],
+            env=env(tmp_path, 3),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert f"holds 3 slot(s): pid {holder.pid}" in shown
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_the_engine_sample_takes_its_slot_before_the_scratch_lock(
+    monkeypatch, tmp_path
+):
+    import pending_baselines as pending
+
+    order = []
+
+    @contextlib.contextmanager
+    def record(name):
+        order.append(name)
+        yield
+
+    monkeypatch.setattr(pending, "CACHE", tmp_path)
+    monkeypatch.setattr(pending, "ensure_commit", lambda sha: None)
+    monkeypatch.setattr(slots, "slot", lambda **_: record("slot"))
+    monkeypatch.setattr(pending, "commit_lock", lambda name: record("lock"))
+    monkeypatch.setattr(
+        pending, "sample_commit_locked", lambda sha, out: order.append("work")
+    )
+    pending.sample_commit("0123456789abcdef")
+    assert order == ["slot", "lock", "work"]

@@ -215,7 +215,10 @@ def sample_commit(sha: str) -> Path:
     if (out / "meta.json").exists():
         return out
     ensure_commit(sha)
-    with commit_lock(SCRATCH_TREE):
+    with (
+        slots.slot(label=f"engine sample {short(sha)}"),
+        commit_lock(SCRATCH_TREE),
+    ):
         if (out / "meta.json").exists():
             return out
         return sample_commit_locked(sha, out)

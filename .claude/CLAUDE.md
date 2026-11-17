@@ -116,15 +116,22 @@ except in CI takes one for its whole run (`CI_NO_SLOT=1` opts out), the `make`/`
 `pending_baselines`, the fit audit and the fuzz replay take one, and `bench_compare.py`
 builds in a normal slot but measures in an exclusive one (all slots, nothing else heavy
 runs). Wrap your own loops: `python3 scripts/slots.py run [--exclusive] -- <cmd>`;
-`slots.py status` shows who holds the slots. Waiting is queued, prints the holders every
-60 s and fails after 2 h. Waiters are served first come, first served (a pid queue), so a
-chain of exclusive jobs cannot starve the others (it did, with the first version: a series
-of exclusive bench runs held every slot for 25+ minutes). An exclusive job still blocks all
-other heavy work while it runs: keep each one short and do not hold it across a session.
+`slots.py status` prints the wait graph (holders, and the queue with what each waiter wants).
+Waiting is queued, prints the graph every 60 s and fails after 2 h, or after 5 min when the
+queue head has not moved although it could start, or while a holder (or a process under one)
+sits in the queue: it would wait for itself. Waiters are served first come, first served (a pid
+queue), so a chain of exclusive jobs cannot starve the others (it did, with the first version: a
+series of exclusive bench runs held every slot for 25+ minutes). An exclusive job still blocks
+all other heavy work while it runs: keep each one short and do not hold it across a session.
 Nested calls under a held slot do not take a second one, in the holding process too (a
 `pending.run` cargo inside bench_compare's build slot once queued for a second slot behind an
 exclusive head that waited for the first: both sat until the 2 h timeout); an exclusive
-request inside a held slot fails at once.
+request inside a held slot fails at once, and so does a holder's descendant that lost
+`SERVAL_SLOT_HELD`. Take the slot before any other lock (`pending_baselines` takes it before
+`scratch.lock`, #906): a process holding a lock while it queues blocks everyone behind that lock.
+Slot counting does not bound load (11-17: load1 p50 79 with 3 slots, 52 % of the CPU outside
+any slot). Run sweeps and verification under `slots.py run` rather than beside it, and do not
+count on `nice -n 19`: ananicy-cpp renices `bash` to -4 here, and every child inherits it.
 
 # Starting and shipping a change
 

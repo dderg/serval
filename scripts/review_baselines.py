@@ -403,7 +403,7 @@ def fit_audit(sha: str) -> dict | None:
     cached = AUDIT_DIR / f"{sha}.json"
     if cached.exists():
         return json.loads(cached.read_text())
-    with pending.commit_lock("audit-scratch"):
+    with slots.slot(label="fit audit"), pending.commit_lock("audit-scratch"):
         return fit_audit_locked(sha)
 
 
@@ -436,32 +436,31 @@ def fit_audit_locked(sha: str) -> dict | None:
         file=sys.stderr,
         flush=True,
     )
-    with slots.slot(label="fit audit"):
-        result = subprocess.run(
-            [
-                "cargo",
-                "test",
-                "--release",
-                "-p",
-                "pipeline-snapshot",
-                "--features",
-                "fit-audit",
-                "--test",
-                "fit_tolerance",
-                "every_accepted_fit_piece",
-                "--",
-                "--include-ignored",
-                "--exact",
-                "every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal",
-            ],
-            cwd=tree / "rust",
-            env={
-                **os.environ,
-                "CARGO_TARGET_DIR": str(pending.target_dir_for(tree, "audit")),
-            },
-            capture_output=True,
-            text=True,
-        )
+    result = subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--release",
+            "-p",
+            "pipeline-snapshot",
+            "--features",
+            "fit-audit",
+            "--test",
+            "fit_tolerance",
+            "every_accepted_fit_piece",
+            "--",
+            "--include-ignored",
+            "--exact",
+            "every_accepted_fit_piece_holds_the_fit_tolerance_against_the_exact_signal",
+        ],
+        cwd=tree / "rust",
+        env={
+            **os.environ,
+            "CARGO_TARGET_DIR": str(pending.target_dir_for(tree, "audit")),
+        },
+        capture_output=True,
+        text=True,
+    )
     rows: dict = {}
     for line in (result.stdout + result.stderr).splitlines():
         match = AUDIT_LINE.match(line.strip())
