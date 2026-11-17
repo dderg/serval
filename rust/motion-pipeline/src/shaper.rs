@@ -5186,28 +5186,59 @@ fn refine_shaped_span<S: TrackSignal>(
     )
 }
 
-/// Whether `rung`, kept for a span at the resolution floor, bends past the
-/// signal's acceleration over the span by more than the fit's absolute
-/// budget.
-fn bends_past_signal<S: TrackSignal>(
+/// Probes, in the span's `u`, at which a floor piece's acceleration is
+/// read against its signal's.
+const FLOOR_ACCELERATION_PROBES: usize = 9;
+
+/// The piece a span at the resolution floor carries: the rung its ladder
+/// kept, or where that misses its signal's acceleration by more than the
+/// fit's budget and a sliver misses less, the sliver ([`floor_sliver`]).
+/// Pinned at both ends, a rung of more freedom than a steady acceleration
+/// bends by the signal's position rounding over the span squared, which no
+/// budget resolves at the floor.
+fn floor_piece<S: TrackSignal>(
     sig: &S,
-    rung: &[f64],
+    rung: Vec<f64>,
     (t0, t1): (f64, f64),
     fit_tol: FitTol,
-) -> bool {
-    let signal_peak = [-1.0, 0.0, 1.0]
-        .map(|u| sig.eval_pva(span_probe_t(t0, t1, u)).2.abs())
-        .into_iter()
-        .fold(0.0, f64::max);
-    acceleration_bound(rung, t1 - t0) > signal_peak + fit_tol.accel_mm_s2
+) -> Vec<f64> {
+    let h = t1 - t0;
+    let sliver = floor_sliver(&rung, h, sig.eval_pva(0.5 * t0 + 0.5 * t1).2);
+    let miss = |piece: &[f64]| {
+        (0..FLOOR_ACCELERATION_PROBES)
+            .map(|k| -1.0 + 2.0 * k as f64 / (FLOOR_ACCELERATION_PROBES - 1) as f64)
+            .map(|u| {
+                let signal = sig.eval_pva(span_probe_t(t0, t1, u)).2;
+                (acceleration_in_u(piece, u, h) - signal).abs()
+            })
+            .fold(0.0, f64::max)
+    };
+    let rung_miss = miss(&rung);
+    if rung_miss > fit_tol.accel_mm_s2 && miss(&sliver) < rung_miss {
+        sliver
+    } else {
+        rung
+    }
 }
 
-/// The piece a span at the resolution floor carries where the rung it kept
-/// bends past its signal ([`bends_past_signal`]): through the rung's end
-/// positions, at the signal's acceleration at the span's middle. Pinned at
-/// both ends, a rung of more freedom bends by the signal's position
-/// rounding over the span squared, which no budget resolves there; the
-/// sliver's velocity takes that rounding over the span instead.
+/// The acceleration of the monomial-in-`u` piece `mono_u` of span `h` at `u`.
+fn acceleration_in_u(mono_u: &[f64], u: f64, h: f64) -> f64 {
+    let scale = 2.0 / h;
+    mono_u
+        .iter()
+        .enumerate()
+        .skip(2)
+        .rev()
+        .fold(0.0, |sum, (power, coefficient)| {
+            sum * u + (power * (power - 1)) as f64 * coefficient
+        })
+        * scale
+        * scale
+}
+
+/// A steady-acceleration piece through `rung`'s end positions at
+/// `acceleration`: its velocity takes the signal's position rounding over
+/// the span instead of its acceleration over the span squared.
 fn floor_sliver(rung: &[f64], h: f64, acceleration: f64) -> Vec<f64> {
     let start: f64 = rung
         .iter()
@@ -5252,10 +5283,10 @@ fn refine_span_against<S: TrackSignal>(
     );
     let missed = match verdict {
         SpanVerdict::Proven(mono_u) => {
-            let mono_u = if !splittable && bends_past_signal(sig, &mono_u, (t0, t1), fit_tol) {
-                floor_sliver(&mono_u, t1 - t0, sig.eval_pva(tm).2)
-            } else {
+            let mono_u = if splittable {
                 mono_u
+            } else {
+                floor_piece(sig, mono_u, (t0, t1), fit_tol)
             };
             #[cfg(feature = "fit-audit")]
             crate::fit_audit::check(
@@ -5317,11 +5348,7 @@ fn refine_span_against<S: TrackSignal>(
                     acceleration_budget: fit_tol.for_piece(t1 - t0).accel_mm_s2,
                 });
             }
-            let mono_u = if bends_past_signal(sig, &mono_u, (t0, t1), fit_tol) {
-                floor_sliver(&mono_u, t1 - t0, sig.eval_pva(tm).2)
-            } else {
-                mono_u
-            };
+            let mono_u = floor_piece(sig, mono_u, (t0, t1), fit_tol);
             #[cfg(feature = "fit-audit")]
             crate::fit_audit::check(
                 sig,
