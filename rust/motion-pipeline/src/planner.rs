@@ -37,7 +37,7 @@ const QUIET_PLAN_MIN_MOVES: usize = 32;
 /// pacer cannot count it as runway and a pause cannot stop short of it. It
 /// adds at most one plan per this much stream, and none to dense moves,
 /// whose batches fill by count first (64 top-layer moves are under 0.1 s).
-const REPLAN_BATCH_S: f64 = 0.5;
+const REPLAN_BATCH_S: f64 = 0.25;
 
 /// Moves enter the window once their ratio in reach has settled (see
 /// [`ExtrusionReach`]): a move's budget never changes after it is planned,

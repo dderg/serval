@@ -790,13 +790,36 @@ impl ShapedCorners {
         floor
     }
 
+    /// [`Self::arc_speed_floor`] over `radius_lo_mm..=radius_hi_mm`. The
+    /// cap's search ends in the bracket of the first node an arc crosses
+    /// past the room, no earlier than the widest arc's; within a bracket
+    /// the pull stays under the larger of its nodes' rates, so the
+    /// bisection keeps every speed that bound allows, less its last step.
     fn arc_speed_floor_between(&self, radius_lo_mm: f64, radius_hi_mm: f64, room_mm: f64) -> f64 {
-        let speed_at = |i: usize| circle_node(i) * radius_hi_mm / self.sigma_s;
+        let speed_at = |i: usize, radius_mm: f64| circle_node(i) * radius_mm / self.sigma_s;
         let rounded_room_mm = room_mm * (1.0 - ROOM_ROUNDING);
-        let node = (1..CIRCLE_NODES)
-            .find(|&i| self.arc_shrink_mm(radius_hi_mm, speed_at(i)) > rounded_room_mm)
-            .map_or(CIRCLE_NODES - 1, |i| i - 1);
-        circle_node(node) * radius_lo_mm / self.sigma_s
+        let first_over = (1..CIRCLE_NODES).find(|&i| {
+            self.arc_shrink_mm(radius_hi_mm, speed_at(i, radius_hi_mm)) > rounded_room_mm
+        });
+        let never_over = speed_at(CIRCLE_NODES - 1, radius_lo_mm);
+        let Some(first_over) = first_over else {
+            return never_over;
+        };
+        let bracket_floor = |i: usize| {
+            let rate = self.circle[i - 1].max(self.circle[i]);
+            let bisection_slack = (speed_at(i, radius_hi_mm) - speed_at(i - 1, radius_hi_mm))
+                / f64::from(1_u32 << RATIO_BISECTIONS);
+            let within_rate = if rate > 0.0 {
+                (rounded_room_mm * radius_lo_mm / (PREDICTION_MARGIN * rate)).sqrt() / self.sigma_s
+            } else {
+                f64::INFINITY
+            };
+            let kept = within_rate.min(speed_at(i, radius_lo_mm)) - bisection_slack;
+            kept.max(speed_at(i - 1, radius_lo_mm))
+        };
+        (first_over..CIRCLE_NODES)
+            .map(bracket_floor)
+            .fold(never_over, f64::min)
     }
 
     /// Whether a stop at a corner turning `theta`, blended with apex

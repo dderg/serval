@@ -138,3 +138,53 @@ fn the_scv_allowance_grows_with_the_square_corner_velocity() {
     let fast = corners.scv_allowance_mm(10.0, ACCEL);
     assert!(slow > 0.0 && fast > slow, "{slow} {fast}");
 }
+
+const FLOOR_SAMPLES: usize = 400;
+
+/// The cap at radii spread geometrically from `lo` to `hi` (or ten
+/// decades past `lo`), both ends included.
+fn caps_over(corners: &ShapedCorners, (lo, hi): (f64, f64), room: f64) -> Vec<f64> {
+    let top = if hi.is_finite() { hi } else { lo * 1e10 };
+    (0..=FLOOR_SAMPLES)
+        .map(|k| lo * (top / lo).powf(k as f64 / FLOOR_SAMPLES as f64))
+        .map(|radius| corners.arc_speed_cap(radius, room))
+        .collect()
+}
+
+#[test]
+fn the_arc_speed_floor_never_passes_the_cap_over_its_radii() {
+    let corners = corners();
+    for room in [1e-4, 1e-3, 0.01, 0.05, 0.2, 1.0] {
+        for (lo, hi) in [
+            (0.5, 0.7),
+            (1.0, 10.0),
+            (5.0, 80.0),
+            (25.0, 26.0),
+            (100.0, 5000.0),
+            (3.0, f64::INFINITY),
+            (150.0, f64::INFINITY),
+        ] {
+            let floor = corners.arc_speed_floor((lo, hi), room);
+            let least = caps_over(&corners, (lo, hi), room)
+                .into_iter()
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                floor > 0.0 && floor <= least,
+                "room {room} mm, radii {lo}..{hi} mm: floor {floor} past the least cap {least}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_arc_speed_floor_over_one_radius_is_close_to_its_cap() {
+    let corners = corners();
+    for (radius, room) in [(20.0, 0.05), (200.0, 0.05), (2000.0, 0.01)] {
+        let cap = corners.arc_speed_cap(radius, room);
+        let floor = corners.arc_speed_floor((radius, radius), room);
+        assert!(
+            floor <= cap && floor >= 0.5 * cap,
+            "radius {radius} mm, room {room} mm: floor {floor} against the cap {cap}"
+        );
+    }
+}

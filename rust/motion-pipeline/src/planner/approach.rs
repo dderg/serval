@@ -30,7 +30,7 @@ const HELD_MOVES: usize = 4;
 
 /// The longest a released line lasts at its feedrate: past it the line is
 /// cut into equal collinear pieces.
-pub(crate) const PIECE_S: f64 = 0.1;
+pub(crate) const PIECE_S: f64 = 0.05;
 
 /// The shortest piece a split leaves, as a share of the approach it slows
 /// ([`splits`]).
@@ -122,7 +122,15 @@ impl Approaches {
                 cut(piece, release);
             }
         }
-        self.release_settled(corners, release);
+        let held_s: f64 = self
+            .held
+            .iter()
+            .flat_map(|(_, pieces)| pieces)
+            .map(Move::shortest_secs)
+            .sum();
+        if held_s > PIECE_S {
+            self.release_settled(corners, release);
+        }
     }
 
     fn hold(&mut self, m: Move, corners: &'static ShapedCorners) {
