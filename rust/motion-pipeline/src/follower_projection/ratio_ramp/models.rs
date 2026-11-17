@@ -820,7 +820,8 @@ impl RatioSmoothing {
     /// whose windows reach no seam reads none throughout, whichever width
     /// nodes it crosses — the rest's own, stacked where the width leaves
     /// zero, among them: only a smoothed formula reads the width's
-    /// interval.
+    /// interval. Past the interval the moving end reads, the reach may
+    /// cross only such a rest.
     fn formulas_across_rest(
         &self,
         seams: &SeamView,
@@ -839,10 +840,12 @@ impl RatioSmoothing {
         let Err((a, b)) = interval else {
             return None;
         };
-        let within_interval = self.width.nodes[a].s <= read.0 && read.1 <= self.width.nodes[b].s;
+        let at_rest = |lo: f64, hi: f64| lo >= hi || self.width.bounds(lo, hi).0 == 0.0;
+        let reads_interval =
+            at_rest(read.0, self.width.nodes[a].s) && at_rest(self.width.nodes[b].s, read.1);
         let moving =
             self.smoothed_formula(seams, read, (widths.0.max(0.0), widths.1.max(0.0)), || {
-                within_interval.then_some(interval)
+                reads_interval.then_some(interval)
             })?;
         match moving {
             CorrectionFormula::Zero => Some(vec![moving]),
