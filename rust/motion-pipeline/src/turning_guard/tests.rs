@@ -7,6 +7,14 @@ const STROKE_END: [f64; 3] = [50.0, 0.0, 0.2];
 const FEED_MM_S: f64 = 50.0;
 const PRIME_MM: f64 = 2.0;
 const STROKE_E_MM: f64 = 1.5;
+/// `M220 S1` on a 100 mm/s stroke (#901).
+const CRAWL_FEED_MM_S: f64 = 1.0;
+const SLOW_STROKES: [[f64; 3]; 4] = [
+    [10.0, 0.0, 0.2],
+    [50.0, 0.0, 0.2],
+    [50.0, 40.0, 0.2],
+    [10.0, 40.0, 0.2],
+];
 
 /// Feeds the planned `lines` to a guard standing at [`HOME`].
 fn guard_from_home(lines: &[crate::live_config::GcodeLine]) {
@@ -36,6 +44,32 @@ fn a_move_off_the_toolhead_after_a_prime_fails_as_a_discontinuity() {
         line(1, HOME, HOME, PRIME_MM, FEED_MM_S),
         line(2, AWAY, STROKE_END, STROKE_E_MM, FEED_MM_S),
     ]);
+}
+
+/// The guard samples the planned motion where its pending checks and
+/// crawl scan read it: the kernels' reach and the valley lead budget
+/// around the cells still to prove, twice over for the cells a re-plan
+/// re-opens. Strokes of 40 s at 1 mm/s must not grid whole held moves.
+#[test]
+fn the_guard_grids_slow_strokes_within_its_windows() {
+    let chain = BenchChain::new();
+    let mut guard = TurningGuard::new(chain.config.clone(), &chain.chains, &HOME);
+    let (back, ahead) = guard.span;
+    let budget_cells = (VALLEY_LEAD_BUDGET_S / guard.h()).ceil() as i64;
+    let bound = 2 * (back + ahead + 4 + 2 * budget_cells);
+    let mut lines = vec![line(1, HOME, SLOW_STROKES[0], 0.0, CRAWL_FEED_MM_S)];
+    for (seq, ends) in SLOW_STROKES.windows(2).enumerate() {
+        lines.push(line(seq + 2, ends[0], ends[1], STROKE_E_MM, CRAWL_FEED_MM_S));
+    }
+    let mut most = 0;
+    for item in chain.plan(&lines) {
+        assert!(guard.feed(item, &mut |_| true));
+        most = most.max(guard.grid.end() - guard.grid.base());
+    }
+    assert!(
+        most <= bound,
+        "the guard gridded {most} cells of slow strokes, past the {bound} its windows read"
+    );
 }
 
 #[test]
