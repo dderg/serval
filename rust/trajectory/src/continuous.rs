@@ -422,7 +422,9 @@ impl AnalyticMoveSpan {
 
     /// Each estimate moved onto the first instant the evaluator reads another
     /// surface piece than at the midpoint before it, searched up to the
-    /// midpoint after it; kept where the piece does not change there.
+    /// midpoint after it — midpoints to the neighbouring estimates or to the
+    /// span's ends, where a path starting or ending on a mesh line switches
+    /// patch without crossing it; kept where the piece does not change there.
     fn surface_switches(
         &self,
         surface: &SurfaceTransform,
@@ -431,10 +433,13 @@ impl AnalyticMoveSpan {
     ) -> Vec<f64> {
         let piece_at =
             |t: f64| SurfacePiece::at(surface, spatial.point_at(self.tangential_state(t).0));
-        let midpoints = estimates.windows(2).map(|pair| 0.5 * (pair[0] + pair[1]));
-        let brackets: Vec<f64> = std::iter::once(self.t_start)
-            .chain(midpoints)
+        let bounds: Vec<f64> = std::iter::once(self.t_start)
+            .chain(estimates.iter().copied())
             .chain(std::iter::once(self.t_end))
+            .collect();
+        let brackets: Vec<f64> = bounds
+            .windows(2)
+            .map(|pair| 0.5 * (pair[0] + pair[1]))
             .collect();
         estimates
             .iter()
