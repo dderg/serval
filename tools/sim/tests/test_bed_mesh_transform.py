@@ -43,6 +43,21 @@ def _fade_factor(z):
         return 1.0 - t * t * (3.0 - 2.0 * t)
     return 1.0
 
+def _gcode_z_in_band(machine_z, mesh_z):
+    """The gcode Z inside the fade band whose warp `z + fade(z)*mesh_z`
+    lands on `machine_z`, by bisection: the C1 fade has no closed-form
+    inverse."""
+    below, above = 1.0, 10.0
+    while True:
+        middle = 0.5 * (below + above)
+        if middle in (below, above):
+            return middle
+        if middle + _fade_factor(middle) * mesh_z < machine_z:
+            below = middle
+        else:
+            above = middle
+
+
 
 def _settled_steps(world):
     """One motion fence, then all three axis counters."""
@@ -130,9 +145,9 @@ def test_swaps_keep_machine_z_and_rebase_gcode_z(sim_world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=20 Y=20 Z=5.5")
     machine = MachineZ(world, anchor_gcode_z=5.5)
 
-    # Machine 5.5 at (20,20) re-expressed through the warp: solve
-    # z + fade(z)*0.1 = 5.5 with fade = (10-z)/9 -> z = 48.5/8.9.
-    gcode_z_warped = 48.5 / 8.9
+    # Machine 5.5 at (20,20), where the mesh reads 0.1, re-expressed
+    # through the warp.
+    gcode_z_warped = _gcode_z_in_band(5.5, 0.1)
     world.gcode_ok("BED_MESH_PROFILE LOAD=wavy")
     assert machine.read() == pytest.approx(5.5, abs=TOL_MM)
     assert world.toolhead_z() == pytest.approx(gcode_z_warped, abs=1e-6)
