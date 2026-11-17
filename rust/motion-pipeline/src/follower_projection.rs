@@ -5147,19 +5147,29 @@ impl OdometerLeaf {
     }
 }
 
+/// How many checks approach each end of a leaf past its outermost midpoint
+/// check, each halving the distance left to the end.
+const ODOMETER_END_APPROACHES: i32 = 12;
+
 /// Where a leaf's rate is checked against the leaders' speed: midway
-/// between each pair of neighbouring Kronrod nodes, and between the
-/// outermost ones and the leaf's ends. Not at the ends themselves, where
-/// the leaders may cross a seam whose velocity steps by its fit's
-/// rounding.
-static ODOMETER_RATE_CHECKS: LazyLock<[f64; KRONROD_POINTS + 1]> = LazyLock::new(|| {
+/// between each pair of neighbouring Kronrod nodes, between the outermost
+/// ones and the leaf's ends, and on toward each end by halving the distance
+/// left, where a leader turning around within a sliver of the end bends the
+/// speed the nodes never sample. Not at the ends themselves, where the
+/// leaders may cross a seam whose velocity steps by its fit's rounding.
+static ODOMETER_RATE_CHECKS: LazyLock<Vec<f64>> = LazyLock::new(|| {
     let mut bounded = [0.0; KRONROD_POINTS + 2];
     bounded[0] = -1.0;
     bounded[KRONROD_POINTS + 1] = 1.0;
     bounded[1..=KRONROD_POINTS].copy_from_slice(&kronrod_abscissae());
-    let mut checks = [0.0; KRONROD_POINTS + 1];
-    for (check, pair) in checks.iter_mut().zip(bounded.windows(2)) {
-        *check = 0.5 * (pair[0] + pair[1]);
+    let mut checks: Vec<f64> = bounded
+        .windows(2)
+        .map(|pair| 0.5 * (pair[0] + pair[1]))
+        .collect();
+    let outermost = 1.0 - checks[checks.len() - 1];
+    for halvings in 1..=ODOMETER_END_APPROACHES {
+        let left = outermost * f64::powi(0.5, halvings);
+        checks.extend([-1.0 + left, 1.0 - left]);
     }
     checks
 });
