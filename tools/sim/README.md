@@ -16,7 +16,8 @@ tools/sim/run.sh test               # full e2e pytest suite
 tools/sim/run.sh test -k probe      # subset
 tools/sim/run.sh serve              # long-lived printer for Moonraker
 tools/sim/run.sh shell              # poke around inside the image
-tools/sim/run.sh test --branch X    # any mode for another branch; the mode comes first
+tools/sim/run.sh test --branch X    # any mode for another branch, its own tools/sim included; the mode comes first
+tools/sim/run.sh test --branch X --overlay-sim-tools  # X with this worktree's tools/sim, named in banner, summary and image tag
 SIM_JITTER=3 tools/sim/run.sh test  # share a cpuset with 3 bursty CPU burners
 tools/sim/run.sh fuzz --seeds 1..500 --minimize   # scenario fuzzer (below)
 tools/sim/run.sh fuzz --seed 1234                  # replay one seed
