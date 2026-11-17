@@ -27,6 +27,7 @@ def bench(monkeypatch):
     monkeypatch.setattr(
         run, "scp_from_pi", lambda src, *_a, **_k: fetched.append(src)
     )
+    monkeypatch.setattr(run, "events_written_since", lambda _since: [])
     monkeypatch.setattr(
         run, "klipper_journal", lambda since: fetched.append("journal") or ""
     )
@@ -141,6 +142,45 @@ def test_a_run_another_session_redeployed_under_fails_without_cancelling(
     assert cancelled == []
     assert "journal" in bench
 
+
+def _events_bench(monkeypatch, written):
+    asked, copied = [], []
+
+    def events_written_since(since):
+        asked.append(since)
+        return written
+
+    monkeypatch.setattr(run, "events_written_since", events_written_since)
+    monkeypatch.setattr(
+        run,
+        "scp_files_from_pi",
+        lambda remotes, local: copied.append((remotes, local)),
+    )
+    return asked, copied
+
+
+def test_only_the_event_logs_written_during_the_run_are_copied(
+    tmp_path, monkeypatch
+):
+    written = [
+        f"{run.PI_LOGS}/events/host-py.jsonl",
+        f"{run.PI_LOGS}/events/host-rust.jsonl",
+        f"{run.PI_LOGS}/events/host-rust.jsonl.1",
+    ]
+    asked, copied = _events_bench(monkeypatch, written)
+    names = run.fetch_events(tmp_path, 1000.0)
+    assert asked == [1000.0 - run.EVENTS_MARGIN_S]
+    assert copied == [(written, tmp_path / "events")]
+    assert names == ["host-py.jsonl", "host-rust.jsonl", "host-rust.jsonl.1"]
+
+
+def test_a_run_no_event_log_was_written_in_gets_an_empty_events_dir(
+    tmp_path, monkeypatch
+):
+    _, copied = _events_bench(monkeypatch, [])
+    assert run.fetch_events(tmp_path, 1000.0) == []
+    assert copied == []
+    assert (tmp_path / "events").is_dir()
 
 def test_each_requested_recording_gets_its_own_pi_directory():
     assert run.recordings(tap=False, dispatch_record=False) == {}
