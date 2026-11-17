@@ -1,4 +1,4 @@
-use super::pipeline_request::{MeshSwap, PendingRequest, PipelineRequest};
+use super::pipeline_request::{MeshSwap, PipelineRequest, Served};
 use super::{
     Arc, ArgValue, DRAIN_TIMEOUT, HashSet, McuTopologyInput, Ordering, PyMotionEngine, PyResult,
     PyRuntimeError, PyValueError, Python, planner_err, pymethods,
@@ -422,7 +422,7 @@ impl PyMotionEngine {
     }
     /// `true` once the request a `*_start` call staged has been served;
     /// `false` while it waits for input-channel room or for the drain ahead
-    /// of it. A served mesh swap is adopted here, never earlier.
+    /// of it. A served mesh swap or buzz is adopted here, never earlier.
     fn pipeline_request_poll(&self) -> PyResult<bool> {
         let mut slot = self.flush.pending_request.lock_ok();
         let pending = slot
@@ -431,13 +431,15 @@ impl PyMotionEngine {
         match pending.advance(&self.planner) {
             Ok(false) => Ok(false),
             Ok(true) => {
-                let request = slot
+                let served = slot
                     .take()
                     .expect("the served request is staged")
-                    .into_request();
+                    .into_served();
                 drop(slot);
-                if let PipelineRequest::SwapMesh(swap) = request {
-                    self.adopt_mesh(swap);
+                match served {
+                    Served::Mesh(swap) => self.adopt_mesh(swap),
+                    Served::Buzz(token) => *self.buzz_token.lock_ok() = Some(token),
+                    Served::Done => {}
                 }
                 Ok(true)
             }
@@ -652,30 +654,6 @@ impl PyMotionEngine {
         cfg.post_processor_bypass = bypass;
         *self.extruder_caps.lock_ok() = extruder_caps;
         Ok(true)
-    }
-
-    /// Stages `request` for `pipeline_request_poll`. A mesh swap with no
-    /// planner behind it has nothing to drain and is served at once.
-    fn stage_request(&self, request: PipelineRequest) -> PyResult<()> {
-        let has_planner = self.planner.lock_ok().is_some();
-        let pending = match (&request, has_planner) {
-            (_, true) => PendingRequest::unsent(request),
-            (PipelineRequest::SwapMesh(_), false) => PendingRequest::served(request),
-            (_, false) => {
-                return Err(PyRuntimeError::new_err(
-                    "planner not initialized — call init_planner first",
-                ));
-            }
-        };
-        let mut slot = self.flush.pending_request.lock_ok();
-        if slot.is_some() {
-            return Err(PyRuntimeError::new_err(
-                "a pipeline request is already staged — poll it to completion with \
-                 pipeline_request_poll before staging another",
-            ));
-        }
-        *slot = Some(pending);
-        Ok(())
     }
 
     /// Re-anchor every serial MCU's step counters at a machine-space rest

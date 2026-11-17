@@ -296,17 +296,17 @@ impl Encoder {
     }
 }
 
-/// Root-search work one motor has done since construction: signal
-/// evaluations, interval bounds, search windows opened, windows whose slope
-/// could not be certified and had to split, and splits pruned as unable to
-/// reach the next lattice level.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DrainStats {
-    pub evals: u64,
-    pub bounds: u64,
-    pub windows: u64,
-    pub cert_none: u64,
-    pub pruned: u64,
+/// Root-search work of one motor's drain pass: signal evaluations, interval
+/// bounds, search windows opened, windows whose slope could not be certified
+/// and had to split, and splits pruned as unable to reach the next lattice
+/// level.
+#[derive(Debug, Clone, Copy)]
+struct DrainStats {
+    evals: u64,
+    bounds: u64,
+    windows: u64,
+    cert_none: u64,
+    pruned: u64,
 }
 
 impl DrainStats {
@@ -319,14 +319,6 @@ impl DrainStats {
             pruned: crate::root_cursor::PRUNE_COUNT.with(std::cell::Cell::take),
         }
     }
-
-    fn add(&mut self, other: Self) {
-        self.evals += other.evals;
-        self.bounds += other.bounds;
-        self.windows += other.windows;
-        self.cert_none += other.cert_none;
-        self.pruned += other.pruned;
-    }
 }
 
 #[derive(Debug)]
@@ -338,7 +330,6 @@ struct MotorState {
     stepped_clock: Option<u64>,
     last_dir: Option<u8>,
     encoder: Encoder,
-    stats: DrainStats,
 }
 
 impl MotorState {
@@ -351,7 +342,6 @@ impl MotorState {
             stepped_clock: None,
             last_dir: None,
             encoder: Encoder::new(cfg.encoder),
-            stats: DrainStats::default(),
         }
     }
 
@@ -472,7 +462,6 @@ fn drain_motor(
         .and_then(|()| state.emit(motor, &mut frames));
     let elapsed = started.elapsed();
     let pass = DrainStats::take_thread_counters();
-    state.stats.add(pass);
     if elapsed > std::time::Duration::from_millis(4) {
         tracing::warn!(
             subsystem = "pump",
@@ -585,10 +574,6 @@ impl StepShim {
 
     pub fn queued_spans(&self) -> usize {
         self.motors.iter().map(|m| m.queue.len()).sum()
-    }
-
-    pub fn drain_stats(&self, motor: usize) -> DrainStats {
-        self.motors[motor].stats
     }
 
     pub fn drain(&mut self, up_to_clock: u64) -> Result<Vec<StepFrame>, ShimError> {

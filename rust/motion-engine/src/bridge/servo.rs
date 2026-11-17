@@ -1,3 +1,4 @@
+use super::pipeline_request::PipelineRequest;
 use super::{
     McuHandle, PyMotionEngine, PyResult, PyRuntimeError, Python, pymethods, slots_for_axis,
 };
@@ -461,8 +462,9 @@ impl PyMotionEngine {
         }
         Ok((r.readback_size, u32::from_le_bytes(r.readback_data)))
     }
-    /// One request covers every route the caller named, whatever transport
-    /// each rides. Nothing arms until the pipeline is drained, the pump is
+    /// Stages one buzz request covering every route the caller named,
+    /// whatever transport each rides; `pipeline_request_poll` reports when it
+    /// is armed. Nothing arms until the pipeline is drained, the pump is
     /// fenced, and every route has validated, so a mixed pulse/phase/EtherCAT
     /// sweep either starts together or not at all.
     ///
@@ -471,9 +473,8 @@ impl PyMotionEngine {
     /// `("ethercat", mcu_handle, slot_mask, slot_sign_mask)` or
     /// `("stepper", axis_mask, sign_mask)`; the stepper route is split into
     /// pulse and phase endpoints here, by the axis transport bindings.
-    fn resonance_buzz(
+    fn resonance_buzz_start(
         &self,
-        py: Python<'_>,
         routes: Vec<Bound<'_, PyAny>>,
         wave: (u32, u32, u32, u32, u32),
     ) -> PyResult<()> {
@@ -488,26 +489,10 @@ impl PyMotionEngine {
                 ramp_ms: wave.4,
             },
         };
-        let rx = {
-            let guard = self.planner.lock_ok();
-            let planner = guard.as_ref().ok_or_else(|| {
-                PyRuntimeError::new_err(
-                    "resonance_buzz: planner not initialized — call init_planner first",
-                )
-            })?;
-            planner
-                .submit_buzz(params)
-                .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz: {e}")))?
-        };
-        let token = py
-            .detach(|| rx.recv())
-            .map_err(|_| PyRuntimeError::new_err("resonance_buzz: notify dropped"))?
-            .map_err(|e| PyRuntimeError::new_err(format!("resonance_buzz: {e}")))?;
-        *self.buzz_token.lock_ok() = Some(token);
-        Ok(())
+        self.stage_request(PipelineRequest::Buzz(params))
     }
 
-    /// Polls the one token the last [`Self::resonance_buzz`] handed back, so
+    /// Polls the one token the last [`Self::resonance_buzz_start`] armed, so
     /// completion spans every route that request armed.
     fn resonance_buzz_done(&self) -> PyResult<bool> {
         self.buzz_token

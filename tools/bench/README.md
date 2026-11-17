@@ -164,7 +164,7 @@ Each unit writes `~/bench/qualifications/<rev>/units/<unit>.json` (key, Pi ident
 
 ## Run dir (`~/bench/runs/<YYYYmmdd-HHMMSS>/`)
 
-`print.gcode`, `printer.cfg`, `capture.bin` (count mode: int8, N×4, one row per 25 µs tick; channels a b z e; + = DIR high) or `events.bin` (event mode), `capture.json` (`mode`, `tick_hz`), `klippy.log`, `events/` (structured logs), `journal.txt` (klipper's journal since the capture started), `run.json`, and after analysis `analysis.json`, `*.png` (session rows: `session_evidence.json`, `session_checks.json`).
+`print.gcode`, `printer.cfg`, `capture.bin` (count mode: int8, N×4, one row per 25 µs tick; channels a b z e; + = DIR high) or `events.bin` (event mode), `capture.json` (`mode`, `tick_hz`), `klippy.log`, `events/` (structured logs: the Pi's event files, current or rotated, written since the run started less `events.MARGIN_S`, copied whole and named in `run.json` `events_files`; the whole store, ~330 MB, took ~18.5 s per row to copy, these ~40 MB ~2.7 s), `journal.txt` (klipper's journal since the capture started), `run.json`, and after analysis `analysis.json`, `*.png` (session rows: `session_evidence.json`, `session_checks.json`).
 
 ## Capture
 

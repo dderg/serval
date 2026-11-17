@@ -433,17 +433,24 @@ def test_bisect_runs_one_suite_per_candidate_without_an_outer_hold(
         return 0, f"summary: {summary}\n"
 
     lock = SimpleNamespace(TOKEN_ENV="BENCH_LOCK_TOKEN")
+    order = _lock_order(monkeypatch)
     monkeypatch.delenv("BENCH_LOCK_TOKEN", raising=False)
-    monkeypatch.setattr(
-        qualify.pending, "commit_lock", lambda _n: contextlib.nullcontext()
-    )
     monkeypatch.setattr(qualify, "checked_out", lambda rev: rev)
     monkeypatch.setattr(qualify, "resolve", lambda rev: rev)
     monkeypatch.setattr(qualify, "bench", lambda _tree, _name: lock)
     monkeypatch.setattr(qualify, "hold", pytest.fail)
     monkeypatch.setattr(qualify, "git", history)
     monkeypatch.setattr(qualify, "checkout", lambda _tree, sha: tmp_path / sha)
-    monkeypatch.setattr(qualify, "stream", stream)
+    monkeypatch.setattr(qualify, "unmoved", lambda _tree, _sha: None)
+    monkeypatch.setattr(
+        qualify, "build_engine", lambda tree: order.append(("engine", ()))
+    )
+
+    def held_stream(command, cwd, log, target):
+        order.append(("suite", tuple(order.held)))
+        return stream(command, cwd, log, target)
+
+    monkeypatch.setattr(qualify, "stream", held_stream)
     monkeypatch.setattr(qualify, "QUALIFICATIONS", tmp_path)
     args = argparse.Namespace(row="pause_sparse", good="m", bad="m5")
     assert qualify.bisect_command(args) == 0
@@ -457,6 +464,70 @@ def test_bisect_runs_one_suite_per_candidate_without_an_outer_hold(
     monkeypatch.setenv("BENCH_LOCK_TOKEN", "4242")
     with pytest.raises(qualify.QualifyError, match="outside lock.py hold"):
         qualify.bisect_command(args)
+    assert ("suite", ("lock",)) in order
+    assert all(held == ("lock",) for name, held in order if name == "suite")
+    assert all(not held for name, held in order if name == "slot")
+
+
+class Order(list):
+    held: list[str]
+
+
+def _lock_order(monkeypatch) -> Order:
+    order = Order()
+    order.held = []
+
+    def recorded(name: str):
+        @contextlib.contextmanager
+        def manager(*_args, **_kwargs):
+            order.append((name, tuple(order.held)))
+            order.held.append(name)
+            try:
+                yield
+            finally:
+                order.held.remove(name)
+
+        return manager
+
+    monkeypatch.setattr(qualify.slots, "slot", recorded("slot"))
+    monkeypatch.setattr(qualify.pending, "commit_lock", recorded("lock"))
+    return order
+
+
+def test_builds_take_the_slot_before_the_lock_and_units_no_slot(monkeypatch):
+    order = _lock_order(monkeypatch)
+
+    def step(name: str):
+        return lambda *_args: order.append((name, tuple(order.held)))
+
+    lock = SimpleNamespace(TOKEN_ENV="BENCH_LOCK_TOKEN")
+    monkeypatch.delenv("BENCH_LOCK_TOKEN", raising=False)
+    monkeypatch.setattr(qualify, "checked_out", lambda rev: "abc")
+    monkeypatch.setattr(qualify, "bench", lambda _tree, _name: lock)
+    monkeypatch.setattr(qualify, "unmoved", step("unmoved"))
+    monkeypatch.setattr(qualify, "build_engine", step("engine"))
+    monkeypatch.setattr(qualify, "build_target", step("f401"))
+    monkeypatch.setattr(qualify, "run", lambda *a: step("units")() or 0)
+    args = argparse.Namespace(rev="origin/main", expect_fail=[])
+    assert qualify.run_command(args) == 0
+    assert order == [
+        ("lock", ()),
+        ("slot", ()),
+        ("lock", ("slot",)),
+        ("unmoved", ("slot", "lock")),
+        ("engine", ("slot", "lock")),
+        ("f401", ("slot", "lock")),
+        ("lock", ()),
+        ("unmoved", ("lock",)),
+        ("units", ("lock",)),
+    ]
+
+
+def test_a_run_tree_another_qualify_moved_is_refused(monkeypatch, tmp_path):
+    monkeypatch.setattr(qualify, "git", lambda *_a, cwd=None: "f" * 40)
+    with pytest.raises(qualify.QualifyError, match="another qualify.py"):
+        qualify.unmoved(tmp_path, "a" * 40)
+    qualify.unmoved(tmp_path, "f" * 40)
 
 
 def test_the_tag_message_round_trips_the_summary():

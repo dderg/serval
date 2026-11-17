@@ -232,8 +232,6 @@ impl PyMotionEngine {
         converged: bool,
         host_now_raw: f64,
     ) -> PyResult<()> {
-        self.clock_freqs.lock_ok().insert(mcu, freq);
-
         use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
         static SET_CLOCK_EST_CALLS: AtomicUsize = AtomicUsize::new(0);
         let call_n = SET_CLOCK_EST_CALLS.fetch_add(1, AOrd::Relaxed);
@@ -261,6 +259,7 @@ impl PyMotionEngine {
                 host_now_raw,
             )
             .map_err(router_err)?;
+        self.clock_freqs.lock_ok().insert(mcu, freq);
         Ok(())
     }
     /// Called by every MCU identify: the board's tick counter restarted, so

@@ -1,11 +1,5 @@
 //! The extruder excesses known engine bugs leave on a case, pinned per
 //! class by count and worst value under the [`super::ratchet`] rules.
-//!
-//! TODO(shaped-turning, #685): the planner holds a kernel-free advance's
-//! demand along the path, `r·(a_t + k·j_t)`, within `[axis e] max_accel`,
-//! but not the shaped path's turning term `k·r·a⊥²/v`, which slow sharp
-//! corners raise far past it. Every [`ExcessClass::Turning`] pin is one the
-//! shaped-speed predictor #685 designs removes.
 
 use super::extruder::{AccelCause, ExtruderAudit, ExtruderExcess, ToolheadPhase};
 use super::ratchet::{Tally, departures, rounded, tally};

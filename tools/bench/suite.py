@@ -11,7 +11,9 @@ sync of the tree (deploy record) and the boards the firmware the first
 hold found; it re-syncs the tree, or reflashes the F401 from the tree, when
 another holder changed them, and records that under `restored`. It then
 settles the bench (deploy.settle: no bench drop-in, no cpufreq cap, no
-orphaned Pi job, printer.cfg loaded, klippy ready and idle). A row starts
+orphaned Pi job, printer.cfg loaded, klippy ready and idle), and settles it
+again after its last row, recorded under `left`, so the next holder finds
+printer.cfg however the last row's config differed. A row starts
 only when its expected seconds (hold_plan.EXPECTED_ROW_S) and the margin
 fit the hold's remaining time; the rest move to the next hold. Each row is
 judged after its hold, outside the lock: matrix rows are one print each
@@ -555,6 +557,7 @@ def held(plan: dict, result: dict, save: Save) -> None:
     result["step_benchmark"] = query_step_benchmark()
     save()
     run_rows(plan, result, save)
+    result["left"] = deploy.settle(PRINTER_CFG)
 
 
 def run_rows(plan: dict, result: dict, save: Save) -> None:
@@ -591,6 +594,7 @@ def hold_main(plan_path: Path) -> None:
         "firmware": plan["firmware"],
         "restored": [],
         "settled": [],
+        "left": [],
         "step_benchmark": None,
         "rows": [],
         "running": None,
@@ -630,6 +634,7 @@ def hold_record(result: dict, planned: list[str]) -> dict:
         "held_s": 0.0 if acquired is None else round(released - acquired, 1),
         "restored": result.get("restored", []),
         "settled": result.get("settled", []),
+        "left": result.get("left", []),
         "deployed_head": (result.get("deployed") or {}).get("head"),
         "firmware": result.get("firmware"),
         "exit": result["exit"],

@@ -162,6 +162,7 @@ def test_a_scenario_run_keeps_its_session_in_run_json(
     monkeypatch.setattr(run, "Capture", RecordingCapture)
     monkeypatch.setattr(run.time, "sleep", lambda _s: None)
     monkeypatch.setattr(run, "scp_from_pi", lambda *_a, **_k: None)
+    monkeypatch.setattr(run, "events_written_since", lambda _since: [])
     monkeypatch.setattr(run, "foreign_deploy", lambda _expected: None)
     monkeypatch.setattr(run, "klipper_journal", lambda _since: "")
     assert session.run_scenario(scenario, tmp_path) == run_dir
