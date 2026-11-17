@@ -1911,6 +1911,43 @@ fn a_crawl_valley_held_at_zero_back_to_a_rest_keeps_the_weight_continuous() {
     }
 }
 
+/// Where the stream drained in #988 (seed 10033): the span table ends
+/// there, the leaders rest there, and the projection took the last segment
+/// up to there.
+const DRAIN_MM: f64 = 276.662_674_995_868_43;
+
+/// The stream drains at the end of the span table, where the leaders rest,
+/// and the projection takes its last segment, whose own arc summed from its
+/// start rounds an ulp past that end. A crawl valley held at zero back to
+/// the rest reaches no path the projection has taken (#988).
+#[test]
+fn a_crawl_valley_held_at_zero_back_to_a_drain_reaches_no_taken_path() {
+    let mut smoothing = advanced_smoothing();
+    let shaped = braking_to_standstill(0.0, 0.1);
+    let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
+    let shaped_odometer = odometer(&shaped, &shaped_leaders);
+    let start = DRAIN_MM - REST_LEG_SPILL_MM;
+    let arc = trajectory::next_toward(DRAIN_MM, f64::INFINITY) - start;
+    smoothing.queue(
+        shaped.t_end,
+        (start, arc),
+        DRAIN_MM,
+        shaped_leaders.into_reads(shaped_odometer),
+    );
+    smoothing.close_at(DRAIN_MM);
+    assert_eq!(
+        smoothing.take_final(&[]).len(),
+        1,
+        "the drain takes the segment"
+    );
+    let turn = 276.681_034_085_897_6;
+    smoothing.place_valley(
+        turn,
+        ((DRAIN_MM, turn), (0.0, turn - DRAIN_MM)),
+        (4.0e-3, 4.0e-3),
+    );
+}
+
 const CRAWL_LEG_SEAM_SPEED_MM_S: f64 = 2.83;
 const CRAWL_LEG_PEAK_GAIN_MM_S: f64 = 3.0 * CRAWL_LEG_SEAM_SPEED_MM_S;
 const CRAWL_LEG_SIDEWAYS_MM_S: f64 = 0.3;

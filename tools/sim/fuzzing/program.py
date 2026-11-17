@@ -39,6 +39,14 @@ SLICE_LINES = (80, 400)
 SLICE_DROPPED = ("M73",)
 PRELUDE = ("G90", "M83")
 LIMIT_RESET = "RESET_VELOCITY_LIMIT"
+HEAT_WAIT_C = (150, 190)
+HEAT_WAIT_DRIFT_C = 15
+START_HEAT_CHANCE = 0.8
+MID_HEAT_CHANCE = 0.3
+TEMPERATURE_WAIT_BAND_C = 3
+OBJECT_PREFIX = "fz_obj"
+OBJECTS_PER_PROGRAM = (1, 4)
+LABEL_CHANCE = 0.8
 
 
 class Kind(enum.Enum):
@@ -61,6 +69,8 @@ class Kind(enum.Enum):
     MISC = "misc"
     MESH = "mesh"
     MESH_SEAM = "mesh_seam"
+    HEAT_WAIT = "heat_wait"
+    OBJECTS = "objects"
 
 
 STATE_CHANGING = (Kind.LIMITS, Kind.MESH)
@@ -503,6 +513,95 @@ def draw_program(rng: random.Random, spec: PrinterSpec, name: str) -> Program:
             lines = lines + [PROBE]
         segments.append(Segment(kind, tuple(lines)))
     return Program(name, tuple(segments), end_print=rng.random() < 0.5)
+
+
+UNLABELLED = (
+    Kind.LIMITS,
+    Kind.MESH,
+    Kind.G92,
+    Kind.REST,
+    Kind.MISC,
+    Kind.HEAT_WAIT,
+    Kind.OBJECTS,
+)
+
+
+def _heat_wait(rng: random.Random, temp: int) -> Segment:
+    """A slicer's or a macro's wait for the hotend; the thermal model
+    (thermal.py) makes it last the heat-up."""
+    low = temp - TEMPERATURE_WAIT_BAND_C
+    high = temp + TEMPERATURE_WAIT_BAND_C
+    styles = (
+        (f"M109 S{temp}",),
+        (f"M104 S{temp}", f"TEMPERATURE_WAIT SENSOR=extruder MINIMUM={low}"),
+        (
+            f"SET_HEATER_TEMPERATURE HEATER=extruder TARGET={temp}",
+            f"TEMPERATURE_WAIT SENSOR=extruder MINIMUM={low} MAXIMUM={high}",
+        ),
+    )
+    return Segment(Kind.HEAT_WAIT, rng.choice(styles))
+
+
+def _with_heat_waits(rng: random.Random, segments: list) -> list:
+    temp = rng.randint(*HEAT_WAIT_C)
+    if rng.random() < START_HEAT_CHANCE:
+        segments.insert(0, _heat_wait(rng, temp))
+    if rng.random() < MID_HEAT_CHANCE:
+        drifted = temp + rng.randint(-HEAT_WAIT_DRIFT_C, HEAT_WAIT_DRIFT_C)
+        mid = min(max(drifted, HEAT_WAIT_C[0]), HEAT_WAIT_C[1])
+        segments.insert(rng.randint(0, len(segments)), _heat_wait(rng, mid))
+    return segments
+
+
+def _with_objects(rng: random.Random, segments: list) -> list:
+    """Slicer object labels: moving segments wrapped in
+    EXCLUDE_OBJECT_START/END of one of a few objects, all defined up front."""
+    names = [
+        f"{OBJECT_PREFIX}{index}"
+        for index in range(rng.randint(*OBJECTS_PER_PROGRAM))
+    ]
+    used = set()
+    labelled = []
+    for segment in segments:
+        if segment.kind in UNLABELLED or rng.random() >= LABEL_CHANCE:
+            labelled.append(segment)
+            continue
+        name = rng.choice(names)
+        used.add(name)
+        lines = (
+            (f"EXCLUDE_OBJECT_START NAME={name}",)
+            + segment.lines
+            + (f"EXCLUDE_OBJECT_END NAME={name}",)
+        )
+        labelled.append(Segment(segment.kind, lines))
+    if not used:
+        return labelled
+    defines = tuple(
+        f"EXCLUDE_OBJECT_DEFINE NAME={name}" for name in sorted(used)
+    )
+    return [Segment(Kind.OBJECTS, defines)] + labelled
+
+
+def with_extras(
+    rng: random.Random, spec: PrinterSpec, drawn: Program
+) -> Program:
+    """Heat-up waits and object labels, drawn from a stream of their own
+    so a printer without them prints the program it always did."""
+    segments = list(drawn.segments)
+    if spec.hotend_model:
+        segments = _with_heat_waits(rng, segments)
+    if spec.exclude_object:
+        segments = _with_objects(rng, segments)
+    return dataclasses.replace(drawn, segments=tuple(segments))
+
+
+def object_names(prog: Program) -> list[str]:
+    return [
+        line.split("NAME=", 1)[1]
+        for segment in prog.segments
+        if segment.kind is Kind.OBJECTS
+        for line in segment.lines
+    ]
 
 
 def probe_lines(value: int) -> list[str]:

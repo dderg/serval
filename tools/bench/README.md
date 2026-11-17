@@ -135,7 +135,7 @@ A stop check also fails when no motion was in flight at the request: such a run 
 | cancel_macro_mesh | #406 | + macros, mesh | first_layers, mesh loaded | cancel +20 s (macro clears the mesh) |
 | end_print_mesh | #362 | + macros, mesh | first 1500 lines, mesh loaded, END_PRINT (no leading M400) | print |
 | firmware_restart | #844 | printer.cfg | first_layers | FIRMWARE_RESTART +20 s |
-| host_restart | #939 | + `heater_without_load.cfg` | first 1500 lines, extruder heated to full power after the preamble, `TURN_OFF_HEATERS` before the ending | RESTART +20 s; print again 5 s after the first ends |
+| host_restart | #939 | + `heater_without_load.cfg` | first 1500 lines, extruder heated to full power after the preamble, `TURN_OFF_HEATERS` before the ending | RESTART +20 s; print again 5 s after the first ends and klippy is `ready` again (15.5–19.6 s after a restart on the bench since #915; the run fails beyond 30 s, #984) |
 | estop | #855 | printer.cfg | first_layers | e-stop +20 s, FIRMWARE_RESTART +5.5 s, wait 10 s |
 | estop_g4 | #406 | printer.cfg | first 200 lines, 120-stroke zigzag, `G4 P1` | e-stop 2 s after the reader reaches `G4 P1`, FIRMWARE_RESTART +5.5 s, wait 10 s |
 
@@ -159,6 +159,25 @@ Qualification's long rows, never in `--quick` or the default run; each fits one 
 Until 2026-11-16 both rows printed one 21-min file (8 blocks, Z to 82 mm): the session row ran 43.5 min in one klippy session, the throttled row 22 min, in one 71-min hold. The 30-min hold cap loses the effects that need more than ~17 min of continuous motion or ~16 min of one klippy session (slow memory growth, reserve drift across long prints, thermal steady state of a throttled Pi past 17 min); the Z range above 62 mm adds no motion the blocks below lack (the mesh fades out at 10 mm, the blocks repeat). More rows in more holds cannot recover session length: the next holder restarts klipper, so no klippy session survives between holds.
 
 Run-wide checks (`SOAK_CHECKS`, evidence over the whole run window): `pacer_brakes` fails on any `pipe_drain` outside a commanded stop (from a pause, cancel, FIRMWARE_RESTART or e-stop to the next action), `pacer_reserve` on any reserve above 2 s (#843) and lists every raise (time, reserve, cost kind), `klippy_stats` when klippy's Stats lines (host-py mirror; klippy writes them only while active) leave a gap > 2 s inside a print outside a commanded pause, or come from more than one klippy session (#406); its detail carries memavail and klippy cputime over the run. A plain run also gets the journal, shutdown and reactor checks. `pacer_reserve_ratchet` (session rows with two prints) fails when the last print's highest reserve exceeds the first's by more than 1.5×: #843's ratchet multiplied it 3.6× (`main-print_twice`) and 137× (`main-cancel_then_print`) print over print, while a measured raise within a print moved it 1.06× (0.419 → 0.444 s, soak run 11-16). A single raise from a measured planning step is the pacer working (#876), not a failure.
+
+## Crawl rows (`suite.py --group crawl`)
+
+`crawl_gcode.py` generates five prints (never committed). Each has a 2.3 s lead-in at 100 mm/s ending in a reversal, then `M220 S<n>` and 120 s of extruding square laps in 2 s pieces with no rest, then `M220 S100` and a lead-out. Each row is a matrix row on printer.cfg, judged by the analyzer and the run-wide checks.
+
+| row | slow section | before it | expected |
+|---|---|---|---|
+| crawl_s1 | 1 mm/s (`M220 S1`, F6000) | lead-in | fails until #983 |
+| crawl_s5 | 2.5 mm/s (`M220 S5`, F3000) | lead-in | fails until #983 |
+| crawl_s10 | 10 mm/s (`M220 S10`, F6000) | lead-in | fails until #983 |
+| crawl_s20 | 20 mm/s (`M220 S20`, F6000, 12 sides) | lead-in | fails until #983 |
+| crawl_s5_rest | 2.5 mm/s | lead-in, `G4 P500` | passes |
+
+On b122baafe (suites `20261117-170051`, `-182929`):
+- crawl_s1, crawl_s5 and crawl_s10 aborted klippy within 3 s of the print start. The first anchor committed an 8.4 ms segment, and the next one came 0.56–0.83 s later (`anchor_underrun`).
+- crawl_s20 completed, but with a `RunwayExhausted` pacer brake at +81 s.
+- crawl_s5_rest completed with no brake.
+
+A row's `fails_until` (suite.py) makes its failure expected, naming the issue. A marked row that passes is `XPASS` and fails the suite, so the fix PR removes the mark. The group is not part of the full suite, so it does not gate qualification.
 
 ## Qualification (`scripts/qualify.py`)
 

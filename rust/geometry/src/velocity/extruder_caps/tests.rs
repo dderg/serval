@@ -44,6 +44,7 @@ fn around(ratio_in_reach: f64, axes_in_reach: [bool; 3]) -> ExtrusionBudget {
         rest_room_mm: f64::INFINITY,
         fastest_reachable_mm_s: f64::INFINITY,
         strongest_accel_mm_s2: 0.0,
+        step_accel_mm_s2: f64::INFINITY,
         reachable: between_rests(50.0),
     }
 }
@@ -376,12 +377,26 @@ fn the_planner_caps_the_climbing_travel_after_an_extrusion_on_an_unshaped_leader
             .fold(0.0, f64::max)
     };
     let ramp = ramp_accel_at_rest_per_accel(0.5, RATIO);
-    let cap = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN) + ramp);
+    let demand_cap = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN) + ramp);
     let z_share = 5.0 / 2525.0_f64.sqrt();
-    assert!(velocity_step(&extruder, RATIO, cap, z_share) <= 1.0);
+    assert!(velocity_step(&extruder, RATIO, demand_cap, z_share) <= 1.0);
+    let budgets =
+        crate::velocity::extrusion_budgets(&fitted.moves, 0.0, f64::INFINITY, f64::INFINITY);
+    let stop_cap = fitted
+        .moves
+        .iter()
+        .zip(&budgets)
+        .filter(|(m, _)| m.source.start_line == 1)
+        .map(|(_, budget)| budget.step_accel_mm_s2)
+        .fold(0.0, f64::max);
     assert!(
-        (peak_on(1) - cap).abs() < 1e-6 * cap,
-        "{} against {cap}",
+        stop_cap < demand_cap,
+        "the step out of the extrusion, crossed from a stop, holds the travel under {stop_cap} \
+         mm/s², below its own demand's {demand_cap}"
+    );
+    assert!(
+        (peak_on(1) - stop_cap).abs() < 1e-6 * stop_cap,
+        "{} against {stop_cap}",
         peak_on(1)
     );
     assert!((peak_on(2) - 3000.0).abs() < 1e-6);

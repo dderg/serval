@@ -35,6 +35,18 @@ SESSIONS = (
 )
 START_POSITION = (100.0, 100.0, 10.0)
 DEFAULT_FEED_MM_S = 25.0
+IDLE_CHANCE = 0.25
+IDLE_S = (15.0, 90.0)
+RESET_FILE_CHANCE = 0.3
+
+
+@dataclasses.dataclass(frozen=True)
+class Lead:
+    """What comes before a print: the printer left idle for `idle_s`
+    (an idle timeout may turn it off), then SDCARD_RESET_FILE."""
+
+    idle_s: float = 0.0
+    reset_file: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -44,6 +56,12 @@ class Scenario:
     programs: tuple[Program, ...]
     prints: tuple[str, ...]
     timeline: tuple[Action, ...]
+    leads: tuple[Lead, ...] = ()
+
+    def lead(self, print_index: int) -> Lead:
+        if print_index < len(self.leads):
+            return self.leads[print_index]
+        return Lead()
 
     def program(self, name: str) -> Program:
         return next(p for p in self.programs if p.name == name)
@@ -82,24 +100,40 @@ def _session(rng: random.Random) -> tuple[str, ...]:
 
 
 def _program(seed: int, spec: PrinterSpec, name: str) -> Program:
-    """The program's own draws, then mesh seams from a stream of their
-    own, so a printer without a mesh draws the program it always did."""
+    """The program's own draws, then mesh seams and the extras from
+    streams of their own, so a printer without a mesh or extras draws the
+    program it always did."""
     drawn = program.draw_program(_child(seed, f"program{name}"), spec, name)
-    return mesh_paths.with_seams(_child(seed, f"seams{name}"), spec, drawn)
+    seamed = mesh_paths.with_seams(_child(seed, f"seams{name}"), spec, drawn)
+    return program.with_extras(_child(seed, f"extras{name}"), spec, seamed)
+
+
+def _lead(rng: random.Random) -> Lead:
+    idle_s = (
+        round(rng.uniform(*IDLE_S), 1) if rng.random() < IDLE_CHANCE else 0.0
+    )
+    return Lead(idle_s, rng.random() < RESET_FILE_CHANCE)
 
 
 def generate(seed: int) -> Scenario:
-    spec = printer.draw_printer(_child(seed, "printer"))
+    drawn = printer.draw_printer(_child(seed, "printer"))
+    spec = printer.with_extras(_child(seed, "printer_extras"), drawn)
     programs = tuple(_program(seed, spec, name) for name in PROGRAM_NAMES)
     prints = _session(_child(seed, "session"))
     rng = _child(seed, "timeline")
+    extra_rng = _child(seed, "timeline_extras")
     actions = []
     for index, name in enumerate(prints):
-        lines = program.render(next(p for p in programs if p.name == name))
-        duration = estimate_s(lines, spec.max_velocity)
+        chosen = next(p for p in programs if p.name == name)
+        duration = estimate_s(program.render(chosen), spec.max_velocity)
         actions += timeline.draw_print_actions(rng, spec, index, duration)
+        actions += timeline.draw_extra_actions(
+            extra_rng, spec, program.object_names(chosen), index, duration
+        )
+    lead_rng = _child(seed, "leads")
+    leads = tuple(_lead(lead_rng) for _ in prints)
     used = tuple(p for p in programs if p.name in prints)
-    return Scenario(seed, spec, used, prints, tuple(actions))
+    return Scenario(seed, spec, used, prints, tuple(actions), leads)
 
 
 def _encode(value):
@@ -142,12 +176,17 @@ class _Stored:
     printer: PrinterSpec
     programs: tuple[Program, ...]
     prints: tuple[str, ...]
+    leads: tuple[Lead, ...] = ()
 
 
 def save(scenario: Scenario, directory: pathlib.Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     stored = _Stored(
-        scenario.seed, scenario.printer, scenario.programs, scenario.prints
+        scenario.seed,
+        scenario.printer,
+        scenario.programs,
+        scenario.prints,
+        scenario.leads,
     )
     (directory / SCENARIO_FILE).write_text(
         json.dumps(_encode(stored), indent=1) + "\n"
@@ -168,8 +207,29 @@ def load(directory: pathlib.Path) -> Scenario:
     )
     actions = timeline.from_text((directory / TIMELINE_FILE).read_text())
     return Scenario(
-        stored.seed, stored.printer, stored.programs, stored.prints, actions
+        stored.seed,
+        stored.printer,
+        stored.programs,
+        stored.prints,
+        actions,
+        stored.leads,
     )
+
+
+def _extras(scenario: Scenario) -> str:
+    spec = scenario.printer
+    named = (
+        ("runout", spec.runout_sensor),
+        ("objects", spec.exclude_object),
+        ("hotend", spec.hotend_model),
+    )
+    words = [name for name, present in named if present]
+    for index, lead in enumerate(scenario.leads):
+        if lead.idle_s:
+            words.append(f"idle{index}={lead.idle_s:g}s")
+        if lead.reset_file:
+            words.append(f"reset{index}")
+    return ",".join(words) or "-"
 
 
 def describe(scenario: Scenario) -> str:
@@ -184,7 +244,8 @@ def describe(scenario: Scenario) -> str:
     return (
         f"{spec.base.value} {spec.topology.value} shapers={shapers} "
         f"e={extruder} mesh={spec.mesh.value} heaters={int(spec.heaters)} "
-        f"prints={''.join(scenario.prints)} actions={acts}"
+        f"prints={''.join(scenario.prints)} actions={acts} "
+        f"extras={_extras(scenario)}"
     )
 
 

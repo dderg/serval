@@ -70,6 +70,12 @@ jobs:
               tools/sim/tests/test_stepper_enable_print_end.py
               tools/sim/tests/test_homing_pressed_endstop.py
               tools/sim/tests/test_homing_multi_endstop.py
+          - shard: fuzz-smoke
+            targets: >-
+              tools/sim/tests/test_fuzz_smoke.py
+          - shard: fuzz-regressions
+            targets: >-
+              tools/sim/tests/test_fuzz_regressions.py
           - shard: rest
             targets: >-
               tools/sim/tests
@@ -91,6 +97,8 @@ jobs:
               --ignore=tools/sim/tests/test_heaters_fans.py
               --ignore=tools/sim/tests/test_phase_stepping.py
               --ignore=tools/sim/tests/test_probe_calibrate.py
+              --ignore=tools/sim/tests/test_fuzz_smoke.py
+              --ignore=tools/sim/tests/test_fuzz_regressions.py
     name: sim-e2e (${{ matrix.shard }})
     steps:
       - uses: actions/checkout@v4

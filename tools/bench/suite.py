@@ -44,6 +44,7 @@ from datetime import datetime
 from pathlib import Path
 
 import capture
+import crawl_gcode
 import deploy
 import firmware_build_id
 import hold_plan
@@ -121,6 +122,7 @@ class Row:
     run_wide_checks: bool = False
     timeout_s: float = RUN_TIMEOUT_S
     analyze_timeout_s: float = ANALYZE_TIMEOUT_S
+    fails_until: str = ""
 
 
 MATRIX = [
@@ -169,6 +171,17 @@ SOAK_MATRIX = [
         analyze_timeout_s=SOAK_ANALYZE_TIMEOUT_S,
     ),
 ]
+CRAWL_ISSUE = "#983"
+CRAWL_REST_PASSES = "crawl_s5_rest"
+CRAWL_MATRIX = [
+    Row(
+        spec.name,
+        spec.path,
+        run_wide_checks=True,
+        fails_until="" if spec.name == CRAWL_REST_PASSES else CRAWL_ISSUE,
+    )
+    for spec in crawl_gcode.CRAWL_PRINTS
+]
 
 
 @dataclass(frozen=True)
@@ -190,16 +203,17 @@ class Scope(enum.Enum):
     MATRIX = "matrix"
     SESSION = "session"
     SOAK = "soak"
+    CRAWL = "crawl"
 
 
-GROUPS = (Scope.MATRIX, Scope.SESSION, Scope.SOAK)
+GROUPS = (Scope.MATRIX, Scope.SESSION, Scope.SOAK, Scope.CRAWL)
 SESSION_ROWS = [SessionRow(scenario) for scenario in SCENARIOS]
 SOAK_ROWS = [
     *(SessionRow(scenario) for scenario in SOAK_SCENARIOS),
     *SOAK_MATRIX,
 ]
 ROWS = [*MATRIX, *SESSION_ROWS]
-ROW_BY_NAME = {row.name: row for row in [*ROWS, *SOAK_ROWS]}
+ROW_BY_NAME = {row.name: row for row in [*ROWS, *SOAK_ROWS, *CRAWL_MATRIX]}
 
 
 def selected_rows(scope: Scope) -> list:
@@ -210,6 +224,7 @@ def selected_rows(scope: Scope) -> list:
         Scope.MATRIX: MATRIX,
         Scope.SESSION: SESSION_ROWS,
         Scope.SOAK: SOAK_ROWS,
+        Scope.CRAWL: CRAWL_MATRIX,
     }
     return rows[scope]
 
@@ -320,6 +335,10 @@ def run_hardware(
         result["host_throttle"] = info.get("host_throttle")
     result["held_s"] = time.monotonic() - started
     return result
+
+
+def row_fails_until(row: Row | SessionRow) -> str:
+    return row.fails_until if isinstance(row, Row) else ""
 
 
 def judge_row(row: Row | SessionRow, result: dict, analyzer: Path) -> dict:
@@ -450,6 +469,9 @@ def print_table(rows: list[dict]) -> None:
         detail = ",".join(row.get("failed_checks") or []) or (
             row["error"] or ""
         )
+        if verdict == "XPASS":
+            reason = row["fails_until"] or "--expect-fail"
+            detail = f"passes: drop its expected failure ({reason})"
         print(
             f"{row['name']:<26}{verdict:<8}{str(row.get('print_state')):<11}"
             f"{str(row.get('analyzer_ok', row.get('session_ok'))):<6}"
@@ -733,8 +755,11 @@ class SuiteRun:
         return [name for name in planned if name not in done]
 
     def judged(self, row: dict) -> dict:
-        judge_row(ROW_BY_NAME[row["name"]], row, self.analyzer)
-        row["expected_fail"] = row["name"] in self.expect_fail
+        definition = ROW_BY_NAME[row["name"]]
+        judge_row(definition, row, self.analyzer)
+        marked = row_fails_until(definition)
+        row["fails_until"] = marked
+        row["expected_fail"] = bool(marked) or row["name"] in self.expect_fail
         return row
 
     def build_target(self) -> None:
@@ -828,6 +853,8 @@ def main() -> None:
     tree = REPO if args.tree is None else args.tree.resolve()
     if any(row in SOAK_ROWS for row in args.selected):
         soak_gcode.ensure_all()
+    if any(row in CRAWL_MATRIX for row in args.selected):
+        crawl_gcode.ensure_all()
     suite_dir = SUITES_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
     build_local_engine(tree)
     suite_dir.mkdir(parents=True)
