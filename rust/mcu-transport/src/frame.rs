@@ -5,7 +5,6 @@ pub const CHANNEL_CONTROL: u8 = 0;
 pub const CHANNEL_EVENTS: u8 = 1;
 
 pub const FRAME_MIN_LEN_FIELD: usize = 2 + 1 + 2;
-pub const FRAME_MAX_TOTAL: usize = 1 + u16::MAX as usize;
 
 #[derive(Debug, Error)]
 pub enum FrameError {

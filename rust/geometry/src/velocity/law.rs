@@ -1094,12 +1094,6 @@ impl LawSegment {
             .map(|pair| defect::acceleration_bound(&pair))
             .fold(0.0, f64::max)
     }
-
-    /// The proven defect of every knot pair of this rail against its law.
-    pub fn rail_defects(&self) -> impl Iterator<Item = PairDefect> + '_ {
-        self.rail_pairs(0.0, self.dt)
-            .map(|pair| defect::pair_defect(&self.law, &pair))
-    }
 }
 
 impl ScalarLaw {
