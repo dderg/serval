@@ -18,9 +18,8 @@ impl LinearRate {
 
     /// `rate ≤ max` on a move the plan crosses at no more than `reachable`,
     /// under a ceiling held to the reachable peak, which loses the plan
-    /// nothing. Where the budget does not fit at that ceiling, the trade
-    /// ([`Self::traded`]) reads the move's own ceiling: a reachable peak
-    /// that rises with a looser limit leaves the pair it picks standing.
+    /// nothing. Where the budget does not fit at that ceiling, the two
+    /// trade ([`Self::traded`]).
     pub(super) fn capped(
         &self,
         max: f64,
@@ -37,13 +36,13 @@ impl LinearRate {
 
     /// Of the ceilings `v` and budgets `A` on `rate = max`, the pair that
     /// takes the run `reachable` bounds, from one seam's limit to the
-    /// other's, soonest. The run at `A` peaks at
-    /// [`ReachableSpeed::run_peak`], and a ceiling above that only gives up
-    /// budget, so the ceiling stays at or under where it meets that peak;
-    /// the budget stays whole where the plan never reaches the ceiling it
-    /// leaves. Where the run peaks faster than `rate = max` lets the move go
-    /// at any budget, the budget stays and the ceiling gives way, or each
-    /// gets half of `max` when neither alone fits.
+    /// other's, soonest. The move at `A` peaks at
+    /// [`ReachableSpeed::peak_under`], never above its reachable peak, and a
+    /// ceiling above that only gives up budget, so the ceiling stays at or
+    /// under where it meets that peak; the budget stays whole where the plan
+    /// never reaches the ceiling it leaves. Where the run peaks faster than
+    /// `rate = max` lets the move go at any budget, the budget stays and the
+    /// ceiling gives way, or each gets half of `max` when neither alone fits.
     fn traded(
         &self,
         max: f64,
@@ -60,7 +59,7 @@ impl LinearRate {
         }
         let still_speed = max / per_velocity;
         let budget_at = |v: f64| (max - per_velocity * v) / per_accel;
-        let peak_at = |v: f64| reachable.run_peak(budget_at(v));
+        let peak_at = |v: f64| reachable.peak_under(budget_at(v));
         if peak_at(still_speed) >= still_speed {
             return if cut_ceiling > 0.0 {
                 (cut_ceiling, accel)
@@ -77,7 +76,7 @@ impl LinearRate {
                 over = mid;
             }
         }
-        let top = under.min(ceiling);
+        let top = under.min(ceiling).min(reachable.peak_mm_s);
         if top <= cut_ceiling {
             return (cut_ceiling, accel);
         }
@@ -136,3 +135,6 @@ fn least_on(low: f64, high: f64, time: impl Fn(f64) -> f64) -> f64 {
     };
     if time(high) <= best_time { high } else { best }
 }
+
+#[cfg(test)]
+mod tests;
