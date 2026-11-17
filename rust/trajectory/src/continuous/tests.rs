@@ -2782,7 +2782,13 @@ fn steep_mesh() -> Arc<SurfaceTransform> {
 fn span_leaving_the_mesh(distance_origin: f64) -> AnalyticMoveSpan {
     let line = Segment::Line(Line::try_new([150.0, 150.0, 0.2], [300.0, 150.0, 0.2]).unwrap());
     let phase = |t0, dt, s0: f64, v0, a0| {
-        LawSegment::new(t0, dt, distance_origin + s0, v0, ScalarLaw::ConstAccel { a0 })
+        LawSegment::new(
+            t0,
+            dt,
+            distance_origin + s0,
+            v0,
+            ScalarLaw::ConstAccel { a0 },
+        )
     };
     AnalyticMoveSpan::try_new(
         move_with(line, vec![]),
@@ -2803,7 +2809,9 @@ fn span_leaving_the_mesh(distance_origin: f64) -> AnalyticMoveSpan {
 fn assert_one_seam_where_the_warped_z_steps(span: &AnalyticMoveSpan) {
     let z_velocity = |t: f64| span.eval_axis(2, t).unwrap().velocity;
 
-    let seams = span.surface_seam_times().expect("the edge crossing is located");
+    let seams = span
+        .surface_seam_times()
+        .expect("the edge crossing is located");
 
     let [seam] = seams[..] else {
         panic!("one crossing of x = 290, got seams {seams:?}");
@@ -2833,9 +2841,19 @@ fn a_surface_seam_in_the_rounding_gap_between_two_phases_is_located() {
     let edge_distance = 50.0;
     let accel = 10_000.0;
     let speed_up_dt = next_toward(0.1, 0.0);
-    let speed_up = LawSegment::new(0.0, speed_up_dt, 0.0, 0.0, ScalarLaw::ConstAccel { a0: accel });
+    let speed_up = LawSegment::new(
+        0.0,
+        speed_up_dt,
+        0.0,
+        0.0,
+        ScalarLaw::ConstAccel { a0: accel },
+    );
     let gap = edge_distance - speed_up.end_distance();
-    assert!(gap > 0.0, "the speed-up reaches {}", speed_up.end_distance());
+    assert!(
+        gap > 0.0,
+        "the speed-up reaches {}",
+        speed_up.end_distance()
+    );
     let cruise_start = edge_distance + gap;
     let cruise_speed = accel * speed_up_dt;
     let cruise_dt = (60.0 - cruise_start) / cruise_speed;

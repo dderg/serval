@@ -8,8 +8,8 @@ const Z_FIRST_PRINT: &str = "G90\nG1 X40 Y50 Z10 F6000\nG1 X100 Y100 F6000\n";
 
 fn bench_planner() -> planner_config::PlannerConfig {
     let path = source_tree::repo_file("tools/bench/printer.cfg");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     planner_config::from_doc::planner_config_from_text(&text).expect("bench planner config")
 }
 
@@ -48,7 +48,12 @@ fn a_first_move_naming_z_starts_the_plan_under_the_mesh() {
     let mut last_end_z = None;
     let mut output = |item| {
         if let TrajectoryItem::Seg(segment) = item {
-            last_end_z = Some(segment.eval_axis(2, segment.t_end).expect("z evaluates").position);
+            last_end_z = Some(
+                segment
+                    .eval_axis(2, segment.t_end)
+                    .expect("z evaluates")
+                    .position,
+            );
         }
         true
     };
@@ -59,5 +64,8 @@ fn a_first_move_naming_z_starts_the_plan_under_the_mesh() {
     assert!(pipeline.finish(&mut output));
 
     let end_z = last_end_z.expect("the print emits motion");
-    assert!((end_z - 10.0).abs() < 1e-6, "the print ends at z {end_z}, not 10");
+    assert!(
+        (end_z - 10.0).abs() < 1e-6,
+        "the print ends at z {end_z}, not 10"
+    );
 }
