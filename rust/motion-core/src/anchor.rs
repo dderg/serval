@@ -469,11 +469,19 @@ impl Anchor {
         self.parked
     }
 
-    /// Whether a segment starting at `seg_t_start` sets the stream off from
-    /// rest: the stream is parked, or the segment restarts its timeline.
+    /// The host instant a segment starting at `seg_t_start` would start at
+    /// when it sets the stream off from rest (the stream is parked, or the
+    /// segment restarts its timeline); `None` while it continues the stream
+    /// in motion.
     #[must_use]
-    pub(crate) fn sets_off(&self, seg_t_start: f64, host_now: f64) -> bool {
-        self.parked || self.classify(seg_t_start, host_now) == AnchorClass::Reposition
+    pub(crate) fn set_off_start(&self, seg_t_start: f64, host_now: f64) -> Option<f64> {
+        let sets_off =
+            self.parked || self.classify(seg_t_start, host_now) == AnchorClass::Reposition;
+        if !sets_off {
+            return None;
+        }
+        self.planned_start(seg_t_start, host_now)
+            .map(|(t0, _)| t0 + seg_t_start)
     }
 
     /// The pacer braked motion in flight to rest because the producer fell

@@ -72,8 +72,8 @@ impl SegmentSink for OverrunWatch {
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.inner.follow_stream_to(stream_t);
     }
-    fn sets_off(&self, seg: &ContinuousSegment) -> bool {
-        self.inner.sets_off(seg)
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
+        self.inner.set_off_in(seg)
     }
 }
 

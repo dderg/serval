@@ -584,12 +584,14 @@ impl<S: crate::pump::SpanSink> SegmentSink for PumpSink<'_, S> {
         self.projection.anchor.lock_ok().follow_stream_to(stream_t);
     }
 
-    fn sets_off(&self, seg: &ContinuousSegment) -> bool {
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
         let host_now = self.projection.host_now();
-        self.projection
+        let start = self
+            .projection
             .anchor
             .lock_ok()
-            .sets_off(seg.t_start, host_now)
+            .set_off_start(seg.t_start, host_now)?;
+        Some(Duration::from_secs_f64((start - host_now).max(0.0)))
     }
 }
 

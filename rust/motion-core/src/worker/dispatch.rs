@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use trajectory::{ContinuousSegment, NudgeProfile};
 
@@ -60,10 +60,11 @@ pub(crate) trait SegmentSink {
     /// across the idle gap that follows may re-anchor the timeline forward.
     fn mark_parked(&mut self) {}
     fn follow_stream_to(&mut self, stream_t: f64);
-    /// Whether `seg` would set the stream off from rest instead of
-    /// continuing it in motion. A sink that anchors nothing sets nothing off.
-    fn sets_off(&self, _seg: &ContinuousSegment) -> bool {
-        false
+    /// How long from now the stream would start if `seg` set it off from
+    /// rest; `None` while `seg` continues it in motion. A sink that anchors
+    /// nothing sets nothing off.
+    fn set_off_in(&self, _seg: &ContinuousSegment) -> Option<Duration> {
+        None
     }
 }
 
@@ -92,10 +93,21 @@ pub(crate) struct WorkerLinks {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SetOffHold {
     pub(crate) since: Instant,
+    /// When the held motion would start playing, had it set off on its
+    /// first segment: until then it stands ahead of a playhead not yet
+    /// running.
+    pub(crate) starts: Instant,
     /// Stream time held, from the first segment's start.
     pub(crate) held_s: f64,
     /// Stream time the held segments run through.
     pub(crate) through_s: f64,
+}
+
+impl SetOffHold {
+    /// The held motion that stands ahead of the playhead at `now`.
+    pub(crate) fn ahead_secs(&self, now: Instant) -> f64 {
+        self.starts.saturating_duration_since(now).as_secs_f64() + self.held_s
+    }
 }
 
 /// Brakes to rest the pacer ordered, by the path that ordered them; a
@@ -212,25 +224,35 @@ impl Dispatcher {
             return;
         }
         let homing = self.links.finite_homing_admission.load(Ordering::Acquire);
-        if self.setting_off.is_empty() && (homing || !sink.sets_off(&seg)) {
+        let starts_in = if self.setting_off.is_empty() && !homing {
+            sink.set_off_in(&seg)
+        } else {
+            None
+        };
+        if self.setting_off.is_empty() && starts_in.is_none() {
             self.dispatch(&seg, sink);
             return;
         }
-        self.hold(seg);
+        self.hold(seg, starts_in);
         if self.held_off_secs() >= self.links.reserve_secs() {
             self.set_off(sink);
         }
     }
 
-    fn hold(&mut self, seg: ContinuousSegment) {
-        let since = self
-            .links
-            .set_off_hold()
-            .map_or_else(Instant::now, |hold| hold.since);
+    /// Holds `seg` back for the set-off, which starts `starts_in` from now
+    /// when `seg` is its first segment.
+    fn hold(&mut self, seg: ContinuousSegment, starts_in: Option<Duration>) {
+        let now = Instant::now();
+        let (since, starts) = match (self.links.set_off_hold(), starts_in) {
+            (Some(hold), _) => (hold.since, hold.starts),
+            (None, Some(starts_in)) => (now, now + starts_in),
+            (None, None) => unreachable!("a set-off holds its first segment with its start"),
+        };
         let through_s = seg.t_end;
         self.setting_off.push(seg);
         *self.links.set_off_hold.lock_ok() = Some(SetOffHold {
             since,
+            starts,
             held_s: self.held_off_secs(),
             through_s,
         });

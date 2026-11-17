@@ -318,9 +318,10 @@ impl SegmentSink for AnchoredSink {
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.anchor.lock_ok().follow_stream_to(stream_t);
     }
-    fn sets_off(&self, seg: &ContinuousSegment) -> bool {
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
         let host_now = self.router.lock_ok().host_now_secs();
-        self.anchor.lock_ok().sets_off(seg.t_start, host_now)
+        let start = self.anchor.lock_ok().set_off_start(seg.t_start, host_now)?;
+        Some(Duration::from_secs_f64((start - host_now).max(0.0)))
     }
 }
 
@@ -431,8 +432,8 @@ impl SegmentSink for PacedSink {
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.inner.follow_stream_to(stream_t);
     }
-    fn sets_off(&self, seg: &ContinuousSegment) -> bool {
-        self.inner.sets_off(seg)
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
+        self.inner.set_off_in(seg)
     }
 }
 
@@ -2110,8 +2111,8 @@ impl SegmentSink for StallAfterFirstSink {
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.inner.follow_stream_to(stream_t);
     }
-    fn sets_off(&self, seg: &ContinuousSegment) -> bool {
-        self.inner.sets_off(seg)
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
+        self.inner.set_off_in(seg)
     }
 }
 

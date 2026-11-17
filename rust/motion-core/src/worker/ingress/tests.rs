@@ -232,6 +232,7 @@ fn a_first_segment_mid_commit_is_never_seen_moving_without_its_runway() {
 fn held_since(since: Instant) -> SetOffHold {
     SetOffHold {
         since,
+        starts: since,
         held_s: 0.0084,
         through_s: 0.0084,
     }

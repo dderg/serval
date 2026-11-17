@@ -4,9 +4,10 @@
 //! Message counts bound nothing in time: on the Pi bench the pump's span
 //! backlog alone held 14-28 s of motion.
 //!
-//! The intake admits a move while the committed runway and the moves still
-//! in the inbox fall short of the pacer's reserve plus
-//! [`STALL_HEADROOM_S`]. Motion the pipeline holds is not counted, planned
+//! The intake admits a move while the committed runway, the motion a
+//! stream's set-off holds back (#983) with the wait before it starts, and
+//! the moves still in the inbox fall short of the pacer's reserve plus
+//! [`STALL_HEADROOM_S`]. Other motion the pipeline holds is not counted, planned
 //! or not: its stages hold it until later moves arrive (the shaper holds
 //! its last segment until the next one covers its support, the planning
 //! front holds moves by count), so refusing those moves while counting it
@@ -23,7 +24,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::CommittedFrontier;
 use super::dispatch::WorkerLinks;
@@ -128,17 +129,24 @@ impl IntakeGate {
     }
 
     /// Motion handed over that the planning front does not hold: what the
-    /// intake counts and the planned motion the pump has not taken yet.
+    /// intake counts and the planned motion the pump has not taken yet, of
+    /// which a held set-off is already counted.
     fn ahead_secs(&self) -> f64 {
         let planned_ahead_s = self.planned_ahead_secs();
-        self.queued_secs() + planned_ahead_s
+        let held_s = self.links.set_off_hold().map_or(0.0, |hold| hold.held_s);
+        self.queued_secs() + planned_ahead_s - held_s
     }
 
-    /// The committed runway and the moves still in the inbox: motion that
-    /// plays out or reaches the pipeline without waiting on later moves.
+    /// The committed runway, a held set-off and the moves still in the
+    /// inbox: motion that plays out or reaches the pipeline without waiting
+    /// on later moves.
     fn queued_secs(&self) -> f64 {
         let inbox_s = self.inbox_ns.load(Ordering::Acquire) as f64 / NS_PER_S;
-        self.frontier.runway_secs() + inbox_s
+        let held_s = self
+            .links
+            .set_off_hold()
+            .map_or(0.0, |hold| hold.ahead_secs(Instant::now()));
+        self.frontier.runway_secs() + held_s + inbox_s
     }
 
     /// Planned motion the pump has not taken yet: it plays once the

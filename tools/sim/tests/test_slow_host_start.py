@@ -129,14 +129,11 @@ def _events(world) -> list[dict]:
 
 
 def _first_step_after(control, issued_s: float) -> float:
-    return (
-        min(
-            control.get_step_times(line)["first_ns"]
-            for line in BENCH_AB_STEP_LINES
-        )
-        / NS_PER_S
-        - issued_s
-    )
+    """Seconds from `issued_s` to the first X/Y motor step since the step
+    counters were reset."""
+    stepped = [control.get_step_times(line) for line in BENCH_AB_STEP_LINES]
+    first_ns = min(times["first_ns"] for times in stepped if times["count"])
+    return first_ns / NS_PER_S - issued_s
 
 
 @pytest.mark.expected_seconds(CRAWL_EXPECTED_S)

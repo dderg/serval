@@ -14,6 +14,7 @@ struct Recorder {
     dispatched: Vec<(f64, f64)>,
     parks: usize,
     in_motion: bool,
+    starts_in: Duration,
 }
 
 impl SegmentSink for Recorder {
@@ -36,8 +37,8 @@ impl SegmentSink for Recorder {
         self.in_motion = false;
     }
     fn follow_stream_to(&mut self, _stream_t: f64) {}
-    fn sets_off(&self, _seg: &ContinuousSegment) -> bool {
-        !self.in_motion
+    fn set_off_in(&self, _seg: &ContinuousSegment) -> Option<Duration> {
+        (!self.in_motion).then_some(self.starts_in)
     }
 }
 
@@ -235,4 +236,28 @@ fn a_stream_parked_mid_print_sets_off_again_only_on_its_reserve() {
     );
 
     assert_eq!(sink.dispatched.len(), 2);
+}
+
+/// The intake bounds what stands ahead of the playhead. A held set-off
+/// stands ahead of one not yet running: its wait to start and its motion
+/// count, as they did once its first segment was anchored at once.
+#[test]
+fn a_held_set_off_counts_against_the_intake_cap() {
+    const PRIMED_START: Duration = Duration::from_millis(540);
+    let (mut dispatcher, links) = dispatcher();
+    let intake = super::super::intake_gate::IntakeGate::new(Arc::default(), Arc::clone(&links));
+    let inbox_ns = (intake.cap_secs() - 0.5) * 1e9;
+    intake.enter(inbox_ns as u64);
+    assert!(intake.admits(), "nothing ahead but the inbox");
+
+    let mut sink = Recorder {
+        starts_in: PRIMED_START,
+        ..Recorder::default()
+    };
+    dispatcher.feed(TrajectoryItem::Seg(segment(0.0, REST_HOLD_S)), &mut sink);
+
+    assert!(
+        !intake.admits(),
+        "a set-off {PRIMED_START:?} from starting held {REST_HOLD_S}s the intake did not count"
+    );
 }

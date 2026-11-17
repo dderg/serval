@@ -618,17 +618,18 @@ fn a_dwell_long_after_the_end_rests_until_a_fresh_start() {
 }
 
 #[test]
-fn a_fresh_stream_sets_off_from_rest() {
-    assert!(Anchor::new().sets_off(0.0, 100.0));
+fn a_fresh_stream_sets_off_a_lead_ahead() {
+    let start = Anchor::new().set_off_start(0.0, 100.0);
+    assert_eq!(start, Some(100.0 + DEFAULT_LEAD_SECS));
 }
 
 #[test]
 fn a_stream_in_motion_continues_and_a_parked_one_sets_off_again() {
-    assert!(!primed(false).sets_off(1.0, 100.1));
-    assert!(primed(true).sets_off(1.0, 100.1));
+    assert_eq!(primed(false).set_off_start(1.0, 100.1), None);
+    assert!(primed(true).set_off_start(1.0, 100.1).is_some());
 }
 
 #[test]
 fn a_reset_timeline_sets_off_even_from_motion() {
-    assert!(primed(false).sets_off(0.0, 100.1));
+    assert!(primed(false).set_off_start(0.0, 100.1).is_some());
 }
