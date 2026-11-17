@@ -461,13 +461,15 @@ read them is proven to fit the extruder's `max_accel`:
   cell asks nothing of the turning term.
 - **Travel crawls**: a guarded follower lays a crawl valley only where its
   advance reads a ratio within the crawl's reach, so a run of crawling
-  cells becomes a crawl only where a move with a ratio in reach
-  (`ExtrusionBudget::ratio_in_reach`, which covers the ramps of ratio steps,
-  `0.5·v·τ_max`) lies within the leaders' reach of it (`travel::TravelCrawl`,
-  #903). The guard measures that reach by the least path its crawl track
-  sums, behind off the extruding cells it keeps, ahead once the track covers
-  it; checks the reach ahead may read wait until then. A travel crawl sizes
-  no side and backs nothing off.
+  cells becomes a crawl only where the ramps of a move the follower extrudes
+  on, `0.5·v·τ_max` at the fastest `v` the leaders reach about it
+  (`ExtrusionBudget::fastest_reachable_mm_s`), come within the leaders'
+  reach of it (`travel::TravelCrawl`, #903). The guard measures that reach
+  by the least path its crawl track sums: behind off the extruding cells it
+  keeps, ahead once the track covers the reach and the widest ramp any move
+  may take (at the printer's `max_velocity`, which bounds every move's
+  limit); checks the reach ahead may read wait until then. A travel crawl
+  sizes no side and backs nothing off.
 - **Back-off**: a cell that still binds scales the acceleration budgets of
   the moves it reads by `(limit/demand)^(2/3)`, clamped to [0.5, 0.95], and
   re-plans the span around them between two seams whose speeds it keeps
