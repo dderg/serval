@@ -9,6 +9,8 @@ use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use motion_pipeline::{Control, DispatchCommand, StreamConfig};
 use trajectory::{ContinuousSegment, NudgeProfile};
 
+mod slow_host;
+
 #[derive(Clone, Default)]
 struct Capture {
     segs: Arc<Mutex<Vec<(f64, f64, f64)>>>, // (t_start, t_end, x_at_end)
@@ -101,7 +103,59 @@ fn spawn_on_timeline(
     sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
 ) -> TestWorker {
-    spawn_recorded(config, chains, home, sink, timeline, None)
+    spawn_recorded(
+        config,
+        chains,
+        home,
+        sink,
+        timeline,
+        None,
+        Production::AsShaped,
+    )
+}
+
+/// How the shaped trajectory reaches the dispatcher.
+enum Production {
+    AsShaped,
+    /// The producer takes `gap` on `clock` to hand on the motion behind each
+    /// stream's first segment: #983's Pi, planning a slow section after the
+    /// lowerer's rest hold was out.
+    GapAfterFirstSegments {
+        clock: Arc<host_rt::clock::MockClock>,
+        gap: Duration,
+    },
+}
+
+impl Production {
+    /// Relays `shaped` to the dispatcher as this producer would hand it on.
+    fn relay(
+        self,
+        shaped: crossbeam_channel::Receiver<motion_pipeline::TrajectoryItem>,
+    ) -> crossbeam_channel::Receiver<motion_pipeline::TrajectoryItem> {
+        let Self::GapAfterFirstSegments { clock, gap } = self else {
+            return shaped;
+        };
+        let (relay, relayed) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+        std::thread::spawn(move || {
+            let mut segments_since_rest = 0_usize;
+            for item in shaped {
+                match item {
+                    motion_pipeline::TrajectoryItem::Seg(_) => {
+                        segments_since_rest += 1;
+                        if segments_since_rest == 2 {
+                            clock.advance(gap);
+                        }
+                    }
+                    motion_pipeline::TrajectoryItem::Parked => segments_since_rest = 0,
+                    motion_pipeline::TrajectoryItem::Control(_) => {}
+                }
+                if relay.send(item).is_err() {
+                    return;
+                }
+            }
+        });
+        relayed
+    }
 }
 
 fn spawn_recorded(
@@ -111,6 +165,7 @@ fn spawn_recorded(
     mut sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
     dispatch_record: Option<Arc<DispatchRecorder>>,
+    production: Production,
 ) -> TestWorker {
     struct NoEndpoint;
     impl crate::pump::SpanSink for NoEndpoint {
@@ -125,7 +180,8 @@ fn spawn_recorded(
         }
     }
     let (control, control_rx) = crossbeam_channel::unbounded();
-    let (output, trajectory_rx) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+    let (output, shaped) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+    let trajectory_rx = production.relay(shaped);
     let links = Arc::new(WorkerLinks::default());
     let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&timeline.frontier));
     let admission = Arc::clone(&links);
@@ -262,6 +318,11 @@ impl SegmentSink for AnchoredSink {
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.anchor.lock_ok().follow_stream_to(stream_t);
     }
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
+        let host_now = self.router.lock_ok().host_now_secs();
+        let start = self.anchor.lock_ok().set_off_start(seg.t_start, host_now)?;
+        Some(Duration::from_secs_f64((start - host_now).max(0.0)))
+    }
 }
 
 #[test]
@@ -370,6 +431,9 @@ impl SegmentSink for PacedSink {
     }
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.inner.follow_stream_to(stream_t);
+    }
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
+        self.inner.set_off_in(seg)
     }
 }
 
@@ -1544,7 +1608,6 @@ fn drain_requests_refuse_a_full_channel_instead_of_blocking() {
     let intake = Arc::new(intake_gate::IntakeGate::new(
         Arc::default(),
         Arc::clone(&links),
-        0.0,
     ));
     let h = StreamWorkerHandle {
         sender,
@@ -2048,6 +2111,9 @@ impl SegmentSink for StallAfterFirstSink {
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.inner.follow_stream_to(stream_t);
     }
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
+        self.inner.set_off_in(seg)
+    }
 }
 
 /// Pi bench, #856: a print committed its first 0.13 s at once, anchored it
@@ -2368,6 +2434,7 @@ fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_pl
         sink.clone(),
         timeline,
         Some(Arc::clone(&record)),
+        Production::AsShaped,
     );
     let mut at = [0.0_f64, 0.0, 0.0];
     let mut line_no = 1;

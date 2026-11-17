@@ -4,9 +4,10 @@
 //! Message counts bound nothing in time: on the Pi bench the pump's span
 //! backlog alone held 14-28 s of motion.
 //!
-//! The intake admits a move while the committed runway and the moves still
-//! in the inbox fall short of the pacer's reserve plus
-//! [`STALL_HEADROOM_S`]. Motion the pipeline holds is not counted, planned
+//! The intake admits a move while the committed runway, the motion a
+//! stream's set-off holds back (#983) with the wait before it starts, and
+//! the moves still in the inbox fall short of the pacer's reserve plus
+//! [`STALL_HEADROOM_S`]. Other motion the pipeline holds is not counted, planned
 //! or not: its stages hold it until later moves arrive (the shaper holds
 //! its last segment until the next one covers its support, the planning
 //! front holds moves by count), so refusing those moves while counting it
@@ -23,7 +24,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::CommittedFrontier;
 use super::dispatch::WorkerLinks;
@@ -41,7 +42,6 @@ pub(crate) struct IntakeGate {
     links: Arc<WorkerLinks>,
     planned_through_bits: AtomicU64,
     inbox_ns: AtomicU64,
-    reserve_bits: AtomicU64,
     peak_ahead_bits: AtomicU64,
 }
 
@@ -51,17 +51,12 @@ pub(crate) fn shortest_ns(m: &geometry::Move) -> u64 {
 }
 
 impl IntakeGate {
-    pub(crate) fn new(
-        frontier: Arc<CommittedFrontier>,
-        links: Arc<WorkerLinks>,
-        reserve_s: f64,
-    ) -> Self {
+    pub(crate) fn new(frontier: Arc<CommittedFrontier>, links: Arc<WorkerLinks>) -> Self {
         Self {
             frontier,
             links,
             planned_through_bits: AtomicU64::new(0.0_f64.to_bits()),
             inbox_ns: AtomicU64::new(0),
-            reserve_bits: AtomicU64::new(reserve_s.to_bits()),
             peak_ahead_bits: AtomicU64::new(0.0_f64.to_bits()),
         }
     }
@@ -72,14 +67,9 @@ impl IntakeGate {
             .store(stream_s.to_bits(), Ordering::Release);
     }
 
-    pub(crate) fn set_reserve(&self, reserve_s: f64) {
-        self.reserve_bits
-            .store(reserve_s.to_bits(), Ordering::Release);
-    }
-
     /// The most runway the intake lets queue ahead of the playhead.
     pub(crate) fn cap_secs(&self) -> f64 {
-        f64::from_bits(self.reserve_bits.load(Ordering::Acquire)) + STALL_HEADROOM_S
+        self.links.reserve_secs() + STALL_HEADROOM_S
     }
 
     pub(crate) fn enter(&self, ns: u64) {
@@ -139,17 +129,21 @@ impl IntakeGate {
     }
 
     /// Motion handed over that the planning front does not hold: what the
-    /// intake counts and the planned motion the pump has not taken yet.
+    /// intake counts and the planned motion the pump has not taken yet, of
+    /// which a held set-off is already counted.
     fn ahead_secs(&self) -> f64 {
         let planned_ahead_s = self.planned_ahead_secs();
-        self.queued_secs() + planned_ahead_s
+        let held_s = self.links.set_off_hold().map_or(0.0, |hold| hold.held_s);
+        self.queued_secs() + planned_ahead_s - held_s
     }
 
-    /// The committed runway and the moves still in the inbox: motion that
-    /// plays out or reaches the pipeline without waiting on later moves.
+    /// The committed runway, a held set-off and the moves still in the
+    /// inbox: motion that plays out or reaches the pipeline without waiting
+    /// on later moves.
     fn queued_secs(&self) -> f64 {
         let inbox_s = self.inbox_ns.load(Ordering::Acquire) as f64 / NS_PER_S;
-        self.frontier.runway_secs() + inbox_s
+        let runway_s = self.frontier.runway_secs();
+        self.links.ahead_secs(runway_s, Instant::now()) + inbox_s
     }
 
     /// Planned motion the pump has not taken yet: it plays once the

@@ -5,11 +5,8 @@ fn ingress(output_tx: crossbeam_channel::Sender<motion_pipeline::TrajectoryItem>
     let frontier: Arc<crate::worker::CommittedFrontier> = Arc::default();
     let links: Arc<WorkerLinks> = Arc::default();
     let pacer = Pacer::default();
-    let intake = Arc::new(IntakeGate::new(
-        Arc::clone(&frontier),
-        Arc::clone(&links),
-        pacer.reserve_secs(),
-    ));
+    links.publish_reserve(pacer.reserve_secs());
+    let intake = Arc::new(IntakeGate::new(Arc::clone(&frontier), Arc::clone(&links)));
     Ingress {
         config: crate::worker::tests::cfg(),
         odometer: vec![0.0; 4],
@@ -230,4 +227,39 @@ fn a_first_segment_mid_commit_is_never_seen_moving_without_its_runway() {
         "the pacer braked a stream whose first segment was still being committed: it \
          read the anchor in motion and the frontier without the segment's runway"
     );
+}
+
+fn held_since(since: Instant) -> SetOffHold {
+    SetOffHold {
+        since,
+        starts: since,
+        held_s: 0.0084,
+        through_s: 0.0084,
+    }
+}
+
+#[test]
+fn a_set_off_waiting_within_the_widest_intake_cap_is_no_stall() {
+    let since = Instant::now();
+    let within = since + Duration::from_secs_f64(SET_OFF_STALL_S - 0.1);
+    assert_eq!(stalled_set_off(held_since(since), within, 0.0084, 12), None);
+}
+
+#[test]
+fn a_set_off_stalled_in_the_planning_front_names_it() {
+    let since = Instant::now();
+    let past = since + Duration::from_secs_f64(SET_OFF_STALL_S);
+    let stall = stalled_set_off(held_since(since), past, 0.0084, 12).expect("stalled");
+    assert!(
+        stall.contains("planning front") && stall.contains("line 12"),
+        "{stall}"
+    );
+}
+
+#[test]
+fn a_set_off_stalled_in_the_shaper_names_it() {
+    let since = Instant::now();
+    let past = since + Duration::from_secs_f64(SET_OFF_STALL_S);
+    let stall = stalled_set_off(held_since(since), past, 2.5, 12).expect("stalled");
+    assert!(stall.contains("shaper holds"), "{stall}");
 }
