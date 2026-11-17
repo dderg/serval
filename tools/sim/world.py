@@ -642,13 +642,24 @@ class SimControl:
             f"set_gpio_input chip={chip} line={line} value={value}"
         )
 
-    def gpio_edges(self, chip: int, line: int) -> int:
+    def _gpio_edge_reply(self, chip: int, line: int) -> dict[str, int]:
         response = self.send(f"get_gpio_edges chip={chip} line={line}")
-        if not response.startswith("edges="):
+        fields = response.split()
+        keys = [field.split("=", 1)[0] for field in fields]
+        if keys != ["edges", "value", "last_ns"]:
             raise SimError(
                 f"get_gpio_edges chip={chip} line={line}: {response!r}"
             )
-        return int(response.split()[0].split("=", 1)[1])
+        return {
+            key: int(field.split("=", 1)[1]) for key, field in zip(keys, fields)
+        }
+
+    def gpio_edges(self, chip: int, line: int) -> int:
+        return self._gpio_edge_reply(chip, line)["edges"]
+
+    def gpio_last_edge_ns(self, chip: int, line: int) -> int:
+        """Shared virtual time of the line's latest edge (0: none yet)."""
+        return self._gpio_edge_reply(chip, line)["last_ns"]
 
     def gpio_output(self, chip: int, line: int) -> int:
         response = self.send(f"get_gpio_output chip={chip} line={line}")

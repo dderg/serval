@@ -192,8 +192,10 @@ def test_a_racing_reader_takes_a_panic_only_with_its_whole_message():
 
 
 def test_probes_flipped_unwatched_are_counted_not_checked():
-    from tools.sim.fuzzing.driver import probes_to_skip
+    from tools.sim.fuzzing.driver import PIN_EDGE_FRESH_NS, probes_to_skip
 
-    assert probes_to_skip(1, paused=False) == 0
-    assert probes_to_skip(1, paused=True) == 1
-    assert probes_to_skip(3, paused=False) == 3
+    fresh, stale = PIN_EDGE_FRESH_NS, PIN_EDGE_FRESH_NS + 1
+    assert probes_to_skip(1, paused=False, edge_age_ns=fresh) == 0
+    assert probes_to_skip(1, paused=False, edge_age_ns=stale) == 1
+    assert probes_to_skip(1, paused=True, edge_age_ns=0) == 1
+    assert probes_to_skip(3, paused=False, edge_age_ns=0) == 3

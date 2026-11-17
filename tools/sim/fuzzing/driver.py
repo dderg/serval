@@ -52,6 +52,7 @@ CHUNK_S = 2.0
 POLL_S = 0.005
 PIN_RESET_S = 5.0
 PROBE_RECHECK_S = 0.3
+PIN_EDGE_FRESH_NS = 50_000_000
 BRAKE_SETTLE_S = 1.0
 FAULT_WINDOW_S = 3.0
 RESTART_DEADLINE_S = 5.0
@@ -76,11 +77,13 @@ def _xyz(position) -> str:
     return " ".join(f"{a}{v:.6f}" for a, v in zip("XYZE", position))
 
 
-def probes_to_skip(unseen: int, paused: bool) -> int:
-    """Probes to count unchecked: every one that flipped while paused, and
-    every one of several that flipped between two looks (a blocking
-    command kept the harness away); a single fresh flip is checked."""
-    if paused or unseen > 1:
+def probes_to_skip(unseen: int, paused: bool, edge_age_ns: int) -> int:
+    """Probes to count unchecked: every one that flipped while paused,
+    every one of several that flipped between two looks, and a single
+    flip older than PIN_EDGE_FRESH_NS when seen (a blocking command kept
+    the harness away; the toolhead may have left the rest since). A
+    single fresh flip is checked."""
+    if paused or unseen > 1 or edge_age_ns > PIN_EDGE_FRESH_NS:
         return unseen
     return 0
 
@@ -303,16 +306,20 @@ class Session:
         unseen = self._mark_edges() - self.edge_base - self.next_probe
         if unseen <= 0:
             return
-        skipped = probes_to_skip(unseen, self.paused)
+        edge_age_ns = self._now_ns() - self._mark_edge_ns()
+        skipped = probes_to_skip(unseen, self.paused, edge_age_ns)
         if skipped:
-            self._skip_probes(skipped)
+            self._skip_probes(skipped, edge_age_ns)
             return
         self._take_probe()
 
     def _mark_edges(self) -> int:
         return self.marks.gpio_edges(MARK_CHIP, MARK_PIN_LINE)
 
-    def _skip_probes(self, count: int) -> None:
+    def _mark_edge_ns(self) -> int:
+        return self.marks.gpio_last_edge_ns(MARK_CHIP, MARK_PIN_LINE)
+
+    def _skip_probes(self, count: int, edge_age_ns: int) -> None:
         first = self.next_probe
         if first + count > len(self.probes):
             raise Violation(
@@ -322,7 +329,8 @@ class Session:
             )
         self.notes.append(
             f"print {self.print_index} probes {first}..{first + count - 1} "
-            f"flipped unwatched (paused={self.paused}): not checked"
+            f"flipped unwatched (paused={self.paused}, last edge "
+            f"{edge_age_ns / NS_PER_S:.3f} s before it was seen): not checked"
         )
         self.next_probe += count
         self.recheck = None
