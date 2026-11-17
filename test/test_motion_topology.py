@@ -1,3 +1,5 @@
+import types
+
 from fakes import (
     FakeKin as FakeKinBase,
 )
@@ -149,6 +151,7 @@ def test_init_planner_records_axis_mcu_ownership(monkeypatch):
         [("mcu", primary), ("toolboard", toolboard)] if module == "mcu" else []
     )
     motion._register_engine_wakeup = lambda: None
+    motion.await_clock_sync = lambda: None
     monkeypatch.setattr(
         motion_setup,
         "configure_axes_per_mcu",
@@ -161,6 +164,35 @@ def test_init_planner_records_axis_mcu_ownership(monkeypatch):
     assert motion.get_axis_mcu("y") is primary
     assert motion.get_axis_mcu("z") is toolboard
     assert motion.get_axis_mcu("e") is toolboard
+
+
+def test_init_planner_waits_for_clock_sync_before_the_engine_reads_it(
+    monkeypatch,
+):
+    calls = []
+    motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
+    motion._motion_config_text = (
+        "[printer]\nmax_velocity: 300\nmax_accel: 3000\n"
+    )
+    motion._planner_ready = False
+    motion.engine = types.SimpleNamespace(
+        init_planner=lambda *args: calls.append("engine.init_planner")
+    )
+    motion.await_clock_sync = lambda: calls.append("await_clock_sync")
+    mcu = FakeMcu(handle=11, move_queue_slots=FAKE_MOVE_QUEUE_SLOTS)
+    motion.printer.lookup_objects = lambda module=None: (
+        [("mcu", mcu)] if module == "mcu" else []
+    )
+    motion._register_engine_wakeup = lambda: None
+    monkeypatch.setattr(
+        motion_setup,
+        "configure_axes_per_mcu",
+        lambda motion, engine_mcus: None,
+    )
+
+    motion_setup.init_planner(motion)
+
+    assert calls == ["await_clock_sync", "engine.init_planner"]
 
 
 def test_cartesian_topology_tag_is_cartesian():
@@ -260,6 +292,7 @@ def test_init_planner_passes_config_text_topology_and_step_benchmarks(
 
     motion.printer.lookup_objects = lookup_objects
     motion._register_engine_wakeup = lambda: None
+    motion.await_clock_sync = lambda: None
     monkeypatch.setattr(
         motion_setup,
         "configure_axes_per_mcu",

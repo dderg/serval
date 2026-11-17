@@ -736,6 +736,7 @@ dependencies = [
  "nurbs",
  "planner-config",
  "proptest",
+ "source-tree",
  "taylor-model",
  "thiserror",
  "tracing",

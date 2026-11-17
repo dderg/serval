@@ -3,8 +3,9 @@
 uv run python tools/bench/events.py <run_dir> [--around T] [--window S]
     [--names a,b] [--tail N]
 
-events/*.jsonl hold the Pi's whole history, so records are cut to the run's
-host_start..host_end window. T is seconds since the run started.
+events/*.jsonl are the Pi's event logs written during the run, whole files
+that start before it, so records are cut to the run's host_start..host_end
+window. T is seconds since the run started.
 """
 
 from __future__ import annotations

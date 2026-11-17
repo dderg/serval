@@ -294,27 +294,6 @@ pub enum SetStepModeError {
     OutOfRange,
 }
 
-/// `Release` ordering on the store pairs with `Acquire` loads in the
-/// engine ISR and any foreground reader of `step_modes`.
-pub fn set_step_mode(
-    shared: &SharedState,
-    stepper_idx: u8,
-    mode: StepMode,
-    mcu_supports_phase: bool,
-) -> Result<(), SetStepModeError> {
-    if (stepper_idx as usize) >= MAX_STEPPER_OIDS {
-        return Err(SetStepModeError::OutOfRange);
-    }
-    if mode == StepMode::Modulated && !mcu_supports_phase {
-        return Err(SetStepModeError::CapabilityMissing);
-    }
-    // SAFETY: bounds checked above: stepper_idx < MAX_STEPPER_OIDS == step_modes.len()
-    #[allow(clippy::indexing_slicing)]
-    shared.step_modes[stepper_idx as usize]
-        .store(mode as u8, core::sync::atomic::Ordering::Release);
-    Ok(())
-}
-
 /// Install the `motor_idx → kinematic slot` mapping `write_phase_coils` uses to
 /// address XDIRECT SPI writes, and mark the slot Modulated. Called from the
 /// foreground command path (C `runtime_register_phase_motor`), never the ISR.

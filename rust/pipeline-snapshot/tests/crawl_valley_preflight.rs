@@ -1,0 +1,198 @@
+//! Prints the offline preflight sweep planned to a panic around crawl
+//! valleys of a ratio-ramped advance, each cut to the few lines that still
+//! panicked on 7250ffd13, on the config that found it.
+
+mod corpus;
+
+use std::path::{Path, PathBuf};
+
+const BENCH_PRINTER: &str = "tools/bench/printer.cfg";
+const BENCH_CORNER_DEVIATION: &str = "corner_deviation: 0.21";
+
+/// `tools/bench/printer.cfg` with its corner budget line replaced by
+/// `corner`, written where the planner reads it.
+fn bench_printer_with(name: &str, corner: &str) -> PathBuf {
+    let text = std::fs::read_to_string(corpus::repo().join(BENCH_PRINTER)).expect("read config");
+    assert!(
+        text.contains(BENCH_CORNER_DEVIATION),
+        "{BENCH_PRINTER} no longer sets {BENCH_CORNER_DEVIATION}"
+    );
+    let config = std::env::temp_dir().join(format!("{name}_{}.cfg", std::process::id()));
+    std::fs::write(&config, text.replacen(BENCH_CORNER_DEVIATION, corner, 1)).expect("temp config");
+    config
+}
+
+fn plans_within_the_extruder_limits(name: &str, gcode: &str, config: &Path) {
+    let snapshot = corpus::plan(name, gcode, config).expect("the repro plans motion");
+    let audit = corpus::extruder::extruder_audit(&snapshot, gcode, config)
+        .expect("the config limits the extruder");
+    let excesses: Vec<String> = audit.excesses.iter().map(ToString::to_string).collect();
+    assert!(excesses.is_empty(), "{}: {excesses:#?}", audit.summary());
+}
+
+/// #886: `voron_dense_top_layers.gcode` under a 1 mm corner budget. Its
+/// blends slope the ratio over millimetres, and a crawl valley that owns
+/// a ratio step owns that sloped run too; the step's flow was read at the
+/// speed the leaders reach at the run's far end, 52675 mm/s² against
+/// 20000.
+const LONG_BLEND_RUN_INTO_A_CRAWL: &str = "G90
+M83
+G1 X120.123 Y150.439 Z40.4 F60000
+G1 X117.142 Y149.487 E.01826
+G1 X118.166 Y150.208 E.01864
+G1 X118.603 Y150.302 E.0176
+G1 X118.948 Y150.313 E.01354
+G1 X119.27 Y150.276 E.01274
+G1 X119.753 Y150.119 E.01994
+G1 X120.115 Y149.909 E.01649
+G1 X120.489 Y149.575 E.01967
+G1 X120.515 Y149.539 E.00178
+G1 X120.119 Y150.449 Z40.6 F60000
+G1 X119.857 Y150.576 E.00916
+G1 X119.6 Y150.667 E.00917
+G1 X119.366 Y150.725 E.00812
+";
+
+#[test]
+fn a_crawl_valley_owning_a_long_sloped_run_reads_each_step_where_it_ramps() {
+    let config = bench_printer_with("long_blend_run", "corner_deviation: 1.0");
+    plans_within_the_extruder_limits("long_blend_run", LONG_BLEND_RUN_INTO_A_CRAWL, &config);
+}
+
+/// #887: `voron_dense_top_layers_zhop.gcode` on the slow Trident profile.
+/// The crawl at the turn from the z hop into the travel read the ratio of
+/// the extrusion before the retract, across the rest, at 0.0385:
+/// 5338 mm/s² against 5000 for a side whose leaders lay nothing.
+const EXTRUSION_RETRACT_HOP_TRAVEL: &str = "G90
+M83
+G1 X134.928 Y157.499 Z40.2 F60000
+G1 X135.619 Y139.703 E.6861
+G1 E-.3 F3600
+G1 Z40.6
+G1 X120.126 Y150.428 F60000
+";
+
+#[test]
+fn a_crawl_side_past_a_rest_reads_no_ratio_from_before_it() {
+    let config = corpus::repo().join("rust/motion-core/tests/configs/p4_trident_ramp_slow.cfg");
+    plans_within_the_extruder_limits("retract_hop_travel", EXTRUSION_RETRACT_HOP_TRAVEL, &config);
+}
+
+/// #888: `voron_dense_top_layers.gcode` on `bench_ramp.cfg`: a ratio step
+/// ramped over 1.66 mm either side reached into the side of a crawl
+/// valley 1.45 mm on, asking 123262 mm/s² against 5000.
+const STEP_RAMPING_INTO_A_CRAWL_SIDE: &str = "M83
+G1 X120.123 Y150.439 Z40.4 F60000
+G1 X120.119 Y150.449 Z40.6 F60000
+G1 X119.857 Y150.576 E.00916
+G1 X121.366 Y147.337 E.00825
+G1 X120.153 Y150.428 E.00708
+";
+
+#[test]
+fn a_ratio_step_whose_ramp_reaches_a_crawl_side_keeps_the_extruder_within_its_limit() {
+    let config = corpus::repo().join("rust/motion-core/tests/configs/bench_ramp.cfg");
+    plans_within_the_extruder_limits(
+        "step_into_crawl_side",
+        STEP_RAMPING_INTO_A_CRAWL_SIDE,
+        &config,
+    );
+}
+
+/// #889: `voron_first_layers.gcode` with `square_corner_velocity: 0`: the
+/// crawl valley at the reversal into the travel reached 6.36 mm back, but
+/// the projection had taken the path to 5.74 mm before it.
+const EXTRUSIONS_REVERSING_INTO_A_TRAVEL: &str = "G90
+M83
+G1 X118.78 Y118.345 E.02586
+G1 X119.312 Y117.714 E.02507
+G1 X119.832 Y116.953 E.02803
+G1 X120.203 Y116.258 E.02394
+G1 X120.569 Y115.412 E.02801
+G1 X120.838 Y114.528 E.02808
+G1 X121.062 Y113.02 E.02396
+G1 X121.075 Y112.257 E.02317
+G1 X119.699 Y124.517 F9000
+";
+
+#[test]
+fn a_crawl_valley_reaching_back_to_a_rest_finds_that_path_untaken() {
+    let config = bench_printer_with("reversal_into_travel", "square_corner_velocity: 0");
+    plans_within_the_extruder_limits(
+        "reversal_into_travel",
+        EXTRUSIONS_REVERSING_INTO_A_TRAVEL,
+        &config,
+    );
+}
+
+/// A corexy with fast shapers and a kernel-free advance, drawn by the
+/// print-like planner fuzz.
+const FAST_SHAPED_ADVANCE: &str = "[printer]
+max_velocity: 736
+max_accel: 52700
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 18600
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.047
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 101.57
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 114.82
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// A reversal, a retract and a hop: the crawl valley at the reversal
+/// keeps its floor flat past the rest valley the retract lays at its end,
+/// and the hop's slowest point, 3e-5 mm on, lies on that floor. It was
+/// taken for a crawl laid behind the rest valley (the hop on
+/// `voron_dense_top_layers_zhop.gcode` and `p4_trident_ramp_slow.cfg` once
+/// #887 no longer stopped it earlier).
+const REVERSAL_RETRACT_HOP: &str = "G90
+M83
+G1 X150.629 Y150.542 E0.03447 F5342
+G1 X161.535 Y155.766 E0.60584 F14064
+G1 X161.486 Y155.755 E0.00140 F15840
+G1 E-0.5 F2400
+G1 Z0.600 F600
+G1 X168.016 Y149.008 F30000
+";
+
+#[test]
+fn a_crawl_on_a_valleys_floor_past_a_rest_needs_no_valley_of_its_own() {
+    let config =
+        std::env::temp_dir().join(format!("fast_shaped_advance_{}.cfg", std::process::id()));
+    std::fs::write(&config, FAST_SHAPED_ADVANCE).expect("temp config");
+    plans_within_the_extruder_limits("reversal_retract_hop", REVERSAL_RETRACT_HOP, &config);
+}

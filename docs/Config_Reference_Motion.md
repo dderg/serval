@@ -22,7 +22,9 @@ max_accel: 3000
 #   vertex. A strict promise: where even a stop at the corner would round
 #   it by more (the shaper's floor, see "Corner budget on the shaped
 #   path" below), the planner slows the acceleration into and out of that
-#   corner until it fits. Must be >= 0. Set this XOR
+#   corner until it fits. Must be > 0: a shaper rounds even a corner it
+#   stops at, so no acceleration keeps a 0 mm budget;
+#   square_corner_velocity: 0 asks for the sharpest corners. Set this XOR
 #   square_corner_velocity; with neither set, each corner may miss by its
 #   shaper floor plus 0.04 mm.
 #square_corner_velocity:

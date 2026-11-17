@@ -109,6 +109,32 @@ fn an_unconverged_estimate_leaves_the_record_unconverged() {
     assert!(router.clock_est_converged(mcu));
 }
 
+/// #857: a restarted mcu whose counter had not yet advanced published 0 Hz;
+/// `init_planner` clocked every span on it and the log timestamper divided by
+/// it. A rate that is not positive is refused, and the record keeps waiting
+/// for a real one.
+#[test]
+fn an_estimate_that_is_not_a_positive_rate_is_refused() {
+    let (mut router, _clock) = router();
+    let mcu = router.claim_mcu("mcu");
+    let now_raw = crate::clock::monotonic_raw_secs();
+    for freq in [0.0, -FREQ, f64::NAN, f64::INFINITY] {
+        assert!(
+            matches!(
+                router.set_clock_est_rebased(mcu, freq, now_raw, 27_080_000, true, now_raw),
+                Err(RouterError::ClockRateNotPositive { .. })
+            ),
+            "{freq} Hz was accepted"
+        );
+        assert!(matches!(
+            router.set_clock_est(mcu, freq, now_raw, 27_080_000),
+            Err(RouterError::ClockRateNotPositive { .. })
+        ));
+    }
+    assert!(router.ack_clock_and_freq(mcu).is_none());
+    assert!(!router.clock_est_converged(mcu));
+}
+
 /// A second reconnect after a healthy epoch must invalidate again — the record
 /// is never sticky.
 #[test]

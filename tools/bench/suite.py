@@ -1,19 +1,32 @@
-"""Run the bench regression matrix under one lock hold.
+"""Run the bench regression matrix as a sequence of bench holds.
 
 uv run python tools/bench/suite.py [--quick | --group {matrix,session,soak}
     | --row NAME ...] [--expect-fail NAME ...] [--tree DIR]
 
-Syncs the tree, runs every row, prints a table and writes
-~/bench/suites/<timestamp>/summary.json. Matrix rows are one print each
-(run.py + analyze.py); session rows are one klippy session each
-(session.py + session_check.py). The full suite runs both groups. The soak
-group (qualification's, never in the full suite) runs the generated
-soak print (soak_gcode.py) for over 20 minutes per print: a mesh session
-with a pause and a second print, and a throttled-host print the analyzer
-judges, both also judged by the run-wide checks (session_check.py). --row
-runs named rows of any group; --tree syncs DIR and analyzes with DIR's
-analyzer and engine. Exit status is non-zero when any row fails (unless
-named in --expect-fail) or when an --expect-fail row passes.
+Plans the rows into holds that fit lock.MAX_HOLD_S (hold_plan.py) and runs
+each hold in a child process (--hold) that takes the bench lock, runs its
+rows' hardware part and releases the lock, so other holders interleave
+between holds. A hold starts by checking the Pi still runs this suite's
+sync of the tree (deploy record) and the boards the firmware the first
+hold found; it re-syncs the tree, or reflashes the F401 from the tree, when
+another holder changed them, and records that under `restored`. It then
+settles the bench (deploy.settle: no bench drop-in, no cpufreq cap, no
+orphaned Pi job, printer.cfg loaded, klippy ready and idle), and settles it
+again after its last row, recorded under `left`, so the next holder finds
+printer.cfg however the last row's config differed. A row starts
+only when its expected seconds (hold_plan.EXPECTED_ROW_S) and the margin
+fit the hold's remaining time; the rest move to the next hold. Each row is
+judged after its hold, outside the lock: matrix rows are one print each
+(run.py + analyze.py), session rows one klippy session each (session.py +
+session_check.py). The full suite runs both groups. The soak group
+(qualification's, never in the full suite) runs the generated soak prints
+(soak_gcode.py): a mesh session with a pause and a second print, and the
+longest print a hold fits on a throttled host, judged by the analyzer, both
+also by the run-wide checks (session_check.py). --row runs named rows of
+any group; --tree syncs DIR and analyzes with DIR's analyzer and engine.
+Writes ~/bench/suites/<timestamp>/summary.json (rows, and holds with their
+lock wait and held seconds). Exit status is non-zero when any row fails
+(unless named in --expect-fail) or when an --expect-fail row passes.
 """
 
 from __future__ import annotations
@@ -21,13 +34,19 @@ from __future__ import annotations
 import argparse
 import enum
 import json
+import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import capture
+import deploy
+import firmware_build_id
+import hold_plan
 import lock
 import pi
 import session_check
@@ -49,7 +68,12 @@ ENGINE_BUILD_TIMEOUT_S = 3600
 ENGINE_BUILD = ["make", "-f", "Makefile.rust", "motion-engine-fast"]
 THROTTLE_ARGS = ["--host-cpus", "1", "--host-max-mhz", "1500"]
 SOAK_THROTTLE_ARGS = ["--host-cpus", "2", "--host-max-mhz", "1500"]
-SOAK_PRINT_TIMEOUT_S = 2 * soak_gcode.PLANNED_PRINT_S
+SOAK_PRINT_TIMEOUT_S = 2 * soak_gcode.LONG_PRINT.planned_print_s
+SYNC_TIMEOUT_S = 1800
+FLASH_TIMEOUT_S = 1800
+RECOVERY_TIMEOUT_S = 600
+HOLDS_DIR = "holds"
+STALLED_HOLDS = 2
 SOAK_ANALYZE_TIMEOUT_S = 3600.0
 SINGLE_MOTOR_CEILING_STEPS_PER_S = 172_000
 BENCHMARK_BAND = (0.85, 1.10)
@@ -137,7 +161,7 @@ MATRIX = [
 SOAK_MATRIX = [
     Row(
         "soak_throttled",
-        soak_gcode.PATH,
+        soak_gcode.LONG_PRINT.path,
         throttle=SOAK_THROTTLE_ARGS,
         run_args=["--timeout", str(SOAK_PRINT_TIMEOUT_S)],
         run_wide_checks=True,
@@ -262,11 +286,8 @@ def runner_args(
     ]
 
 
-def run_row(
-    row: Row | SessionRow,
-    suite_dir: Path,
-    lock_timeout_s: float,
-    analyzer: Path = BENCH,
+def run_hardware(
+    row: Row | SessionRow, suite_dir: Path, lock_timeout_s: float
 ) -> dict:
     runs_dir = suite_dir / row.name
     result: dict = {
@@ -285,24 +306,34 @@ def run_row(
         result["error"] = f"{runner[0]}: {last_lines(run.stderr)}"
     if run.returncode not in (0, pi.DRIVER_SIDE_EXIT):
         result["recovered_with_reset_target"] = True
-        recovery = python("deploy.py", "reset-target", timeout_s=600)
+        recovery = python(
+            "deploy.py", "reset-target", timeout_s=RECOVERY_TIMEOUT_S
+        )
         if recovery.returncode != 0:
             result["error"] += f"; reset-target: {last_lines(recovery.stderr)}"
     if result["run_dir"]:
-        run_dir = Path(result["run_dir"])
-        info = read_json(run_dir / "run.json")
+        info = read_json(Path(result["run_dir"]) / "run.json")
         result["print_state"] = info.get("print_state")
         result["print_message"] = info.get("print_message")
         result["duration_s"] = info.get("duration_s")
         result["deployed"] = info.get("deployed")
         result["host_throttle"] = info.get("host_throttle")
+    result["held_s"] = time.monotonic() - started
+    return result
+
+
+def judge_row(row: Row | SessionRow, result: dict, analyzer: Path) -> dict:
+    started = time.monotonic()
+    if result["run_dir"] and result.get("killed_at_cap") is None:
+        run_dir = Path(result["run_dir"])
         if isinstance(row, SessionRow):
             judge_session(run_dir, result)
         else:
             judge_capture(row, run_dir, result, analyzer)
         if isinstance(row, Row) and row.run_wide_checks:
             judge_run_wide(run_dir, result)
-    result["wall_s"] = time.monotonic() - started
+    result["judge_s"] = time.monotonic() - started
+    result["wall_s"] = result["held_s"] + result["judge_s"]
     result["passed"] = row_passed(row, result)
     return result
 
@@ -427,6 +458,319 @@ def print_table(rows: list[dict]) -> None:
         )
 
 
+def print_holds(holds: list[dict]) -> None:
+    for hold in holds:
+        undone = [*hold["restored"], *hold["settled"]]
+        print(
+            f"hold {hold['index']}: wait {hold['wait_s']} s, held "
+            f"{hold['held_s']} s, exit {hold['exit']}, rows "
+            f"{', '.join(hold['rows']) or '-'}"
+            + (
+                f"; deferred {', '.join(hold['deferred'])}"
+                if hold["deferred"]
+                else ""
+            )
+            + (f"; restored: {' | '.join(undone)}" if undone else "")
+        )
+
+
+def print_benchmark(benchmark: dict | None) -> None:
+    if benchmark is None:
+        print("step benchmark: not measured")
+        return
+    print(
+        f"step benchmark: {benchmark['pulsed_capacity_steps_per_s']:.0f} "
+        f"steps/s pulsed = {benchmark['ratio_to_single_motor_ceiling']:.2f} x "
+        f"the single-motor ceiling, band {BENCHMARK_BAND}: "
+        + ("ok" if benchmark["within_band"] else "OUT OF BAND")
+    )
+
+
+def restore_tree(tree: Path, deployed: dict | None) -> tuple[dict, list[str]]:
+    foreign = None if deployed is None else pi.foreign_deploy(deployed)
+    if deployed is not None and foreign is None:
+        return deployed, []
+    sync = python(
+        "deploy.py", "sync", "--tree", str(tree), timeout_s=SYNC_TIMEOUT_S
+    )
+    if sync.returncode != 0:
+        raise SuiteError(f"sync failed: {last_lines(sync.stderr, 8)}")
+    restored = [] if foreign is None else [f"re-synced {tree}: {foreign}"]
+    return pi.read_deployed(), restored
+
+
+def board_firmware() -> dict:
+    return {"target": pi.mcu_version(), "capture": capture.identity().build_id}
+
+
+def check_restorable(tree: Path, ran_on: dict, found: dict) -> None:
+    if found["capture"] != ran_on["capture"]:
+        raise SuiteError(
+            f"the capture board reports firmware {found['capture']}, not "
+            f"{ran_on['capture']} this suite measured with: another holder "
+            "reflashed the instrument"
+        )
+    build_id = firmware_build_id.target_build_id(
+        tree, tree / deploy.TARGET_CONFIG
+    )
+    if not ran_on["target"].endswith(build_id):
+        raise SuiteError(
+            f"the F401 reports {found['target']!r}, not {ran_on['target']!r} "
+            f"this suite ran on, which is no build of {tree}: it cannot be "
+            "restored"
+        )
+
+
+def restore_target(tree: Path, ran_on: dict, found: dict) -> str:
+    flash = python(
+        "deploy.py",
+        "ensure-target",
+        "--tree",
+        str(tree),
+        timeout_s=FLASH_TIMEOUT_S,
+    )
+    if flash.returncode != 0:
+        raise SuiteError(f"ensure-target failed: {last_lines(flash.stderr, 8)}")
+    return f"F401 reflashed from {found['target']!r} to {ran_on['target']!r}"
+
+
+Save = Callable[[], None]
+
+
+def held(plan: dict, result: dict, save: Save) -> None:
+    tree = Path(plan["tree"])
+    result["deployed"], result["restored"] = restore_tree(
+        tree, plan["deployed"]
+    )
+    save()
+    found = board_firmware()
+    ran_on = plan["firmware"] or found
+    result["firmware"] = ran_on
+    if found != ran_on:
+        check_restorable(tree, ran_on, found)
+        if not plan["target_built"]:
+            result["needs_target_build"] = True
+            result["deferred"] = plan["rows"]
+            return
+        result["restored"].append(restore_target(tree, ran_on, found))
+    result["settled"] = deploy.settle(PRINTER_CFG)
+    result["step_benchmark"] = query_step_benchmark()
+    save()
+    run_rows(plan, result, save)
+    result["left"] = deploy.settle(PRINTER_CFG)
+
+
+def run_rows(plan: dict, result: dict, save: Save) -> None:
+    rows = plan["rows"]
+    for position, name in enumerate(rows):
+        if not hold_plan.fits(name, lock.remaining_s()):
+            result["deferred"] = rows[position:]
+            return
+        result["aborted"] = pi.foreign_deploy(result["deployed"])
+        if result["aborted"] is not None:
+            return
+        result.update(running=name, running_since=time.time())
+        save()
+        print(f"running {name} ...", flush=True)
+        result["rows"].append(
+            run_hardware(
+                ROW_BY_NAME[name], Path(plan["suite_dir"]), plan["lock_timeout"]
+            )
+        )
+        result["running"] = None
+        save()
+    result["aborted"] = pi.foreign_deploy(result["deployed"])
+
+
+def hold_main(plan_path: Path) -> None:
+    plan = read_json(plan_path)
+    result_path = Path(plan["result"])
+    result: dict = {
+        "index": plan["index"],
+        "asked": time.time(),
+        "acquired": None,
+        "released": None,
+        "deployed": plan["deployed"],
+        "firmware": plan["firmware"],
+        "restored": [],
+        "settled": [],
+        "left": [],
+        "step_benchmark": None,
+        "rows": [],
+        "running": None,
+        "deferred": [],
+        "needs_target_build": False,
+        "aborted": None,
+    }
+
+    def save() -> None:
+        result_path.write_text(json.dumps(result, indent=2))
+
+    save()
+    try:
+        with lock.bench_lock(plan["lock_timeout"], command=" ".join(sys.argv)):
+            result["acquired"] = time.time()
+            save()
+            held(plan, result, save)
+            result["released"] = time.time()
+    except (SuiteError, pi.BenchError) as exc:
+        result["aborted"] = str(exc)
+    save()
+    sys.exit(1 if result["aborted"] else 0)
+
+
+def hold_record(result: dict, planned: list[str]) -> dict:
+    acquired = result.get("acquired")
+    released = result.get("released") or result["ended"]
+    running = [result["running"]] if result.get("running") else []
+    return {
+        "index": result["index"],
+        "planned": planned,
+        "rows": [row["name"] for row in result.get("rows", [])] + running,
+        "deferred": result.get("deferred", []),
+        "wait_s": None
+        if acquired is None
+        else round(acquired - result["asked"], 1),
+        "held_s": 0.0 if acquired is None else round(released - acquired, 1),
+        "restored": result.get("restored", []),
+        "settled": result.get("settled", []),
+        "left": result.get("left", []),
+        "deployed_head": (result.get("deployed") or {}).get("head"),
+        "firmware": result.get("firmware"),
+        "exit": result["exit"],
+        "aborted": result.get("aborted"),
+    }
+
+
+class SuiteRun:
+    """The holds of one suite, taken one after another; between them the
+    lock is free and the finished rows are judged."""
+
+    def __init__(self, tree: Path, suite_dir: Path, args: argparse.Namespace):
+        self.tree = tree
+        self.suite_dir = suite_dir
+        self.analyzer = tree / BENCH.relative_to(REPO)
+        self.lock_timeout_s = args.lock_timeout
+        self.expect_fail = set(args.expect_fail)
+        self.deployed: dict | None = None
+        self.firmware: dict | None = None
+        self.target_built = False
+        self.holds: list[dict] = []
+        self.rows: list[dict] = []
+        self.benchmarks: list[dict] = []
+        self.aborted: str | None = None
+
+    def run(self, plan: list[list[str]]) -> None:
+        pending = [list(rows) for rows in plan]
+        stalled = 0
+        while pending and self.aborted is None:
+            planned = pending.pop(0)
+            result = self.take_hold(planned)
+            left = self.absorb(result, planned)
+            if result.get("needs_target_build"):
+                self.build_target()
+            progressed = result.get("rows") or result.get("needs_target_build")
+            stalled = 0 if progressed else stalled + 1
+            if stalled >= STALLED_HOLDS:
+                self.aborted = f"{stalled} holds in a row ran no row of {left}"
+            if left:
+                pending.insert(0, left)
+
+    def take_hold(self, rows: list[str]) -> dict:
+        index = len(self.holds) + 1
+        holds_dir = self.suite_dir / HOLDS_DIR
+        holds_dir.mkdir(exist_ok=True)
+        plan_path = holds_dir / f"{index}-plan.json"
+        result_path = holds_dir / f"{index}.json"
+        plan = {
+            "index": index,
+            "rows": rows,
+            "tree": str(self.tree),
+            "suite_dir": str(self.suite_dir),
+            "lock_timeout": self.lock_timeout_s,
+            "deployed": self.deployed,
+            "firmware": self.firmware,
+            "target_built": self.target_built,
+            "result": str(result_path),
+        }
+        plan_path.write_text(json.dumps(plan, indent=2))
+        print(f"hold {index}: {', '.join(rows)}", flush=True)
+        child = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--hold",
+                str(plan_path),
+            ]
+        )
+        return {
+            "index": index,
+            **read_json(result_path),
+            "exit": child.returncode,
+            "ended": time.time(),
+        }
+
+    def absorb(self, result: dict, planned: list[str]) -> list[str]:
+        """Judge the hold's rows, outside the lock; the rows it left."""
+        self.deployed = result.get("deployed") or self.deployed
+        self.firmware = result.get("firmware") or self.firmware
+        if result.get("step_benchmark"):
+            self.benchmarks.append(result["step_benchmark"])
+        for row in result.get("rows", []):
+            self.rows.append(self.judged(row))
+        killed = result["exit"] == lock.HOLD_EXPIRED_EXIT
+        if killed and result.get("running"):
+            self.rows.append(self.judged(killed_row(result, self.suite_dir)))
+        if result.get("aborted") or result["exit"] not in (
+            0,
+            lock.HOLD_EXPIRED_EXIT,
+        ):
+            self.aborted = result.get("aborted") or (
+                f"hold {result['index']} exited {result['exit']}"
+            )
+        self.holds.append(hold_record(result, planned))
+        done = set(self.holds[-1]["rows"])
+        return [name for name in planned if name not in done]
+
+    def judged(self, row: dict) -> dict:
+        judge_row(ROW_BY_NAME[row["name"]], row, self.analyzer)
+        row["expected_fail"] = row["name"] in self.expect_fail
+        return row
+
+    def build_target(self) -> None:
+        build = python(
+            "deploy.py",
+            "build-target",
+            "--tree",
+            str(self.tree),
+            timeout_s=ENGINE_BUILD_TIMEOUT_S,
+        )
+        if build.returncode != 0:
+            self.aborted = f"build-target failed: {last_lines(build.stderr, 8)}"
+        self.target_built = True
+
+    def benchmark(self) -> dict | None:
+        out_of_band = [b for b in self.benchmarks if not b["within_band"]]
+        return next(iter(out_of_band or self.benchmarks), None)
+
+
+def killed_row(result: dict, suite_dir: Path) -> dict:
+    name = result["running"]
+    runs_dir = suite_dir / name
+    run_dirs = sorted(runs_dir.glob("*")) if runs_dir.exists() else []
+    return {
+        "name": name,
+        **row_identity(ROW_BY_NAME[name]),
+        "run_dir": str(run_dirs[-1]) if run_dirs else None,
+        "error": (
+            f"the hold reached lock.MAX_HOLD_S = {lock.MAX_HOLD_S:.0f} s "
+            "during this row and was killed"
+        ),
+        "killed_at_cap": True,
+        "held_s": result["ended"] - result["running_since"],
+    }
+
+
 def exit_status(rows: list[dict]) -> int:
     bad = [row for row in rows if row["passed"] == row["expected_fail"]]
     return 1 if bad else 0
@@ -438,7 +782,7 @@ def scope_of(args: argparse.Namespace) -> Scope:
     return Scope.ALL if args.group is None else Scope(args.group)
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
     names = list(ROW_BY_NAME)
     parser = argparse.ArgumentParser(description=__doc__)
     scope = parser.add_mutually_exclusive_group()
@@ -453,8 +797,11 @@ def main() -> None:
         type=Path,
         help="worktree to sync to the Pi and analyze with instead of this one",
     )
+    parser.add_argument("--hold", type=Path, help=argparse.SUPPRESS)
     lock.add_timeout_argument(parser)
     args = parser.parse_args()
+    if args.hold is not None:
+        return args
     selected = (
         [ROW_BY_NAME[name] for name in args.row]
         if args.row
@@ -463,51 +810,59 @@ def main() -> None:
     unselected = sorted(set(args.expect_fail) - {row.name for row in selected})
     if unselected:
         parser.error(f"--expect-fail rows not in this suite: {unselected}")
+    args.selected = selected
+    return args
+
+
+def main() -> None:
+    args = parse_args()
+    if args.hold is not None:
+        hold_main(args.hold)
+        return
+    if lock.TOKEN_ENV in os.environ:
+        sys.exit(
+            "suite.py takes and releases the bench lock once per hold; it "
+            "cannot run inside lock.py hold or another holder's tree"
+        )
+    plan = hold_plan.plan([row.name for row in args.selected])
     tree = REPO if args.tree is None else args.tree.resolve()
-    analyzer = tree / BENCH.relative_to(REPO)
-    if any(row in SOAK_ROWS for row in selected):
-        soak_gcode.ensure()
+    if any(row in SOAK_ROWS for row in args.selected):
+        soak_gcode.ensure_all()
     suite_dir = SUITES_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
     build_local_engine(tree)
     suite_dir.mkdir(parents=True)
-    with lock.bench_lock(args.lock_timeout, command=" ".join(sys.argv)):
-        sync = python("deploy.py", "sync", "--tree", str(tree), timeout_s=1800)
-        if sync.returncode != 0:
-            sys.exit(f"sync failed: {last_lines(sync.stderr, 8)}")
-        synced = pi.read_deployed()
-        benchmark = query_step_benchmark()
-        rows = []
-        aborted = None
-        for row in selected:
-            aborted = pi.foreign_deploy(synced)
-            if aborted is not None:
-                break
-            print(f"running {row.name} ...", flush=True)
-            result = run_row(row, suite_dir, args.lock_timeout, analyzer)
-            result["expected_fail"] = row.name in args.expect_fail
-            rows.append(result)
-        aborted = aborted or pi.foreign_deploy(synced)
+    print(
+        f"plan: {len(plan)} hold(s) of at most {hold_plan.HOLD_ROWS_S:.0f} s "
+        "of rows each: "
+        + " | ".join(
+            f"{', '.join(rows)} ({hold_plan.planned_s(rows):.0f} s)"
+            for rows in plan
+        ),
+        flush=True,
+    )
+    suite = SuiteRun(tree, suite_dir, args)
+    suite.run(plan)
+    benchmark = suite.benchmark()
     summary = {
         "quick": args.quick,
         "group": args.group,
         "expect_fail": args.expect_fail,
         "suite_dir": str(suite_dir),
-        "rows": rows,
+        "rows": suite.rows,
         "step_benchmark": benchmark,
-        "aborted": aborted,
+        "aborted": suite.aborted,
+        "plan": plan,
+        "holds": suite.holds,
     }
     (suite_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-    print_table(rows)
-    print(
-        f"step benchmark: {benchmark['pulsed_capacity_steps_per_s']:.0f} "
-        f"steps/s pulsed = {benchmark['ratio_to_single_motor_ceiling']:.2f} x "
-        f"the single-motor ceiling, band {BENCHMARK_BAND}: "
-        + ("ok" if benchmark["within_band"] else "OUT OF BAND")
-    )
+    print_table(suite.rows)
+    print_holds(suite.holds)
+    print_benchmark(benchmark)
     print(f"summary: {suite_dir / 'summary.json'}")
-    if aborted is not None:
-        sys.exit(f"suite aborted, its rows are void: {aborted}")
-    sys.exit(exit_status(rows) or int(not benchmark["within_band"]))
+    if suite.aborted is not None:
+        sys.exit(f"suite aborted, its rows are void: {suite.aborted}")
+    in_band = benchmark is not None and benchmark["within_band"]
+    sys.exit(exit_status(suite.rows) or int(not in_band))
 
 
 if __name__ == "__main__":
