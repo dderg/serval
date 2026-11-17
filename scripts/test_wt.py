@@ -98,6 +98,15 @@ def test_list_reports_idle_and_busy(tmp_path):
     assert "busy" in wt(repo, tmp_path, "list").stdout
 
 
+def test_list_names_a_missing_lease_without_an_error(tmp_path):
+    repo = make_repo(tmp_path)
+    first = Path(wt(repo, tmp_path, "new", "topic-a").stdout.strip())
+    release(first)
+    listed = wt(repo, tmp_path, "list")
+    assert "lease: none" in listed.stdout
+    assert listed.stderr == ""
+
+
 def test_concurrent_allocations_never_share_an_idle_worktree(tmp_path):
     repo = make_repo(tmp_path)
     first = Path(wt(repo, tmp_path, "new", "seed").stdout.strip())
