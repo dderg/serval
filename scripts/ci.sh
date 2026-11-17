@@ -8,7 +8,7 @@
 #   ./scripts/ci.sh throughput-gate [--accept --reason R]
 #                                   # replay Ir and a live 2-core replay vs tools/bench/throughput_baseline.json
 #   ./scripts/ci.sh sim-fuzz [fuzz.py args]
-#                                   # SIM_FUZZ_SEEDS (500) fresh scenario-fuzzer seeds, minimized failures in .sim-fuzz/
+#                                   # SIM_FUZZ_SEEDS (500) fresh scenario-fuzzer seeds in ~10 min slot batches, failures in .sim-fuzz/
 #
 # Output policy: a terminal, GitHub Actions and `-v` get the live stream.
 # Everywhere else (agents, scripts capturing stdout) a gate prints one PASS
@@ -41,7 +41,7 @@ RUST="$ROOT/rust"
 # agents sharing the box stacked builds and tests to load 25-60, which timed out
 # nextest and distorted benchmarks. Cheap invocations and CI runners skip it.
 case "${1:-}" in
-    install-hooks|-h|--help|help) ;;
+    install-hooks|-h|--help|help|sim-fuzz) ;;
     *)
         if [ -z "${SERVAL_SLOT_HELD:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI_NO_SLOT:-}" ]; then
             exec python3 "$ROOT/scripts/slots.py" run -- "$0" "$@"
@@ -421,11 +421,14 @@ job_sim_image() { "$ROOT/tools/sim/run.sh" save-image; }
 job_sim_fresh() { python3 "$ROOT/tools/sim/check_fresh.py"; }
 
 # Fresh seeds every run (SIM_FUZZ_FIRST pins the range): the fixed smoke set
-# runs in sim-e2e. Not in `quick` or `all`: 500 seeds take ~15 min.
+# runs in sim-e2e. Not in `quick` or `all`: 500 seeds take ~1-2 h of slot time
+# under load, so tools/sim/hunt.py takes a slot per ~10-minute batch and
+# releases it between batches (the job itself holds none, see the case above).
 job_sim_fuzz() {
     local count="${SIM_FUZZ_SEEDS:-500}"
     local first="${SIM_FUZZ_FIRST:-$(( $(date +%s) % 100000000 * 10 ))}"
-    "$ROOT/tools/sim/run.sh" fuzz --seeds "$first..$((first + count - 1))" --minimize "$@"
+    python3 "$ROOT/tools/sim/hunt.py" --seeds "$first..$((first + count - 1))" \
+        --run-name "sim-fuzz-$first" "$@"
 }
 
 # The producer must outrun the printer everywhere; the committed asset is the
