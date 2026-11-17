@@ -2,8 +2,8 @@ use std::cell::OnceCell;
 use std::collections::VecDeque;
 
 use geometry::{
-    CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width, crawl_step_window,
-    side_weight, turns_around,
+    ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width,
+    crawl_step_window, side_weight, turns_around,
 };
 
 use super::super::{RatioSpan, Table};
@@ -210,6 +210,15 @@ impl SideTrail {
 /// ([`SideTrail::intervals_within`]).
 type Interval<'a> = (&'a TrailProbe, &'a TrailProbe, f64);
 
+/// Whether the leaders may crawl between the probes of `interval`, under
+/// [`ADVANCE_VALLEY_SPEED_MM_S`]: the slowest they can be there, each
+/// probe's speed less what the larger `|s̈|` takes off toward the other,
+/// is `(v₁ + v₂ − |s̈|·Δt)/2`.
+fn may_crawl((from, to, _): Interval) -> bool {
+    let decline = from.path_accel.abs().max(to.path_accel.abs()) * (to.t - from.t).abs();
+    0.5 * (from.speed + to.speed - decline) < ADVANCE_VALLEY_SPEED_MM_S
+}
+
 impl TrailProbe {
     /// The path acceleration away from the crawl a side reaching `side`
     /// reads here: `s̈` after it, `−s̈` before; where the leaders rest or
@@ -284,7 +293,11 @@ impl Edge {
 /// make it fit. An interval whose own reading passes the limit is read
 /// again across the width field's node spacing first
 /// ([`SideTrail::read_across`]): a sliver leg's mean reads the fit, not
-/// the leaders.
+/// the leaders. Where that still passes the limit across an interval the
+/// leaders may crawl in (a reversal inside the side), it asks `|s̈|` alone:
+/// the turning there is that crawl's, whose own valley holds the weight
+/// at zero over it, as the turning guard asks nothing of the turning
+/// term below [`ADVANCE_VALLEY_SPEED_MM_S`].
 ///
 /// The advance reads `r·(s̈ + k·Φ·s⃛)`, `Φ` the product of the valleys'
 /// weights, at most this side's `W(d)` at a distance `d` from the crawl:
@@ -392,7 +405,12 @@ pub(super) fn crawl_side(
                 } else {
                     interval
                 };
-                let own = own_over(interval);
+                let own = match own_over(interval) {
+                    own if ratio * own >= rule.max_accel_mm_s2 && may_crawl(interval) => {
+                        interval.0.path_accel.abs().max(interval.1.path_accel.abs())
+                    }
+                    own => own,
+                };
                 assert!(
                     ratio * own < rule.max_accel_mm_s2,
                     "follower projection: the leaders ask {} mm/s² of the follower between \
