@@ -149,17 +149,32 @@ def _event_name(line: str) -> str:
         return ""
 
 
+def _panic_line(lines: list[str]) -> Optional[int]:
+    return next((i for i, line in enumerate(lines) if PANIC in line), None)
+
+
+def _panic_signature(lines: list[str], index: int) -> str:
+    message = lines[index + 1].strip() if index + 1 < len(lines) else ""
+    return f"{lines[index].strip()} -- {message}"
+
+
 def first_panic(text: str) -> Optional[str]:
     """`<location> -- <message>`: Rust prints the message on the line after
     `thread '...' panicked at <file>:<line>:<col>:`, and the message tells
     apart panics sharing one site (shaper.rs:853 carries several)."""
     lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if PANIC not in line:
-            continue
-        message = lines[index + 1].strip() if index + 1 < len(lines) else ""
-        return f"{line.strip()} -- {message}"
-    return None
+    index = _panic_line(lines)
+    return None if index is None else _panic_signature(lines, index)
+
+
+def written_panic(text: str) -> Optional[str]:
+    """first_panic once its message line is complete too: a reader racing
+    the writer can see the panic line alone, or half its message."""
+    lines = text[: text.rfind("\n") + 1].splitlines()
+    index = _panic_line(lines)
+    if index is None or index + 1 >= len(lines):
+        return None
+    return _panic_signature(lines, index)
 
 
 def _first_panic(logs: Logs) -> Optional[str]:

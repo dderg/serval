@@ -63,7 +63,7 @@ def _run_session(chosen: Scenario, world, notes: list) -> tuple:
     finally:
         if session is not None:
             notes += session.notes
-            session.wall.stop()
+            session.stop_watchers()
 
 
 def _save_world(world, directory: pathlib.Path) -> None:

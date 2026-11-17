@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import dataclasses
+import pathlib
 import threading
 import time
 from typing import Callable, Optional
@@ -28,9 +29,9 @@ from tools.sim.fuzzing.checks import (
     event_offsets,
     event_wall_ns,
     events_since,
-    first_panic,
     lattice_counts,
     same_position,
+    written_panic,
 )
 from tools.sim.fuzzing.printer import (
     CANCEL_END_STATE,
@@ -42,7 +43,7 @@ from tools.sim.fuzzing.printer import (
 )
 from tools.sim.fuzzing.scenario import START_POSITION, Scenario
 from tools.sim.fuzzing.timeline import CHANGES_STATE, ENDS_PRINT, Act, Action
-from tools.sim.world import SimError
+from tools.sim.world import HarnessPacer, SimError
 
 NS_PER_S = 1_000_000_000
 PRINT_TIMEOUT_S = 600.0
@@ -59,6 +60,7 @@ IDLE_SLACK_S = 2.0
 TRAVEL_FEED = 6000
 POST_CHECK_XY = (120.0, 110.0)
 WALL_SAMPLE_S = 0.002
+PANIC_POLL_REAL_S = 0.2
 EVENT_STAMP_NS = 1_000_000
 RESTARTING = "Restarting printer"
 UNKNOWN_COMMAND = 'Unknown command:"SET_INPUT_SHAPER"'
@@ -121,6 +123,35 @@ class _WallMap:
         return self._virtuals[low], self._virtuals[high]
 
 
+class _PanicWatch:
+    """Reads klippy.stdout on its own thread: a panicked engine thread
+    freezes the virtual clock, and a paced wait would sit out the wedge
+    timeout (VirtualDeadline.WEDGE_REAL_S, 60 s real) before anyone looked."""
+
+    def __init__(self, stdout: pathlib.Path):
+        self._stdout = stdout
+        self._text = b""
+        self.found: Optional[str] = None
+        self.seen = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(PANIC_POLL_REAL_S):
+            with self._stdout.open("rb") as stream:
+                stream.seek(len(self._text))
+                self._text += stream.read()
+            self.found = written_panic(self._text.decode(errors="replace"))
+            if self.found:
+                self.seen.set()
+                return
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1)
+
+
 class Session:
     def __init__(self, scenario: Scenario, world, config_text: str):
         self.scenario = scenario
@@ -138,6 +169,7 @@ class Session:
         self.notes: list[str] = []
         self.durations: dict[int, float] = {}
         self.wall = _WallMap(world.vclock)
+        self.panics = _PanicWatch(world.log_dir / "klippy.stdout")
         self.offsets = event_offsets(world.log_dir)
         self.probes: list[program.Probe] = []
         self.next_probe = 0
@@ -146,7 +178,6 @@ class Session:
         self.recheck: Optional[_Recheck] = None
         self.watching = False
         self.print_index = 0
-        self.stdout_offset = 0
 
     # ------------------------------------------------------------ clock
 
@@ -154,15 +185,24 @@ class Session:
         return self.world.vclock.now_ns()
 
     def _paced(self, until: Callable[[], bool], what: str) -> None:
-        def predicate() -> bool:
-            self._service_probes()
-            return until()
-
+        deadline = self.world.vclock.deadline(PRINT_TIMEOUT_S)
         try:
-            self.world.wait_until(predicate, PRINT_TIMEOUT_S, what, poll=POLL_S)
+            with HarnessPacer(self.world.vclock) as pacer:
+                while True:
+                    self._service_probes()
+                    if until():
+                        return
+                    if deadline.expired():
+                        raise SimError(f"timeout waiting for {what}")
+                    if not pacer.sleep(POLL_S, stop=self.panics.seen):
+                        raise Violation(Check.PANIC, self.panics.found)
         except SimError as error:
             check = Check.WEDGE if "wedged" in str(error) else Check.HARNESS
             raise Violation(check, str(error)) from error
+
+    def stop_watchers(self) -> None:
+        self.wall.stop()
+        self.panics.stop()
 
     def _hold(self, seconds: float, what: str) -> None:
         end_ns = self._now_ns() + int(seconds * NS_PER_S)
@@ -519,14 +559,8 @@ class Session:
     def _check_no_panic(self) -> None:
         """A panicked engine thread can leave klippy up and the print
         never ending: stop at the panic instead of the print timeout."""
-        stdout = self.world.log_dir / "klippy.stdout"
-        with stdout.open("rb") as stream:
-            stream.seek(self.stdout_offset)
-            appended = stream.read()
-        panic = first_panic(appended.decode(errors="replace"))
-        if panic:
-            raise Violation(Check.PANIC, panic)
-        self.stdout_offset += appended.rfind(b"\n") + 1
+        if self.panics.found:
+            raise Violation(Check.PANIC, self.panics.found)
 
     def _finish_print(self, index: int, start_ns: int) -> None:
         """The body ended (done pin): END_PRINT, if any, runs to the end of

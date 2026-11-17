@@ -165,18 +165,30 @@ def test_the_minimizer_keeps_only_what_the_failure_needs():
     assert all(size <= 4 for size in calls)
 
 
+PANIC_STDOUT = (
+    "klippy starting\n"
+    "thread 'kalico-shaper' panicked at /kalico/rust/motion-pipeline/"
+    "src/shaper.rs:853:29:\n"
+    "shaper: axis 3: shaping window needs unavailable history at t=11.1\n"
+)
+
+
 def test_a_panic_signature_carries_its_message():
-    stdout = (
-        "klippy starting\n"
-        "thread 'kalico-shaper' panicked at /kalico/rust/motion-pipeline/"
-        "src/shaper.rs:853:29:\n"
-        "shaper: axis 3: shaping window needs unavailable history at t=11.1\n"
-    )
-    panic = checks.first_panic(stdout)
+    panic = checks.first_panic(PANIC_STDOUT)
     assert panic.endswith("shaping window needs unavailable history at t=11.1")
     violation = checks.Violation(checks.Check.PANIC, panic)
     assert "unavailable history" in checks.signature(violation)
     assert checks.first_panic("klippy starting\n") is None
+
+
+def test_a_racing_reader_takes_a_panic_only_with_its_whole_message():
+    message_starts = PANIC_STDOUT.index("shaper: axis 3")
+    assert checks.written_panic(PANIC_STDOUT[:message_starts]) is None
+    assert checks.written_panic(PANIC_STDOUT[: message_starts + 10]) is None
+    assert checks.written_panic(PANIC_STDOUT) == checks.first_panic(
+        PANIC_STDOUT
+    )
+    assert checks.written_panic("klippy starting\n") is None
 
 
 def test_probes_flipped_unwatched_are_counted_not_checked():
