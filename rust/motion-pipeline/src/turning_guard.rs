@@ -262,11 +262,19 @@ impl Reservation<'_> {
     }
 
     /// What cell `cell` asks with the side's rebuild on top of `weighted`,
-    /// `None` where a bound on the rebuild keeps it within `limit`.
-    fn binding_ask(&self, weighted: f64, cell: i64, limit: f64, track: &TrackView) -> Option<f64> {
+    /// the leaders there within the `shaped` speed and acceleration
+    /// ceilings, `None` where a bound on the rebuild keeps it within
+    /// `limit`.
+    fn binding_ask(
+        &self,
+        (weighted, shaped): (f64, (f64, f64)),
+        cell: i64,
+        limit: f64,
+        track: &TrackView,
+    ) -> Option<f64> {
         let asks = |rebuild: f64| weighted + self.scale * rebuild;
         self.side
-            .rebuild_where(cell, track, |rebuild| asks(rebuild) > limit)
+            .rebuild_where(cell, track, shaped, |rebuild| asks(rebuild) > limit)
             .map(asks)
     }
 }
@@ -321,8 +329,13 @@ impl CellCheck<'_> {
                     ),
                     0.0,
                 );
-                let binding =
-                    side.binding_ask(weighted, valley_cell, self.caps.max_accel_mm_s2, self.track);
+                let shaped = (motion.speed_ceiling, motion.accel_ceiling);
+                let binding = side.binding_ask(
+                    (weighted, shaped),
+                    valley_cell,
+                    self.caps.max_accel_mm_s2,
+                    self.track,
+                );
                 (
                     binding.map_or(asked, |binding| asked.max(binding)),
                     (window.0.min(side.window.0), window.1.max(side.window.1)),
