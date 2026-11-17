@@ -2,7 +2,7 @@
 //! advance valley, laid by the follower projection and bounded by the
 //! turning guard from the same rule.
 
-use super::{ADVANCE_VALLEY_SPEED_MM_S, RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S};
+use super::{RATIO_RAMP_MAX_TIME_S, RATIO_RAMP_MIN_TIME_S};
 
 /// The ramp time over which a turnaround or crawl valley releases and
 /// rebuilds the advance's lead, the longest, whatever the step there; and
@@ -128,7 +128,7 @@ pub fn crawl_floor(speed: f64, rate: f64) -> f64 {
 ///   around in half the ramp time ([`valley_reach`]), and as far as the
 ///   rebuild needs to fit the follower's limit ([`crawl_side_width`]).
 /// - A crawl: the leaders' slowest point, under
-///   [`ADVANCE_VALLEY_SPEED_MM_S`], at a seam or inside a leg. The path
+///   [`ADVANCE_VALLEY_SPEED_MM_S`](super::ADVANCE_VALLEY_SPEED_MM_S), at a seam or inside a leg. The path
 ///   speed's second derivative carries the tangent's turning there,
 ///   `a⊥²/v`, which an advance would turn into follower acceleration
 ///   however the planner bounds the path's own. Only where that leaves the
