@@ -28,5 +28,4 @@ tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-* --repeat 3
 | #930 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-930` | panic `shaper.rs` "follower seam weld ... would move the emitted track" |
 | #931 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-931` | panic `shaper.rs` "axis 3 (follower_source): fit tolerance failed" |
 | #932 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-932` | panic `shaper.rs` "advanced_follower_source span ... neither exact polynomials nor an enclosure" |
-| #939 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-939 --repeat 5` | intermittent (~1 in 3): uncommanded_shutdown `Missed scheduling of next digital out event` after a host RESTART with heaters on; not minimized |
 | #940 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-940 --repeat 10` | intermittent: pacer_brake `RunwayExhausted` at print start; not minimized |
