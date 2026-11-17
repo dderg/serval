@@ -2063,6 +2063,9 @@ pub(super) struct RatioSmoothing {
     open_rest: Option<OpenRest>,
     floor: f64,
     taken_through: f64,
+    /// The committed path [`Self::prune_before`] dropped what lies behind:
+    /// no weight there is read again.
+    pruned_before: f64,
     reach_into_next: Option<Crossing>,
     laid_tails: VecDeque<LegTail>,
     backlog: VecDeque<PendingSegment>,
@@ -2472,9 +2475,10 @@ impl RatioSmoothing {
     /// The weight `W` is continuous across every crawl valley an advance
     /// reads: a side laid zero wide steps it between 1 and 0 at the
     /// valley's edge, which only another valley holding zero up to that
-    /// edge from the side's way, or the floor, leaves unread. A rest
-    /// valley's own edges lie where the leaders rest, whose zero speed
-    /// leaves its steps unread; a follower with no advance reads none.
+    /// edge from the side's way, the floor, or the committed path pruned
+    /// behind it, leaves unread. A rest valley's own edges lie where the
+    /// leaders rest, whose zero speed leaves its steps unread; a follower
+    /// with no advance reads none.
     fn assert_weight_continuous(&self) {
         if self
             .width
@@ -2495,6 +2499,7 @@ impl RatioSmoothing {
             ];
             for (edge, side) in steps.into_iter().flatten() {
                 let unread = edge <= self.floor
+                    || edge < self.pruned_before
                     || self.valleys.iter().any(|other| {
                         !std::ptr::eq(other, valley) && holds_zero_up_to(other, edge, side)
                     });
@@ -2627,17 +2632,27 @@ impl RatioSmoothing {
     /// the crossing the last leg closed on; a crawl valley's side reaches
     /// back no further than the leaders cover in the
     /// [`geometry::VALLEY_LEAD_BUDGET_S`] before it, which the turning guard
-    /// leaves its rebuild room within.
+    /// leaves its rebuild room within. A crawl still waiting lies behind
+    /// the table's end, so that budget, and its own reach, are read back
+    /// from it: while it waits the table grows past it, and a reserve read
+    /// from the end alone would let the projection take its path.
     fn unlaid_valley_reach(&self, table_end: f64) -> f64 {
+        let budget_back_from = |s: f64| {
+            self.trail
+                .lead_budget_back_from(s)
+                .map_or(self.floor, |back| back.max(self.floor))
+        };
         let opening = self.reach_into_next.map_or(0.0, |closing| {
             closing.valley_reach().min(table_end - self.floor)
         });
-        let lead = table_end
-            - self
-                .trail
-                .lead_budget_back()
-                .map_or(self.floor, |back| back.max(self.floor));
-        opening.max(lead)
+        let lead = table_end - budget_back_from(table_end);
+        let waiting = self
+            .waiting_crawls
+            .first()
+            .map_or(0.0, |&(turn, crossing)| {
+                table_end - budget_back_from(turn).min(turn - crossing.valley_reach())
+            });
+        opening.max(lead).max(waiting)
     }
 
     /// How far the smoothed ratio is final: its width there is, no window
@@ -2998,6 +3013,7 @@ impl RatioSmoothing {
     /// back, but for the clusters holding a seam past that, kept whole,
     /// and the width nodes behind the first seam kept.
     pub(super) fn prune_before(&mut self, s: f64) {
+        self.pruned_before = self.pruned_before.max(s);
         self.valleys.retain(|valley| valley.reach_end() >= s);
         let (Some(first), Some(last)) = (self.width.nodes.first(), self.width.nodes.last()) else {
             return;

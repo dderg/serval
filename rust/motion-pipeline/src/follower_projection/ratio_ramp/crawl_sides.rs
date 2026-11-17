@@ -75,11 +75,12 @@ impl SideTrail {
     }
 
     /// The path the leaders had reached [`VALLEY_LEAD_BUDGET_S`] before the
-    /// last probe, at the latest probe no later: no crawl valley still to
-    /// lay reaches back past it. `None` before the trail covers that long.
-    pub(super) fn lead_budget_back(&self) -> Option<f64> {
-        let last = self.probes.back()?;
-        let since = last.t - VALLEY_LEAD_BUDGET_S;
+    /// last probe at or before `s`, at the latest probe no later: no side of
+    /// a crawl valley at `s` reaches back past it. `None` where the trail
+    /// does not cover that long.
+    pub(super) fn lead_budget_back_from(&self, s: f64) -> Option<f64> {
+        let at = self.probes.partition_point(|probe| probe.s <= s).checked_sub(1)?;
+        let since = self.probes[at].t - VALLEY_LEAD_BUDGET_S;
         let index = self.probes.partition_point(|probe| probe.t <= since);
         (index > 0).then(|| self.probes[index - 1].s)
     }
