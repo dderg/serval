@@ -423,7 +423,7 @@ proptest! {
     #![proptest_config(fresh_seed_config())]
 
     #[test]
-    #[ignore = "#897 #885: crawl valleys owning steps without bound, and follower sources, fail on draws of this space"]
+    #[ignore = "#897 #936 #903: crawl valleys owning steps without bound, a ratio read changing across a join, and the turning guard's valley sides fail on draws of this space"]
     fn an_advanced_extruder_plans_print_like_streams(
         printer in advanced_printer_strategy(),
         ratio in 0.02..0.06_f64,
