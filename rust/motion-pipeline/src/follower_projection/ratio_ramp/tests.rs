@@ -1905,7 +1905,11 @@ fn a_crawl_valley_held_at_zero_back_to_a_drain_reaches_no_taken_path() {
         shaped_leaders.into_reads(shaped_odometer),
     );
     smoothing.close_at(DRAIN_MM);
-    assert_eq!(smoothing.take_final(&[]).len(), 1, "the drain takes the segment");
+    assert_eq!(
+        smoothing.take_final(&[]).len(),
+        1,
+        "the drain takes the segment"
+    );
     let turn = 276.681_034_085_897_6;
     smoothing.place_valley(
         turn,
