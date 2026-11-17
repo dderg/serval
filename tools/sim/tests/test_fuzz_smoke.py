@@ -13,7 +13,20 @@ from tools.sim.fuzzing import execute, scenario
 
 pytestmark = pytest.mark.needs_elf
 
-SMOKE_SEEDS = (10, 11, 18, 20, 27, 35, 41)
+THREE_PRINTS_SEED = 27
+THREE_PRINTS_EXPECTED_S = 30
+SMOKE_SEEDS = (
+    10,
+    11,
+    18,
+    20,
+    pytest.param(
+        THREE_PRINTS_SEED,
+        marks=pytest.mark.expected_seconds(THREE_PRINTS_EXPECTED_S),
+    ),
+    35,
+    41,
+)
 
 
 @pytest.mark.parametrize("seed", SMOKE_SEEDS)
