@@ -18,3 +18,4 @@ tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-* --repeat 3
 | #902 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-902` | panic `turning_guard.rs` "the cell at t=Ns still asks N mm/s² of the extruder" |
 | #903 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-903` | panic `turning_guard.rs` "the crawl ... still lays a valley side" (4 travel moves, no E) |
 | #931 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-931` | panic `shaper.rs` "axis 3 (follower_source): fit tolerance failed" |
+| #988 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-988` | panic `ratio_ramp.rs:2462` "the crawl valley ... reaches X mm back, but the projection has taken the path to Y mm" with X − Y ≈ 1e-13 |
