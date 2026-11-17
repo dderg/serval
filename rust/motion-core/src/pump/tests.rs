@@ -583,6 +583,61 @@ fn endpoint_fatal_hands_its_reason_to_the_fatal_transport_action() {
     );
 }
 
+#[derive(Clone, Default)]
+struct ShutdownRecordingSink(Arc<Mutex<Vec<u32>>>);
+
+impl SpanSink for ShutdownRecordingSink {
+    fn send_frame(
+        &self,
+        _key: AxisKey,
+        _spans: &[ClockedMotorSpan],
+        _new_head: u32,
+        _room: u32,
+    ) -> Result<i32, SendError> {
+        Ok(mcu_protocol::result_codes::OK)
+    }
+
+    fn on_mcu_shutdown(&self, mcu_id: u32) {
+        self.0.lock_ok().push(mcu_id);
+    }
+}
+
+/// #869: an e-stopped mcu drops every command and acks no barrier, so its
+/// silence is not a dead endpoint. Execution stops and the mcu's endpoints
+/// stand down without the fatal-transport action that latches an
+/// `endpoint_death`.
+#[test]
+fn an_mcu_reporting_shutdown_stops_execution_without_an_endpoint_death() {
+    let latched: Arc<Mutex<Vec<(AxisKey, String)>>> = Arc::default();
+    let latched_pump = Arc::clone(&latched);
+    let sink = ShutdownRecordingSink::default();
+    let mut pump = Pump::new(
+        sink.clone(),
+        PumpCallbacks {
+            on_fatal_transport: Box::new(move |key, reason| {
+                latched_pump.lock_ok().push((key, reason.to_string()));
+            }),
+            ..PumpCallbacks::noop(64)
+        },
+        None,
+        Arc::new(crate::drain::DrainLedger::new()),
+    );
+
+    assert!(pump.handle_control_msg(PumpMsg::McuShutdown { mcu_id: 3 }));
+    assert!(pump.handle_control_msg(PumpMsg::StepcompressFatal {
+        mcu_id: 3,
+        error: "barrier deadline expired".to_string(),
+    }));
+    assert!(pump.handle_control_msg(PumpMsg::McuShutdown { mcu_id: 4 }));
+
+    assert_eq!(*sink.0.lock_ok(), vec![3, 4]);
+    assert!(latched.lock_ok().is_empty(), "{:?}", latched.lock_ok());
+    assert_eq!(
+        pump.fatal_reason.as_deref(),
+        Some("mcu 3 reported shutdown")
+    );
+}
+
 /// The four gated views a Flush must drop, on a 1 kHz fixture clock where one
 /// view is exactly one tick. Distinct hold positions keep the queue's hold
 /// coalescing from collapsing them into one.

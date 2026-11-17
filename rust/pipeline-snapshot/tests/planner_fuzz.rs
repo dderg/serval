@@ -298,7 +298,11 @@ fn corner_option_strategy() -> impl Strategy<Value = String> {
 /// follows, its extruder limited: the follower the turning guard holds.
 fn advanced_printer_strategy() -> impl Strategy<Value = String> {
     (
-        (300.0..1000.0_f64, 3000.0..70_000.0_f64, corner_option_strategy()),
+        (
+            300.0..1000.0_f64,
+            3000.0..70_000.0_f64,
+            corner_option_strategy(),
+        ),
         (30.0..120.0_f64, 30.0..120.0_f64),
         (0.01..0.06_f64, 2000.0..20_000.0_f64),
     )
@@ -387,8 +391,12 @@ fn print_gcode(ratio: f64, moves: &[PrintMove]) -> String {
                 let extrude = ratio_jitter
                     .map(|jitter| format!(" E{:.5}", ratio * (1.0 + jitter) * length_mm))
                     .unwrap_or_default();
-                writeln!(gcode, "G1 X{x:.3} Y{y:.3}{extrude} F{:.0}", 60.0 * feed_mm_s)
-                    .expect("a string takes G-code");
+                writeln!(
+                    gcode,
+                    "G1 X{x:.3} Y{y:.3}{extrude} F{:.0}",
+                    60.0 * feed_mm_s
+                )
+                .expect("a string takes G-code");
             }
             PrintMove::HopTravel {
                 heading: to,
