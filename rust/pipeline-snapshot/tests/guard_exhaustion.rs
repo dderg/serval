@@ -73,6 +73,17 @@ fn a_benchy_crawl_among_wide_sides_plans_on_the_bowden_test_config() {
     );
 }
 
+/// Lines 76544-76598: a cell behind the frozen seam asked 2002 mm/s² of
+/// 2000 after 66 back-offs of the line at the seam, which could not lower
+/// what the cell read.
+#[test]
+fn a_benchy_crawl_behind_the_frozen_seam_plans_on_the_bowden_test_config() {
+    benchy_plans_within_the_extruder_limits(
+        "benchy guard after width",
+        "rust/motion-core/tests/gcode/benchy_guard_after_width.gcode",
+    );
+}
+
 /// Scenario fuzz seed 1164 (`tools/sim/fuzzing/repros/issue-902`), shrunk:
 /// a corexy with no input shaper and a kernel-free advance limited to
 /// 20000 mm/s².
