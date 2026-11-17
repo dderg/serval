@@ -5186,6 +5186,45 @@ fn refine_shaped_span<S: TrackSignal>(
     )
 }
 
+/// Whether `rung`, kept for a span at the resolution floor, bends past the
+/// signal's acceleration over the span by more than the fit's absolute
+/// budget.
+fn bends_past_signal<S: TrackSignal>(
+    sig: &S,
+    rung: &[f64],
+    (t0, t1): (f64, f64),
+    fit_tol: FitTol,
+) -> bool {
+    let signal_peak = [-1.0, 0.0, 1.0]
+        .map(|u| sig.eval_pva(span_probe_t(t0, t1, u)).2.abs())
+        .into_iter()
+        .fold(0.0, f64::max);
+    acceleration_bound(rung, t1 - t0) > signal_peak + fit_tol.accel_mm_s2
+}
+
+/// The piece a span at the resolution floor carries where the rung it kept
+/// bends past its signal ([`bends_past_signal`]): through the rung's end
+/// positions, at the signal's acceleration at the span's middle. Pinned at
+/// both ends, a rung of more freedom bends by the signal's position
+/// rounding over the span squared, which no budget resolves there; the
+/// sliver's velocity takes that rounding over the span instead.
+fn floor_sliver(rung: &[f64], h: f64, acceleration: f64) -> Vec<f64> {
+    let start: f64 = rung
+        .iter()
+        .enumerate()
+        .map(|(power, coefficient)| {
+            if power % 2 == 0 {
+                *coefficient
+            } else {
+                -*coefficient
+            }
+        })
+        .sum();
+    let end: f64 = rung.iter().sum();
+    let bend = acceleration * h * h / 8.0;
+    vec![0.5 * (start + end) - bend, 0.5 * (end - start), bend]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn refine_span_against<S: TrackSignal>(
     sig: &S,
@@ -5213,6 +5252,11 @@ fn refine_span_against<S: TrackSignal>(
     );
     let missed = match verdict {
         SpanVerdict::Proven(mono_u) => {
+            let mono_u = if !splittable && bends_past_signal(sig, &mono_u, (t0, t1), fit_tol) {
+                floor_sliver(&mono_u, t1 - t0, sig.eval_pva(tm).2)
+            } else {
+                mono_u
+            };
             #[cfg(feature = "fit-audit")]
             crate::fit_audit::check(
                 sig,
@@ -5273,6 +5317,11 @@ fn refine_span_against<S: TrackSignal>(
                     acceleration_budget: fit_tol.for_piece(t1 - t0).accel_mm_s2,
                 });
             }
+            let mono_u = if bends_past_signal(sig, &mono_u, (t0, t1), fit_tol) {
+                floor_sliver(&mono_u, t1 - t0, sig.eval_pva(tm).2)
+            } else {
+                mono_u
+            };
             #[cfg(feature = "fit-audit")]
             crate::fit_audit::check(
                 sig,
