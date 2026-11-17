@@ -2430,9 +2430,14 @@ fn shaped_leader_odometer(
     let mut odometer = OdometerLeaves::over(axis_grid(seg, leaders));
     for index in 1..odometer.grid.len() {
         let (from, to) = (odometer.grid[index - 1], odometer.grid[index]);
-        odometer_leaves(&|t| shaped_leaders.speed(t), from, to, &mut |end, leaf| {
-            odometer.push(end, leaf);
-        });
+        odometer_leaves(
+            &|t| shaped_leaders.speed(t),
+            (from, to),
+            EndZones::of(shaped_leaders, from, to),
+            &mut |end, leaf| {
+                odometer.push(end, leaf);
+            },
+        );
     }
     odometer
 }
@@ -2903,6 +2908,38 @@ impl<'a> ShapedLeaders<'a> {
         norm_of((0..self.axes.len()).map(|index| self.pva(index, t).1))
     }
 
+    /// Whether a leader's velocity may change sign inside `[lo, hi]` by more
+    /// than the odometer's rate tolerance either way: its velocity hull
+    /// there, a cached piece's Bernstein controls or the axis's own bounds,
+    /// straddles zero past the tolerance.
+    fn may_reverse_within(&self, lo: f64, hi: f64) -> bool {
+        (0..self.axes.len()).any(|index| {
+            let (low, high) = self.velocity_hull(index, lo, hi);
+            low < -ODOMETER_RATE_TOL_MM_S && high > ODOMETER_RATE_TOL_MM_S
+        })
+    }
+
+    fn velocity_hull(&self, index: usize, lo: f64, hi: f64) -> (f64, f64) {
+        let cached = self
+            .pieces
+            .get(index)
+            .and_then(Option::as_ref)
+            .and_then(|pieces| pieces.piece_over(lo, 0.5 * lo + 0.5 * hi, hi));
+        if let Some(piece) = cached {
+            return piece
+                .differentiate()
+                .to_bernstein()
+                .into_iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), control| {
+                    (low.min(control), high.max(control))
+                });
+        }
+        let bounds = self.axes[index].pva_bounds(lo, hi).unwrap_or_else(|error| {
+            panic!("leader {index} has no velocity bounds over [{lo}, {hi}]: {error}")
+        });
+        (bounds.velocity_min, bounds.velocity_max)
+    }
+
     /// A lower bound on the speed of `bounded` leaders over `[lo, hi]`, and
     /// so on the leaders' own: their velocity's tangent line at `at`, at its
     /// nearest to rest over the interval, less the most the pieces' higher
@@ -3332,8 +3369,8 @@ impl<'a> FollowerSignal<'a> {
                 for w in grid.windows(2) {
                     odometer_leaves(
                         &|t| shaped_leaders.speed(t),
-                        w[0],
-                        w[1],
+                        (w[0], w[1]),
+                        EndZones::of(&shaped_leaders, w[0], w[1]),
                         &mut |end, leaf| {
                             knots.push_leaf(end, leaf);
                         },
@@ -5147,32 +5184,61 @@ impl OdometerLeaf {
     }
 }
 
-/// How many checks approach each end of a leaf past its outermost midpoint
-/// check, each halving the distance left to the end.
-const ODOMETER_END_APPROACHES: i32 = 12;
-
 /// Where a leaf's rate is checked against the leaders' speed: midway
-/// between each pair of neighbouring Kronrod nodes, between the outermost
-/// ones and the leaf's ends, and on toward each end by halving the distance
-/// left, where a leader turning around within a sliver of the end bends the
-/// speed the nodes never sample. Not at the ends themselves, where the
-/// leaders may cross a seam whose velocity steps by its fit's rounding.
-static ODOMETER_RATE_CHECKS: LazyLock<Vec<f64>> = LazyLock::new(|| {
+/// between each pair of neighbouring Kronrod nodes, and between the
+/// outermost ones and the leaf's ends. Not at the ends themselves, where
+/// the leaders may cross a seam whose velocity steps by its fit's
+/// rounding.
+static ODOMETER_RATE_CHECKS: LazyLock<[f64; KRONROD_POINTS + 1]> = LazyLock::new(|| {
     let mut bounded = [0.0; KRONROD_POINTS + 2];
     bounded[0] = -1.0;
     bounded[KRONROD_POINTS + 1] = 1.0;
     bounded[1..=KRONROD_POINTS].copy_from_slice(&kronrod_abscissae());
-    let mut checks: Vec<f64> = bounded
-        .windows(2)
-        .map(|pair| 0.5 * (pair[0] + pair[1]))
-        .collect();
-    let outermost = 1.0 - checks[checks.len() - 1];
-    for halvings in 1..=ODOMETER_END_APPROACHES {
-        let left = outermost * f64::powi(0.5, halvings);
-        checks.extend([-1.0 + left, 1.0 - left]);
+    let mut checks = [0.0; KRONROD_POINTS + 1];
+    for (check, pair) in checks.iter_mut().zip(bounded.windows(2)) {
+        *check = 0.5 * (pair[0] + pair[1]);
     }
     checks
 });
+
+/// How many checks approach each end of a leaf past its outermost midpoint
+/// check, each halving the distance left to the end.
+const ODOMETER_END_APPROACHES: i32 = 12;
+
+/// The checks [`EndZones::Checked`] adds: on from the outermost midpoint
+/// check toward each end, halving the distance left, where a leader turning
+/// around within a sliver of the end kinks the speed the nodes never sample.
+static ODOMETER_END_ZONE_CHECKS: LazyLock<Vec<f64>> = LazyLock::new(|| {
+    let outermost = 1.0 - ODOMETER_RATE_CHECKS[KRONROD_POINTS];
+    (1..=ODOMETER_END_APPROACHES)
+        .flat_map(|halvings| {
+            let left = outermost * f64::powi(0.5, halvings);
+            [-1.0 + left, 1.0 - left]
+        })
+        .collect()
+});
+
+/// Whether a leaf's rate is also checked in the zones between its outermost
+/// midpoint checks and its ends. The leaders' pieces are smooth inside a
+/// grid window, and so is their speed wherever it stays clear of zero; it
+/// kinks only where a leader's velocity changes sign while the others are
+/// slow, a reversal the nodes miss if it lands in an end zone. A window no
+/// leader reverses in by more than the rate tolerance has no such kink.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EndZones {
+    Skipped,
+    Checked,
+}
+
+impl EndZones {
+    fn of(leaders: &ShapedLeaders, lo: f64, hi: f64) -> Self {
+        if leaders.may_reverse_within(lo, hi) {
+            Self::Checked
+        } else {
+            Self::Skipped
+        }
+    }
+}
 
 /// The path `speed` covers over `[a, b]`, leaf by leaf, each converged on
 /// its total and on its rate. Where the leaders' speed bends sharply the
@@ -5180,8 +5246,8 @@ static ODOMETER_RATE_CHECKS: LazyLock<Vec<f64>> = LazyLock::new(|| {
 /// tenths of a micrometre per second off the speed.
 fn odometer_leaves(
     speed: &impl Fn(f64) -> f64,
-    a: f64,
-    b: f64,
+    (a, b): (f64, f64),
+    end_zones: EndZones,
     leaf: &mut impl FnMut(f64, OdometerLeaf),
 ) {
     if b - a <= 0.0 {
@@ -5197,9 +5263,10 @@ fn odometer_leaves(
             }
             let (odometer_leaf, rate) = OdometerLeaf::through(&samples, a, b);
             let centre = 0.5 * (a + b);
-            let follows_speed = ODOMETER_RATE_CHECKS.iter().all(|&x| {
-                (chebyshev_sum(&rate, x) - speed(centre + half * x)).abs() <= ODOMETER_RATE_TOL_MM_S
-            });
+            let on_speed =
+                |&x: &f64| (chebyshev_sum(&rate, x) - speed(centre + half * x)).abs() <= ODOMETER_RATE_TOL_MM_S;
+            let follows_speed = ODOMETER_RATE_CHECKS.iter().all(on_speed)
+                && (end_zones == EndZones::Skipped || ODOMETER_END_ZONE_CHECKS.iter().all(on_speed));
             (last_chance || follows_speed).then_some(odometer_leaf)
         },
         (a, b),

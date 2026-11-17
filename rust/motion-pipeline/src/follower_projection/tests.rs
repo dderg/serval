@@ -247,9 +247,12 @@ fn an_odometer_leaf_grows_at_the_speed_between_its_nodes() {
         1.0 + 1e-4 * libm::exp(-offset * offset)
     };
     let mut leaves = Vec::new();
-    super::odometer_leaves(&speed, 0.0, duration, &mut |end, leaf| {
-        leaves.push((end, leaf))
-    });
+    super::odometer_leaves(
+        &speed,
+        (0.0, duration),
+        super::EndZones::Skipped,
+        &mut |end, leaf| leaves.push((end, leaf)),
+    );
     let mut start = 0.0;
     let half_stencil = 1e-10;
     for (end, leaf) in &leaves {
