@@ -7,7 +7,7 @@
 
 mod corpus;
 
-use corpus::extruder::{ExtruderExcess, ToolheadPhase};
+use corpus::extruder::{Commanded, ExtruderExcess};
 
 /// `tools/sim/gcode/trident_follower_cache_regression.gcode` lines 868-873,
 /// whose crawl at t≈20.896 s on the P2 i3 ratio-ramp config asked for
@@ -41,7 +41,7 @@ fn a_ratio_ramped_advance_keeps_the_extruder_within_its_limits_through_a_crawl()
             matches!(
                 excess,
                 ExtruderExcess::Acceleration {
-                    phase: ToolheadPhase::Moving,
+                    command: Commanded::Following,
                     ..
                 }
             )
