@@ -2382,7 +2382,7 @@ impl RatioSmoothing {
         steps.own_near(tables, &untaken, &|s| untaken(s) && leaves_a_side(s));
         let zero = steps.zero_stretch();
         let edges = steps.edges(&self.trail, table_end)?;
-        let laid = (&*self, tables.1, table_end);
+        let laid = (&*self, tables, table_end);
         let after = crawl_side(
             Side::After,
             edges.1,

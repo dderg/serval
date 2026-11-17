@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 
 use geometry::{
     ADVANCE_VALLEY_SPEED_MM_S, CrawlSide, RatioRampRule, VALLEY_LEAD_BUDGET_S, crawl_side_width,
-    crawl_step_window, side_weight, turns_around,
+    crawl_step_window, kept_floor, side_weight, turns_around,
 };
 
 use super::super::{RatioSpan, SPAN_LOOKUP_SLACK_MM, Table};
@@ -322,7 +322,10 @@ impl Edge {
 /// ([`RatioSmoothing::step_ramps`]), at the fastest the leaders may cross
 /// it, `(v₁ + v₂ + A·Δt)/2`, from the room the rebuild gets; the third
 /// reads as more `s̈`, `(2/3)·|r̃′|·ṡ²/r` more, in the rebuild's
-/// `3W′·ṡ·s̈`. The side widens until all of it fits.
+/// `3W′·ṡ·s̈`. The advanced velocity `r̃·ṡ + k·(W·(r̃′·ṡ² + r̃·s̈) + W′·r̃·ṡ²)`
+/// fits the follower's velocity limit the same way, `W′·r̃·ṡ²` being the
+/// lead the rebuild adds ([`side_slope_within`]). The side widens until
+/// all of it fits.
 ///
 /// A follower behind its own kernel keeps the leaders' reach: the turning
 /// guard holds kernel-free followers only and leaves no room for its
@@ -331,7 +334,7 @@ pub(super) fn crawl_side(
     side: Side,
     edge: Edge,
     reach: f64,
-    (smoothing, advance, table_end): (&RatioSmoothing, &[RatioSpan], f64),
+    (smoothing, (laid, advance), table_end): (&RatioSmoothing, (&[RatioSpan], &[RatioSpan]), f64),
     steps: &StepWindows,
     rule: &RatioRampRule,
     limit: f64,
@@ -378,27 +381,46 @@ pub(super) fn crawl_side(
                 })
                 .fold(0.0, f64::max)
         };
-        let ratio_over = |(from, to, _): Interval| {
-            let (lo, hi) = (
+        let clipped = |(from, to, _): Interval| {
+            (
                 from.s.min(to.s).max(window.0),
                 from.s.max(to.s).min(window.1),
-            );
+            )
+        };
+        let ratio_over = |interval: Interval| {
+            let (lo, hi) = clipped(interval);
             if lo > hi {
                 return 0.0;
             }
             smoothing.peak_ratio_in(Table::Advance, advance, lo, hi)
         };
-        let ramps_over = |(from, to, _): Interval| {
-            let (lo, hi) = (
-                from.s.min(to.s).max(window.0),
-                from.s.max(to.s).min(window.1),
-            );
+        let ramps_over = |interval: Interval| {
+            let (lo, hi) = clipped(interval);
             if lo > hi {
                 return StepRamps::default();
             }
             smoothing.step_ramps((lo, hi), &|table, s| steps.owns(table, s))
         };
         let accel = motion.path_accel.max(crossing.rate);
+        let crossing_speed = |(from, to, _): Interval| {
+            0.5 * (from.speed + to.speed + accel * (to.t - from.t).abs())
+        };
+        let velocity_fits = |interval: Interval, ratio: f64| {
+            let (from, to, _) = interval;
+            let (lo, hi) = clipped(interval);
+            let flow_ratio = smoothing.peak_ratio_in(Table::Laid, laid, lo, hi);
+            let ramps = ramps_over(interval);
+            let speed = crossing_speed(interval);
+            let interval_accel = from.path_accel.abs().max(to.path_accel.abs());
+            let (near, far) = {
+                let distances = [from, to].map(|probe| distance_of(probe));
+                (distances[0].min(distances[1]), distances[0].max(distances[1]))
+            };
+            let (weight, steepest) = side_slope_within((near, far), width, floor);
+            let lead = weight * (ramps.slope * speed * speed + ratio * interval_accel)
+                + steepest * ratio * speed * speed;
+            flow_ratio * speed + slope * lead <= rule.max_velocity_mm_s
+        };
         let rebuilds = OnceCell::new();
         let rebuild_fits = |interval: Interval, ratio: f64, own: f64| {
             let (whole, within) = rebuilds.get_or_init(|| {
@@ -418,7 +440,7 @@ pub(super) fn crawl_side(
             let (from, to, _) = interval;
             let ramps = ramps_over(interval);
             let interval_accel = from.path_accel.abs().max(to.path_accel.abs());
-            let speed = 0.5 * (from.speed + to.speed + accel * (to.t - from.t).abs());
+            let speed = crossing_speed(interval);
             let weight = [from, to]
                 .map(|probe| side_weight(distance_of(probe), width, floor).0)
                 .into_iter()
@@ -465,13 +487,39 @@ pub(super) fn crawl_side(
                     interval.1.s,
                     rule.max_accel_mm_s2
                 );
-                fits && (ratio == 0.0 || slope == 0.0 || rebuild_fits(interval, ratio, own))
+                fits && (ratio == 0.0
+                    || slope == 0.0
+                    || (rebuild_fits(interval, ratio, own) && velocity_fits(interval, ratio)))
             })
     });
     if waits {
         return Err(Unlaid::Waits);
     }
     Ok(width.filter(|&width| width <= limit))
+}
+
+/// `(max W, max |W′|)` over the distances `[near, far]` from the zero
+/// stretch of a side `width` wide whose floor is `floor`
+/// ([`geometry::side_weight`]): `W` rises with the distance, and
+/// `|W′| = 3ι²σ/w̃` is at most the share ahead `ι` read at `near` times
+/// the slope `σ` read at `far`.
+fn side_slope_within((near, far): (f64, f64), width: f64, floor: f64) -> (f64, f64) {
+    let (near, far) = (near.clamp(0.0, width), far.clamp(0.0, width));
+    if far == 0.0 || near == width {
+        return (side_weight(far, width, floor).0, 0.0);
+    }
+    let kept = kept_floor(floor, width);
+    let ahead = libm::cbrt(1.0 - side_weight(near, width, floor).0);
+    let rising = if kept == 0.0 {
+        1.0
+    } else {
+        far / libm::hypot(far, kept)
+    };
+    let span = width * width / (libm::hypot(width, kept) + kept);
+    (
+        side_weight(far, width, floor).0,
+        3.0 * ahead * ahead * rising / span,
+    )
 }
 
 /// The ratio steps a crawl valley holds the weight at zero around: each a
