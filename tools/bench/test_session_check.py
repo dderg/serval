@@ -289,6 +289,14 @@ def test_a_brake_outside_a_commanded_stop_fails_the_soak():
     assert "#843" in verdict.detail
 
 
+def test_a_brake_behind_a_declared_wait_passes_the_soak():
+    evidence = _soak_evidence("pacer_runway-pause_resume")
+    _event(evidence, 5.0, "pipe_drain", cause="DeclaredWait")
+    verdict = _soak_verdicts(evidence)["pacer_brakes"]
+    assert verdict.ok, verdict.detail
+    assert verdict.detail.endswith("(2 at them)")
+
+
 def test_the_first_soak_run_on_main_passes_every_check():
     verdicts = _verdicts(_evidence("soak-soak_mesh_session"))
     assert [v for v in verdicts.values() if not v.ok] == []
