@@ -20,7 +20,12 @@ DONE_PIN_LINE = 51
 FULL_STEPS_PER_REV = 200
 PARK_XY = 20.0
 MESH_PROFILE = "fz"
+MESH_ALT_PROFILE = "fz_alt"
 MESH_EDGE_MM = 20.0
+MESH_PPS = 2
+MESH_FADE_START_MM = 1.0
+MESH_FADE_END_MM = 10.0
+MESH_FADE_CHANCE = 0.5
 HEATER_CHECK_GAIN_S = 3600
 EXTRUDER_TARGET_C = 150.0
 CHAMBER_TARGET_C = 100.0
@@ -279,7 +284,7 @@ def draw_printer(rng: random.Random) -> PrinterSpec:
         extruder_kernel=kernel,
         mesh=mesh,
         mesh_points=_draw_mesh_points(rng, mesh),
-        mesh_fade=rng.random() < 0.3,
+        mesh_fade=rng.random() < MESH_FADE_CHANCE,
         mesh_at_start=mesh is not MeshKind.NONE and rng.random() < 0.7,
         heaters=rng.random() < 0.5,
         pause_macro=rng.choice(tuple(PauseMacro)),
@@ -431,23 +436,53 @@ def _mesh_section(spec: PrinterSpec) -> dict:
         "zero_reference_position": f"{bed / 2}, {bed / 2}",
     }
     if spec.mesh_fade:
-        options.update(fade_start=1, fade_end=10, fade_target=0)
+        options.update(
+            fade_start=MESH_FADE_START_MM,
+            fade_end=MESH_FADE_END_MM,
+            fade_target=0,
+        )
     return options
 
 
-def saved_mesh_block(spec: PrinterSpec) -> str:
+@dataclasses.dataclass(frozen=True)
+class MeshGrid:
+    """The probed area [low, high] on both axes; the lines between its
+    interpolated patches (MESH_PPS points between probes, the edges
+    included) and the probe lines among them; the travel limits [0, bed];
+    the fade band, if any."""
+
+    low: float
+    high: float
+    bed: float
+    lines: tuple[float, ...]
+    probe_lines: tuple[float, ...]
+    fade: Optional[tuple[float, float]]
+
+
+def mesh_grid(spec: PrinterSpec) -> MeshGrid:
     bed = spec.shape.bed_mm
-    count = len(spec.mesh_points)
+    low, high = MESH_EDGE_MM, bed - MESH_EDGE_MM
+    patches = (len(spec.mesh_points) - 1) * (MESH_PPS + 1)
+    lines = tuple(low + (high - low) * i / patches for i in range(patches + 1))
+    fade = (MESH_FADE_START_MM, MESH_FADE_END_MM) if spec.mesh_fade else None
+    return MeshGrid(low, high, bed, lines, lines[:: MESH_PPS + 1], fade)
+
+
+def alt_mesh_points(points: tuple[tuple[float, ...], ...]):
+    """The surface a profile switch loads: the drawn one transposed and
+    negated."""
+    return tuple(tuple(-row[i] for row in points) for i in range(len(points)))
+
+
+def _profile_block(name: str, points, bed: float) -> str:
+    count = len(points)
     rows = "\n".join(
-        "#*#   " + ", ".join(f"{value:.3f}" for value in row)
-        for row in spec.mesh_points
+        "#*#   " + ", ".join(f"{value:.3f}" for value in row) for row in points
     )
     algo = "lagrange" if count == 3 else "bicubic"
     return f"""\
-#*# <---------------------- SAVE_CONFIG ---------------------->
-#*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
 #*#
-#*# [bed_mesh {MESH_PROFILE}]
+#*# [bed_mesh {name}]
 #*# version = 1
 #*# points =
 {rows}
@@ -457,11 +492,23 @@ def saved_mesh_block(spec: PrinterSpec) -> str:
 #*# max_y = {bed - MESH_EDGE_MM}
 #*# x_count = {count}
 #*# y_count = {count}
-#*# mesh_x_pps = 2
-#*# mesh_y_pps = 2
+#*# mesh_x_pps = {MESH_PPS}
+#*# mesh_y_pps = {MESH_PPS}
 #*# algo = {algo}
 #*# tension = 0.2
 """
+
+
+def saved_mesh_block(spec: PrinterSpec) -> str:
+    bed = spec.shape.bed_mm
+    return (
+        "#*# <---------------------- SAVE_CONFIG ---------------------->\n"
+        "#*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.\n"
+        + _profile_block(MESH_PROFILE, spec.mesh_points, bed)
+        + _profile_block(
+            MESH_ALT_PROFILE, alt_mesh_points(spec.mesh_points), bed
+        )
+    )
 
 
 PAUSE_PARK_MACROS = {

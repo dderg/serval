@@ -18,7 +18,7 @@ import random
 import typing
 from typing import Optional
 
-from tools.sim.fuzzing import printer, program, timeline
+from tools.sim.fuzzing import mesh_paths, printer, program, timeline
 from tools.sim.fuzzing.printer import PrinterSpec
 from tools.sim.fuzzing.program import Model, Program
 from tools.sim.fuzzing.timeline import Action
@@ -81,12 +81,16 @@ def _session(rng: random.Random) -> tuple[str, ...]:
     return rng.choices(sessions, weights)[0]
 
 
+def _program(seed: int, spec: PrinterSpec, name: str) -> Program:
+    """The program's own draws, then mesh seams from a stream of their
+    own, so a printer without a mesh draws the program it always did."""
+    drawn = program.draw_program(_child(seed, f"program{name}"), spec, name)
+    return mesh_paths.with_seams(_child(seed, f"seams{name}"), spec, drawn)
+
+
 def generate(seed: int) -> Scenario:
     spec = printer.draw_printer(_child(seed, "printer"))
-    programs = tuple(
-        program.draw_program(_child(seed, f"program{name}"), spec, name)
-        for name in PROGRAM_NAMES
-    )
+    programs = tuple(_program(seed, spec, name) for name in PROGRAM_NAMES)
     prints = _session(_child(seed, "session"))
     rng = _child(seed, "timeline")
     actions = []

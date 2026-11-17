@@ -60,6 +60,7 @@ class Kind(enum.Enum):
     LATTICE = "lattice"
     MISC = "misc"
     MESH = "mesh"
+    MESH_SEAM = "mesh_seam"
 
 
 STATE_CHANGING = (Kind.LIMITS, Kind.MESH)
@@ -101,7 +102,7 @@ def _fmt(value: float) -> str:
     return text if text not in ("-0", "") else "0"
 
 
-def _move(x=None, y=None, z=None, e=None, f=None, verb="G1") -> str:
+def move(x=None, y=None, z=None, e=None, f=None, verb="G1") -> str:
     words = [verb]
     for letter, value in (("X", x), ("Y", y), ("Z", z), ("E", e), ("F", f)):
         if value is not None:
@@ -128,8 +129,8 @@ class Context:
 def _travel_to(ctx: Context, x: float, y: float) -> list[str]:
     return [
         "G90",
-        _move(z=ctx.layer_z(), f=Z_FEED),
-        _move(x, y, f=ctx.travel_feed()),
+        move(z=ctx.layer_z(), f=Z_FEED),
+        move(x, y, f=ctx.travel_feed()),
     ]
 
 
@@ -137,7 +138,7 @@ def _extruding_path(ctx: Context, points, feed) -> list[str]:
     lines = []
     for (x0, y0), (x1, y1) in zip(points, points[1:]):
         e = round(math.hypot(x1 - x0, y1 - y0) * EXTRUDE_PER_MM, 5)
-        lines.append(_move(x1, y1, e=e, f=feed))
+        lines.append(move(x1, y1, e=e, f=feed))
     return lines
 
 
@@ -169,7 +170,7 @@ def _perimeters(ctx: Context) -> list[str]:
         if not lines:
             lines += _travel_to(ctx, *points[0])
         else:
-            lines.append(_move(*points[0], f=ctx.travel_feed()))
+            lines.append(move(*points[0], f=ctx.travel_feed()))
         lines += _extruding_path(ctx, points, feed)
     return lines
 
@@ -196,7 +197,7 @@ def _strokes(ctx: Context) -> list[str]:
     tail = (
         _extruding_path(ctx, points, feed)
         if extrude
-        else [_move(x, y, f=feed) for x, y in points[1:]]
+        else [move(x, y, f=feed) for x, y in points[1:]]
     )
     return _travel_to(ctx, *points[0]) + tail
 
@@ -240,7 +241,7 @@ def _travel(ctx: Context) -> list[str]:
     points = [ctx.region.point(ctx.rng) for _ in range(ctx.rng.randint(2, 10))]
     lines = ["G90"]
     for x, y in points:
-        lines.append(_move(x, y, f=min(MAX_TRAVEL_FEED, ctx.travel_feed())))
+        lines.append(move(x, y, f=min(MAX_TRAVEL_FEED, ctx.travel_feed())))
     return lines
 
 
@@ -248,10 +249,10 @@ def _z_moves(ctx: Context) -> list[str]:
     lines = ["G90"]
     for _ in range(ctx.rng.randint(1, 4)):
         z = round(ctx.rng.uniform(LAYER_Z, 15.0), 3)
-        lines.append(_move(z=z, f=60 * round(ctx.rng.uniform(2.0, 25.0))))
+        lines.append(move(z=z, f=60 * round(ctx.rng.uniform(2.0, 25.0))))
     if ctx.rng.random() < 0.5:
         x, y = ctx.region.point(ctx.rng)
-        lines.append(_move(x, y, z=ctx.layer_z(), f=ctx.travel_feed()))
+        lines.append(move(x, y, z=ctx.layer_z(), f=ctx.travel_feed()))
     return lines
 
 
@@ -277,17 +278,17 @@ def _extrude_only(ctx: Context) -> list[str]:
     lines = []
     for _ in range(ctx.rng.randint(1, 3)):
         e = round(ctx.rng.uniform(-3.0, 5.0), 3)
-        lines.append(_move(e=e, f=60 * round(ctx.rng.uniform(1.0, 40.0))))
+        lines.append(move(e=e, f=60 * round(ctx.rng.uniform(1.0, 40.0))))
     return lines
 
 
 def _retract(ctx: Context) -> list[str]:
     x, y = ctx.region.point(ctx.rng)
     return [
-        _move(e=-RETRACT_MM, f=RETRACT_FEED),
+        move(e=-RETRACT_MM, f=RETRACT_FEED),
         "G90",
-        _move(x, y, f=ctx.travel_feed()),
-        _move(e=RETRACT_MM, f=RETRACT_FEED),
+        move(x, y, f=ctx.travel_feed()),
+        move(e=RETRACT_MM, f=RETRACT_FEED),
     ]
 
 
@@ -310,7 +311,7 @@ def _relative(ctx: Context) -> list[str]:
         dy = round(_clamp(ctx, y + ctx.rng.uniform(-10.0, 10.0)) - y, 3)
         x, y = x + dx, y + dy
         e = round(math.hypot(dx, dy) * EXTRUDE_PER_MM, 5)
-        lines.append(_move(dx, dy, e=e, f=feed))
+        lines.append(move(dx, dy, e=e, f=feed))
     return lines + ["G90"]
 
 
@@ -322,7 +323,7 @@ def _absolute_e(ctx: Context) -> list[str]:
     for _ in range(ctx.rng.randint(2, 10)):
         nx, ny = ctx.region.point(ctx.rng)
         e = round(e + math.hypot(nx - x, ny - y) * EXTRUDE_PER_MM, 5)
-        lines.append(_move(nx, ny, e=e, f=feed))
+        lines.append(move(nx, ny, e=e, f=feed))
         x, y = nx, ny
     return lines + ["M83"]
 
@@ -343,7 +344,7 @@ def _lattice(ctx: Context) -> list[str]:
         on_lattice = ctx.rng.random() < 0.6
         x = _lattice_coordinate(ctx, on_lattice)
         y = _lattice_coordinate(ctx, on_lattice)
-        lines += [_move(x, y, f=ctx.travel_feed()), PROBE]
+        lines += [move(x, y, f=ctx.travel_feed()), PROBE]
     return lines
 
 
@@ -428,8 +429,8 @@ def _slice(ctx: Context) -> list[str]:
     lead = [
         "G90",
         "M83",
-        _move(z=z - shift, f=Z_FEED),
-        _move(*first, f=ctx.travel_feed()),
+        move(z=z - shift, f=Z_FEED),
+        move(*first, f=ctx.travel_feed()),
     ]
     return lead + [
         _shift_z(line, shift) for line in source[start : start + count]
