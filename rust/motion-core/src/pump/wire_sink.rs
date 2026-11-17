@@ -489,6 +489,15 @@ impl SpanSink for WireSink {
             .lock_ok()
             .tick()
     }
+
+    fn on_mcu_shutdown(&self, mcu_id: u32) {
+        if let Some(endpoint) = self.stepcompress.get(&mcu_id) {
+            endpoint.lock_ok().on_mcu_shutdown();
+        }
+        if let Some(endpoint) = self.samples.get(&mcu_id) {
+            endpoint.lock_ok().on_mcu_shutdown();
+        }
+    }
 }
 
 #[cfg(test)]

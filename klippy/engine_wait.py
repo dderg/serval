@@ -33,6 +33,10 @@ def wait_for(printer, poll, what, deadline_s, interval_s=0.005, park=None):
     slow_logged = False
     while True:
         result = poll()
+        if printer.is_shutdown():
+            raise printer.command_error(
+                "%s: shutdown while waiting on the motion engine" % (what,)
+            )
         if result is not None:
             if slow_logged:
                 structured_log.event(
@@ -42,10 +46,6 @@ def wait_for(printer, poll, what, deadline_s, interval_s=0.005, park=None):
                     waited_s=round(reactor.monotonic() - start, 3),
                 )
             return result
-        if printer.is_shutdown():
-            raise printer.command_error(
-                "%s: shutdown while waiting on the motion engine" % (what,)
-            )
         waited = reactor.monotonic() - start
         if waited >= deadline_s:
             raise EngineWaitTimeout(what, deadline_s)
