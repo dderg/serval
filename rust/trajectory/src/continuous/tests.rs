@@ -2888,8 +2888,7 @@ fn a_surface_seam_in_the_rounding_gap_between_two_phases_is_located() {
 fn every_warped_z_step_through_a_mesh_corner_lies_on_a_seam() {
     let corner = 290.0;
     let (from, to) = ([corner - 1.0, corner + 1.0], [corner + 1.0, corner - 1.0]);
-    let line =
-        Segment::Line(Line::try_new([from[0], from[1], 1.3], [to[0], to[1], 1.3]).unwrap());
+    let line = Segment::Line(Line::try_new([from[0], from[1], 1.3], [to[0], to[1], 1.3]).unwrap());
     let speed = 768.0;
     let dt = line.s_len() / speed;
     let span = AnalyticMoveSpan::try_new(
