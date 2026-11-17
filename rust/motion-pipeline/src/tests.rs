@@ -1504,6 +1504,121 @@ fn a_drain_declares_the_park_after_its_last_segment() {
     );
 }
 
+fn pa_with_kernel(k: f64, smooth_time: f64) -> AxisChainSet {
+    AxisChainSet {
+        chains: vec![
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            e_chain(Some(k), smooth_time),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+fn flat_mesh() -> Arc<geometry::SurfaceTransform> {
+    let mesh = geometry::MeshGrid::new(
+        MeshGridSpec {
+            x_min: 0.0,
+            y_min: 0.0,
+            dx: 100.0,
+            dy: 100.0,
+            nx: 3,
+            ny: 3,
+            tension: 0.2,
+        },
+        vec![0.0; 9],
+    )
+    .unwrap();
+    Arc::new(geometry::SurfaceTransform::new(
+        mesh,
+        geometry::Fade::new(1.0, 10.0, 0.0).unwrap(),
+    ))
+}
+
+fn describe(items: &[TrajectoryItem]) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| match item {
+            TrajectoryItem::Seg(seg) => format!("Seg[{:.6}, {:.6}]", seg.t_start, seg.t_end),
+            TrajectoryItem::Parked => "Parked".to_string(),
+            TrajectoryItem::Control(_) => "Control".to_string(),
+        })
+        .collect()
+}
+
+#[test]
+fn every_control_token_at_rest_leaves_the_stream_parked() {
+    let (barrier, _ack) = crossbeam_channel::bounded(1);
+    let tokens = [
+        (
+            "advance change",
+            Control::SetAxisChains(pa_with_kernel(0.04, 0.005)),
+        ),
+        (
+            "wider kernel",
+            Control::SetAxisChains(pa_with_kernel(0.05, 0.02)),
+        ),
+        (
+            "narrower kernel",
+            Control::SetAxisChains(pa_with_kernel(0.05, 0.002)),
+        ),
+        (
+            "mesh on",
+            Control::SetMesh {
+                mesh: Some(flat_mesh()),
+                gcode_z_rebase: 0.0,
+            },
+        ),
+        (
+            "mesh off",
+            Control::SetMesh {
+                mesh: None,
+                gcode_z_rebase: 0.0,
+            },
+        ),
+        ("dwell", Control::Dwell { secs: 1.0 }),
+        (
+            "barrier",
+            Control::Dispatch(DispatchCommand::Barrier(barrier)),
+        ),
+        (
+            "reset",
+            Control::Reset {
+                pos: vec![10.0, 0.0, 0.0, 1.0],
+            },
+        ),
+    ];
+    for (name, token) in tokens {
+        let mut pipeline = Pipeline::new(cfg(), pa_with_kernel(0.05, 0.005), vec![0.0; 4], 0.0);
+        let mut items = Vec::new();
+        let mut collect = |item| {
+            items.push(item);
+            true
+        };
+        for input in [
+            line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0).into(),
+            StreamInput::Drain,
+            StreamInput::Control(token),
+        ] {
+            assert!(pipeline.feed(input, &mut collect));
+        }
+
+        let last_segment = items
+            .iter()
+            .rposition(|item| matches!(item, TrajectoryItem::Seg(_)))
+            .expect("the move dispatched segments");
+        assert!(
+            items[last_segment..]
+                .iter()
+                .any(|item| matches!(item, TrajectoryItem::Parked)),
+            "{name}: trajectory after the drain's park must end parked, or the move after \
+             an idle gap underruns (#929): {:?}",
+            describe(&items[last_segment..])
+        );
+    }
+}
+
 fn sampled_planar_path_length(segs: &[ContinuousSegment]) -> f64 {
     const SAMPLES_PER_SEG: usize = 2000;
     let mut length = 0.0;

@@ -94,6 +94,7 @@ pub struct MotionSettings {
     pub fit_tolerance_accel_mm_s2: f64,
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
+    pub max_extrude_ratio: Option<f64>,
 }
 
 /// One option this reader consumed, echoed back for access tracking.
@@ -129,15 +130,9 @@ pub fn read_motion_settings(
     for extruder in &extruders {
         extruder.lend_extrude_only_caps(&mut axes);
     }
-    let (max_extrude_only_velocity, max_extrude_only_accel) = extruders
+    let main_extruder = extruders
         .iter()
-        .find(|extruder| extruder.section == "extruder")
-        .map_or((None, None), |extruder| {
-            (
-                extruder.max_extrude_only_velocity,
-                extruder.max_extrude_only_accel,
-            )
-        });
+        .find(|extruder| extruder.section == "extruder");
 
     Ok((
         MotionSettings {
@@ -147,8 +142,11 @@ pub fn read_motion_settings(
             cartesian,
             fit_tolerance_mm,
             fit_tolerance_accel_mm_s2,
-            max_extrude_only_velocity,
-            max_extrude_only_accel,
+            max_extrude_only_velocity: main_extruder
+                .and_then(|extruder| extruder.max_extrude_only_velocity),
+            max_extrude_only_accel: main_extruder
+                .and_then(|extruder| extruder.max_extrude_only_accel),
+            max_extrude_ratio: main_extruder.and_then(|extruder| extruder.extrude_ratio),
         },
         reader.consumed,
     ))
@@ -192,11 +190,13 @@ pub fn planner_config_from_settings(
     cfg.post_processors = post_processor_set;
     cfg.max_extrude_only_velocity = settings.max_extrude_only_velocity;
     cfg.max_extrude_only_accel = settings.max_extrude_only_accel;
+    cfg.max_extrude_ratio = settings.max_extrude_ratio;
     cfg.fit_tolerance_mm = settings.fit_tolerance_mm;
     cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
     cfg.check_kernel_free_advance_extrude_only_caps()?;
     let chains = cfg.compile_active_chains().map_err(|e| e.to_string())?;
-    crate::extruder_caps(&cfg.axis_registry, &chains, cfg.fit_tolerance_mm)?;
+    let caps = crate::extruder_caps(&cfg.axis_registry, &chains, cfg.fit_tolerance_mm)?;
+    cfg.check_kernel_free_advance_accel_floor(&chains, &caps)?;
     Ok(cfg)
 }
 
@@ -711,6 +711,7 @@ impl Reader<'_> {
             axis,
             max_extrude_only_velocity,
             max_extrude_only_accel,
+            extrude_ratio,
         })
     }
 }
@@ -729,6 +730,7 @@ struct ExtruderSection {
     axis: Option<String>,
     max_extrude_only_velocity: Option<f64>,
     max_extrude_only_accel: Option<f64>,
+    extrude_ratio: Option<f64>,
 }
 
 impl ExtruderSection {

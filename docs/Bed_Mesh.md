@@ -245,6 +245,10 @@ fade_target: 0
   fade out over a longer distance.  A near flat surface may be able to reduce
   this value to phase out more quickly.  10mm is a sane value to begin with if
   using the default value of 1 for `fade_start`.
+  The fade is a cubic smoothstep, C1 at both ends, so Z inside the band
+  differs from mainline Klipper's linear fade by at most √3/18 ≈ 9.6% of the
+  mesh's distance from `fade_target`; the band must be wider than 1.5× that
+  distance or the mesh is refused when it loads.
 
 - `fade_target: 0`\
   _Default Value:  The average Z value of the mesh_\

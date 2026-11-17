@@ -124,7 +124,8 @@ fn warped_z(
             + 2.0 * warp.wxy * velocity[0] * velocity[1]
             + warp.wyy * velocity[1] * velocity[1]
             + 2.0 * warp.wxz * velocity[0] * velocity[2]
-            + 2.0 * warp.wyz * velocity[1] * velocity[2],
+            + 2.0 * warp.wyz * velocity[1] * velocity[2]
+            + warp.wzz * velocity[2] * velocity[2],
     }
 }
 

@@ -216,16 +216,6 @@ class BedMesh:
                         "range\nmin: %.4f, max: %.4f, fade_target: %.4f"
                         % (min_z, max_z, err_target)
                     )
-            min_z, max_z = mesh.get_z_range()
-            if self.fade_dist <= max(abs(min_z), abs(max_z)):
-                self.z_mesh = None
-                self.fade_target = 0.0
-                raise self.gcode.error(
-                    "bed_mesh:  Mesh extends outside of the fade range, "
-                    "please see the fade_start and fade_end options in"
-                    "example-extras.cfg. fade distance: %.2f mesh min: %.4f"
-                    "mesh max: %.4f" % (self.fade_dist, min_z, max_z)
-                )
         else:
             self.fade_target = 0.0
 
