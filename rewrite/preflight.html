@@ -1892,9 +1892,11 @@ replay checks every segment, a second, pinned to two cores, is timed.</p>
   skipped and reported with its line; nothing it would emit is planned.</li>
 <li><strong>Mesh</strong>: <code>--mesh NAME</code>, else the first profile the print loads
   (<code>BED_MESH_PROFILE LOAD</code>, or <code>bed_mesh_default</code> at startup), else the saved
-  <code>default</code> profile, else none. The replay activates it before the first
-  move with the toolhead at the origin, through the engine's own activation
-  (<code>SurfaceTransform::activate</code>). Later loads and clears are listed, not
+  <code>default</code> profile, else none. The replay activates it with the toolhead at
+  the origin, through the engine's own activation
+  (<code>SurfaceTransform::activate</code>), and starts the plan at the first position
+  the print names with the mesh active there, as the live host stands after
+  loading the mesh and moving to it. Later loads and clears are listed, not
   replayed.</li>
 </ul>
 <p>Each command klippy would execute is treated by class
