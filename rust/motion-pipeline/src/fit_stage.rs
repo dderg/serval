@@ -1,11 +1,12 @@
 use geometry::fitter::{
-    JunctionPlan, RunFit, arc_candidate_fits, blend_moves, consumption_moves,
-    facet_consumption_candidate, is_travel, merge_collinear_lines, plan_facet_consumption,
-    plan_junction_reduced, spatial_end, spatial_start, trim_line_move,
+    JunctionPlan, RunFit, UnblendReason, arc_candidate_fits, blend_moves, consumption_moves,
+    facet_consumption_candidate, is_travel, may_open_run, merge_collinear_lines,
+    plan_facet_consumption, plan_junction_reduced, spatial_end, spatial_start, trim_line_move,
 };
-use geometry::path::{Line, PathSegment, Segment};
+use geometry::path::{CurvatureProfile, Line, PathSegment, Segment};
 use geometry::{CornerFitConfig, Move};
 
+use crate::planner::{PIECE_S, corner_reach_mm};
 use crate::{CONTIGUITY_EPS_MM, Control, StreamInput};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
@@ -14,6 +15,12 @@ const MIN_RUN_FACETS: usize = 3;
 /// stage buffers past the first squeezed facet before giving up on finding
 /// the far anchor.
 const MAX_CONSUMED_FACETS: usize = 8;
+/// The most of a line any junction after it claims: a corner blend's
+/// budget, a run's easing and its boundary blend each take at most half.
+const CLAIMED_SHARE: f64 = 0.5;
+/// What a head sent ahead leaves of the line's unclaimed half, so the rest
+/// of the line is never empty.
+const REST_MARGIN_MM: f64 = 1e-3;
 
 enum ClusterScan {
     /// The cluster's far anchor is not buffered yet and more input may come.
@@ -57,6 +64,13 @@ pub struct FitStage {
     seam_in_reduction: f64,
     consume_scan_start: usize,
     merge_absorbed: Vec<[f64; 3]>,
+    /// How far along the front piece its body went out ahead of its exit
+    /// junction.
+    sent_head_mm: Option<f64>,
+    /// The fastest acceleration of any move ingested: no corner the
+    /// planner slows across a line's head reaches further than its
+    /// approach at it.
+    fastest_accel_mm_s2: f64,
 }
 
 enum Element {
@@ -89,6 +103,29 @@ fn piece_of(e: &Element) -> Option<&Move> {
     }
 }
 
+/// Whether two plans of one junction are the same: blends trimming alike,
+/// or one reason against a blend that no line length decides.
+fn plans_alike(a: &JunctionPlan, b: &JunctionPlan) -> bool {
+    match (a, b) {
+        (JunctionPlan::Blend(a), JunctionPlan::Blend(b)) => {
+            a.trim_in() == b.trim_in() && a.trim_out() == b.trim_out()
+        }
+        (JunctionPlan::Unblended(a), JunctionPlan::Unblended(b)) => {
+            a == b
+                && matches!(
+                    a,
+                    UnblendReason::Collinear
+                        | UnblendReason::NearReversal
+                        | UnblendReason::ZeroDeviation
+                        | UnblendReason::ArcIncident
+                        | UnblendReason::NonSpatial
+                        | UnblendReason::ExtrusionStep
+                )
+        }
+        _ => false,
+    }
+}
+
 impl FitStage {
     pub fn new(corner: CornerFitConfig) -> Self {
         Self {
@@ -100,6 +137,8 @@ impl FitStage {
             seam_in_reduction: 0.0,
             consume_scan_start: MAX_CONSUMED_FACETS,
             merge_absorbed: Vec::new(),
+            sent_head_mm: None,
+            fastest_accel_mm_s2: 0.0,
         }
     }
 
@@ -110,6 +149,7 @@ impl FitStage {
     /// at those junctions squeeze the facet bodies into micrometre slivers
     /// whose lowered acceleration rings far past the machine limits.
     fn ingest(&mut self, m: Move) {
+        self.fastest_accel_mm_s2 = self.fastest_accel_mm_s2.max(m.limits.accel_mm_s2);
         if let Some(last) = self.tail.last_mut() {
             if let Some(merged) = merge_collinear_lines(last, &m, &self.merge_absorbed, self.corner)
             {
@@ -143,6 +183,7 @@ impl FitStage {
                 self.tail_checked = 1;
                 self.seam_head_trim = 0.0;
                 self.seam_in_reduction = 0.0;
+                self.sent_head_mm = None;
                 out.reset();
             }
             Control::Dwell { .. }
@@ -197,6 +238,9 @@ impl FitStage {
                     break;
                 }
                 self.tail_checked += 1;
+            }
+            if !broke && self.tail_checked == n && n == 2 {
+                broke = !may_open_run(&self.tail[0], &self.tail[1], self.corner);
             }
             if !broke && !eof {
                 return;
@@ -349,7 +393,7 @@ impl FitStage {
                 Some(Element::Piece(_)) => match self.decided.get(1) {
                     None => {
                         if !eof {
-                            return true;
+                            return self.send_settled_head(out);
                         }
                         if !self.emit_front_piece(0.0, out) {
                             return false;
@@ -358,7 +402,9 @@ impl FitStage {
                         self.seam_in_reduction = 0.0;
                     }
                     Some(Element::Run(next)) => {
-                        let Some(fit) = &next.fit else { return true };
+                        let Some(fit) = &next.fit else {
+                            return self.send_settled_head(out);
+                        };
                         let trim_end = fit.head_boundary_trim();
                         if !self.emit_front_piece(trim_end, out) {
                             return false;
@@ -383,7 +429,7 @@ impl FitStage {
                             self.seam_in_reduction,
                         ) {
                             match self.consumable_cluster(eof) {
-                                ClusterScan::WaitForInput => return true,
+                                ClusterScan::WaitForInput => return self.send_settled_head(out),
                                 ClusterScan::Anchor(max_mids) => {
                                     match self.try_consumption(max_mids, eof, out) {
                                         Some(false) => return false,
@@ -394,8 +440,11 @@ impl FitStage {
                                 ClusterScan::NoAnchor => {}
                             }
                         }
-                        let Some(out_claims) = self.tail_claims(1, eof) else {
-                            return true;
+                        let claims = self
+                            .tail_claims(1, eof)
+                            .or_else(|| self.claims_out_of_reach());
+                        let Some(out_claims) = claims else {
+                            return self.send_settled_head(out);
                         };
                         if !self.emit_pairwise(out_claims, out) {
                             return false;
@@ -454,17 +503,13 @@ impl FitStage {
         let Element::Piece(m) = self.decided.remove(0) else {
             unreachable!()
         };
-        let body = trim_line_move(&m, self.seam_head_trim, trim_end).unwrap_or_else(|e| {
-            panic!(
-                "fit_stage: trim of line {} failed: {e:?}",
-                m.source.start_line
-            )
-        });
+        let body = self.front_body(&m, trim_end);
         if let Some(body) = body {
             if !out.send(body) {
                 return false;
             }
         }
+        let unblended = blend.is_none();
         if let Some(b) = blend {
             let next = piece_of(&self.decided[0]).expect("checked above");
             let halves = blend_moves(&b, &m, next).unwrap_or_else(|e| {
@@ -478,6 +523,9 @@ impl FitStage {
                     return false;
                 }
             }
+        }
+        if unblended && !out.release(None) {
+            return false;
         }
         self.seam_head_trim = next_head_trim;
         self.seam_in_reduction = 0.0;
@@ -591,18 +639,12 @@ impl FitStage {
             })
             .collect();
         let mid_refs: Vec<&Move> = mids.iter().collect();
-        let after = piece_of(&self.decided[0]).expect("caller matched the anchor piece");
-        let body = trim_line_move(&front, self.seam_head_trim, fc.trim_in()).unwrap_or_else(|e| {
-            panic!(
-                "fit_stage: trim of line {} failed: {e:?}",
-                front.source.start_line
-            )
-        });
-        if let Some(body) = body {
+        if let Some(body) = self.front_body(&front, fc.trim_in()) {
             if !out.send(body) {
                 return false;
             }
         }
+        let after = piece_of(&self.decided[0]).expect("caller matched the anchor piece");
         let segments = consumption_moves(&fc, &front, &mid_refs, after).unwrap_or_else(|e| {
             panic!(
                 "fit_stage: consumption of line {} failed: {e:?}",
@@ -624,12 +666,7 @@ impl FitStage {
         let Element::Piece(m) = self.decided.remove(0) else {
             unreachable!("caller matched a front piece")
         };
-        let body = trim_line_move(&m, self.seam_head_trim, trim_end).unwrap_or_else(|e| {
-            panic!(
-                "fit_stage: trim of line {} failed: {e:?}",
-                m.source.start_line
-            )
-        });
+        let body = self.front_body(&m, trim_end);
         match body {
             Some(body) => out.send(body),
             None => true,
@@ -676,6 +713,88 @@ impl FitStage {
         self.seam_head_trim = fit.tail_boundary_trim();
         self.seam_in_reduction = fit.tail_line_trim();
         true
+    }
+
+    /// The front piece's body still to send: from where the head sent
+    /// ahead of it ended, or else from its head trim, to `trim_end` short
+    /// of its end.
+    fn front_body(&mut self, m: &Move, trim_end: f64) -> Option<Move> {
+        let from = self.sent_head_mm.take().unwrap_or(self.seam_head_trim);
+        trim_line_move(m, from, trim_end).unwrap_or_else(|e| {
+            panic!(
+                "fit_stage: trim of line {} failed: {e:?}",
+                m.source.start_line
+            )
+        })
+    }
+
+    /// Sends, once, the head of the front piece no later junction can
+    /// claim: everything short of [`CLAIMED_SHARE`] of it, once the
+    /// junction before it is final. Only a head lasting [`PIECE_S`] at the
+    /// line's feedrate goes ahead, and only past the reach of a corner the
+    /// planner may slow it from: the planner reads the rest as one line
+    /// with it. A travel goes only from where the piece before it ends and
+    /// before a plain piece, since a run either side may move its ends
+    /// ([`TravelAligningSender`]); its head then leaves at once.
+    fn send_settled_head(&mut self, out: &mut TravelAligningSender<'_>) -> bool {
+        if self.sent_head_mm.is_some() {
+            return true;
+        }
+        let Some(Element::Piece(m)) = self.decided.first() else {
+            return true;
+        };
+        let Some(Segment::Line(line)) = &m.segment.spatial else {
+            return true;
+        };
+        let travel = is_travel(m);
+        if travel && !matches!(self.decided.get(1), Some(Element::Piece(_))) {
+            return true;
+        }
+        let length = line.s_len();
+        let head_end_mm = CLAIMED_SHARE * length - REST_MARGIN_MM;
+        let head_mm = head_end_mm - self.seam_head_trim;
+        let corner_reach_mm = self.corner.shaped_corners.map_or(0.0, |corners| {
+            corner_reach_mm(corners, self.fastest_accel_mm_s2)
+        });
+        if head_mm < corner_reach_mm.max(PIECE_S * m.feedrate_mm_s) {
+            return true;
+        }
+        let head = trim_line_move(m, self.seam_head_trim, length - head_end_mm)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "fit_stage: head of line {} failed: {e:?}",
+                    m.source.start_line
+                )
+            })
+            .expect("a head past a corner's reach keeps a length");
+        if travel && !spatial_start(&head).is_some_and(|start| out.keeps_start(start)) {
+            return true;
+        }
+        self.sent_head_mm = Some(head_end_mm);
+        out.send(head) && (!travel || out.release(None))
+    }
+
+    /// No claims, when nothing the element after the front's next piece
+    /// may take from that piece's tail changes their junction: it plans
+    /// the same with none of the piece claimed and with half of it, the
+    /// most any element claims. Only a piece lasting [`PIECE_S`] is read
+    /// this way; shorter ones wait for what follows.
+    fn claims_out_of_reach(&self) -> Option<(f64, f64)> {
+        let (Some(m), Some(next)) = (piece_of(&self.decided[0]), piece_of(&self.decided[1])) else {
+            unreachable!("caller matched two front pieces")
+        };
+        let Some(Segment::Line(line)) = &next.segment.spatial else {
+            return None;
+        };
+        if next.shortest_secs() < PIECE_S {
+            return None;
+        }
+        let seam = (self.seam_in_reduction, self.seam_head_trim);
+        let half_mm = CLAIMED_SHARE * line.s_len();
+        let unclaimed = plan_junction_reduced(m, next, self.corner, seam, (0.0, 0.0)).ok()?;
+        let claimed =
+            plan_junction_reduced(m, next, self.corner, seam, (half_mm, half_mm)).ok()?;
+        plans_alike(&unclaimed, &claimed).then_some((0.0, 0.0))
     }
 }
 
@@ -765,6 +884,16 @@ impl TravelAligningSender<'_> {
         }
         self.alignment.last_spatial_end = spatial_end(&m);
         (self.tx)(m.into())
+    }
+
+    /// Whether a travel sent now from `start` keeps it: the piece before
+    /// it ends there, or is a travel that will be re-anchored onto it.
+    fn keeps_start(&self, start: [f64; 3]) -> bool {
+        self.alignment.parked_travel.is_some()
+            || self
+                .alignment
+                .last_spatial_end
+                .is_none_or(|end| geometry::vec3::dist(end, start) <= ALIGN_EPS_MM)
     }
 
     fn release(&mut self, next_start: Option<[f64; 3]>) -> bool {

@@ -192,34 +192,70 @@ impl Held {
 
 /// The front's input and output on one timeline: the fitted moves' source
 /// lines, the end of every move the guard emitted, and how much it had
-/// emitted when each line arrived.
+/// emitted when each line arrived, with the path the fit stage and the
+/// planner had handed on by then.
 #[derive(Default)]
 struct FrontStream {
     fitted: Vec<SourceRange>,
+    fitted_mm: f64,
+    planned_mm: f64,
     emitted: Vec<(u32, f64)>,
+    emitted_path: Vec<(f64, f64)>,
+    emitted_mm: f64,
     emitted_s: f64,
-    arrivals: Vec<(u32, f64)>,
+    arrivals: Vec<Arrival>,
+}
+
+struct Arrival {
+    line: u32,
+    emitted_s: f64,
+    fitted_mm: f64,
+    planned_mm: f64,
 }
 
 impl FrontStream {
     fn fit(&mut self, item: StreamInput, planner: &mut Planner, guard: &mut TurningGuard) -> bool {
         if let StreamInput::Move(m) = &item {
             self.fitted.push(m.source);
+            self.fitted_mm += m.segment.s_len();
         }
-        planner.feed(item, &mut |item| guard.feed(item, &mut |item| self.emit(&item)))
+        planner.feed(item, &mut |item| {
+            if let PlannedItem::Move(planned) = &item {
+                self.planned_mm += planned.geometry.segment.s_len();
+            }
+            guard.feed(item, &mut |item| self.emit(&item))
+        })
     }
 
     fn emit(&mut self, item: &PlannedItem) -> bool {
         if let PlannedItem::Move(planned) = item {
             self.emitted_s += duration_s(&planned.velocity);
+            self.emitted_mm += planned.geometry.segment.s_len();
             self.emitted
                 .push((planned.geometry.source.start_line, self.emitted_s));
+            self.emitted_path.push((self.emitted_mm, self.emitted_s));
         }
         true
     }
 
     fn arrived(&mut self, line: u32) {
-        self.arrivals.push((line, self.emitted_s));
+        self.arrivals.push(Arrival {
+            line,
+            emitted_s: self.emitted_s,
+            fitted_mm: self.fitted_mm,
+            planned_mm: self.planned_mm,
+        });
+    }
+
+    /// When the plan has covered `path_mm`, at the end of the move that
+    /// covers it.
+    fn time_at(&self, path_mm: f64) -> f64 {
+        let index = self
+            .emitted_path
+            .partition_point(|&(end_mm, _)| end_mm < path_mm);
+        self.emitted_path
+            .get(index)
+            .map_or(self.emitted_s, |&(_, end_s)| end_s)
     }
 
     /// The first line of the fitted move `line` ended up in.
@@ -244,21 +280,29 @@ impl FrontStream {
     fn held(&self) -> FrontHeld {
         let mut most = FrontHeld::default();
         let mut previous_line = None;
-        for &(line, emitted_s) in &self.arrivals {
+        for arrival in &self.arrivals {
+            let line = arrival.line;
             let newest = self.chain_start(line);
             let newest_from_s = self.played_before(newest);
             let previous_s = previous_line
                 .map(|previous| self.chain_start(previous))
                 .filter(|&previous| previous < newest)
                 .map_or(0.0, |previous| newest_from_s - self.played_before(previous));
-            let past_newest_s = (newest_from_s - emitted_s).max(0.0);
+            let past_newest_s = (newest_from_s - arrival.emitted_s).max(0.0);
             let excess_s = past_newest_s - 0.5 * previous_s;
             if excess_s > most.excess_s {
+                let fitted_s = self.time_at(arrival.fitted_mm);
+                let planned_s = self.time_at(arrival.planned_mm);
                 most = FrontHeld {
                     excess_s,
                     past_newest_s,
                     previous_s,
                     line,
+                    stages_s: [
+                        (newest_from_s - fitted_s).max(0.0),
+                        fitted_s - planned_s,
+                        planned_s - arrival.emitted_s,
+                    ],
                 };
             }
             previous_line = Some(line);
@@ -267,20 +311,25 @@ impl FrontStream {
     }
 }
 
+/// What the front held at its worst, past the moves it must hold, and how
+/// the fit stage, the planner and the guard shared it.
 #[derive(Debug, Default)]
 struct FrontHeld {
     excess_s: f64,
     past_newest_s: f64,
     previous_s: f64,
     line: u32,
+    stages_s: [f64; 3],
 }
 
 impl FrontHeld {
     fn assert_within_bound(&self, what: &str) {
+        let [fit_s, planner_s, guard_s] = self.stages_s;
         assert!(
             self.excess_s <= FRONT_REST_S,
             "the front held {:.3} s of {what} back past the newest fitted move at line {}, \
-             {:.3} s past half the {:.3} s move before it and {FRONT_REST_S} s",
+             {:.3} s past half the {:.3} s move before it and {FRONT_REST_S} s (fit stage \
+             {fit_s:.3} s, planner {planner_s:.3} s, guard {guard_s:.3} s)",
             self.past_newest_s,
             self.line,
             self.excess_s - FRONT_REST_S,

@@ -7,6 +7,8 @@ mod linalg;
 mod move_ops;
 mod overlap;
 mod runfit;
+use std::f64::consts::{FRAC_PI_2, PI};
+
 use crate::vec3;
 
 use crate::GeometryError;
@@ -28,6 +30,11 @@ use emit::{BUDGET_EPS_MM, SEAM_CLOSURE_EPS_MM, internal};
 use move_ops::line_of;
 
 pub(crate) const TURN_NORMAL_EPS: f64 = 1e-9;
+/// The least run radius, in run tolerances, [`may_open_run`] bounds the
+/// chords' leans on: below it a chord may lean any way.
+const RUN_RADIUS_FLOOR_TOLS: f64 = 4.0;
+/// What [`may_open_run`] adds to its bounds against rounding.
+const RUN_BOUND_SLACK: f64 = 1e-6;
 
 /// Whether the toolhead must be at rest across the seam from `prev` into
 /// `next`. Passing through requires both sides to have spatial bodies, the
@@ -218,6 +225,57 @@ pub enum JunctionPlan {
 pub fn arc_candidate_fits(facets: &[Move], config: CornerFitConfig) -> bool {
     let tol = span_tolerance(facets, config);
     tol.is_finite() && kernels::arc_candidate(facets, config, tol)
+}
+
+/// Whether `first` and `second`, adjacent lines turning within the arc
+/// band, may open an arc run of three facets or more, whatever `second`
+/// still merges into ([`merge_collinear_lines`]). A run's circle keeps
+/// every chord within `t` of it ([`kernels::arc_candidate`]): a chord of
+/// length `ℓ` fits only a circle of radius `ρ ≥ ℓ²/16t`, on which it
+/// leans off the tangent at their shared vertex by at most `asin M(ℓ)`.
+/// Both chords then head the same way to within those leans, or both
+/// leave the vertex along the tangent, `ψ` apart, and stray apart over
+/// their shared length `m` by `m·cos(α)·sin(ψ/2)`, which must stay within
+/// `t·(ρ+t)/(ρ−t)`. `false` only where neither can hold, so the stage may
+/// seal `first` as a plain piece without waiting for a third facet.
+#[must_use]
+pub fn may_open_run(first: &Move, second: &Move, config: CornerFitConfig) -> bool {
+    let (Some(line_a), Some(line_b)) = (line_of(first), line_of(second)) else {
+        return true;
+    };
+    let t = fit_tolerance(first.limits, config).min(fit_tolerance(second.limits, config));
+    if !(t.is_finite() && t > 0.0) {
+        return true;
+    }
+    let (a, b) = (line_a.s_len(), line_b.s_len());
+    let longest = a.max(b);
+    let rho = longest * longest / (16.0 * t);
+    if rho <= RUN_RADIUS_FLOOR_TOLS * t {
+        return true;
+    }
+    let merge_budget = fit_tolerance(second.limits, config);
+    let cone = if merge_budget.is_finite() && merge_budget > 0.0 {
+        (merge_budget / b).min(1.0).asin()
+    } else {
+        0.0
+    };
+    let lean = |chord: f64| {
+        let sagging = 2.0 * (t / rho).sqrt();
+        let tilting = 2.0 * t / chord * rho / (rho - t) + longest / (2.0 * (rho - t));
+        (sagging.max(tilting) * (1.0 + RUN_BOUND_SLACK)).min(1.0).asin()
+    };
+    let (lean_a, lean_b) = (lean(a), lean(b));
+    let theta = libm::acos(
+        dot(line_a.heading_at(line_a.s_len()), line_b.heading_at(0.0)).clamp(-1.0, 1.0),
+    );
+    let heads_alike = theta - cone <= lean_a + lean_b;
+    let psi_lo = PI - theta - cone;
+    let psi_hi = PI - theta + cone;
+    let alpha = lean_a.min(lean_b) + 0.5 * psi_hi;
+    let stray = a.min(b) * alpha.cos() * (0.5 * psi_lo.max(0.0)).sin();
+    let doubles_back = alpha >= FRAC_PI_2
+        || stray <= t * (rho + t) / (rho - t) * (1.0 + RUN_BOUND_SLACK);
+    heads_alike || doubles_back
 }
 
 /// Classify a line-line junction whose adjoining lengths are partly consumed

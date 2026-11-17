@@ -12,7 +12,9 @@
 //! capped at the speed that keeps the shaper's pull on it within its
 //! budget's room, where its budget holds curves
 //! ([`ShapedCorners::holds_curves`]). A move leaves here final: the window
-//! plans it as it will commit.
+//! plans it as it will commit. It leaves as soon as no later corner can
+//! change it, lines cut into pieces of at most [`PIECE_S`], so the stages
+//! after this one, which hold moves by count, hold them by time (#860).
 
 use std::collections::VecDeque;
 
@@ -25,6 +27,24 @@ use geometry::{CornerFitConfig, Move, ShapedCorners, seam_requires_stop};
 /// before its first half, which waits for the second, and its curve cap
 /// reaches the blend before it across a consumed line.
 const HELD_MOVES: usize = 4;
+
+/// The longest a released line lasts at its feedrate: past it the line is
+/// cut into equal collinear pieces.
+pub(crate) const PIECE_S: f64 = 0.1;
+
+/// The shortest piece a split leaves, as a share of the approach it slows
+/// ([`splits`]).
+const SLIVER_SHARE: f64 = 0.25;
+
+/// How far apart two pieces of one line may head after rounding: a line's
+/// rest the fit stage sends after its head heads the same way up to an ulp.
+const COLLINEAR_COS_EPS: f64 = 1e-12;
+
+/// How far along a line a corner at `accel` may still slow and split it:
+/// its approach, and the sliver the split leaves.
+pub(crate) fn corner_reach_mm(corners: &ShapedCorners, accel: f64) -> f64 {
+    (1.0 + SLIVER_SHARE) * corners.approach_mm(accel)
+}
 
 pub(super) struct Approaches {
     corners: Option<&'static ShapedCorners>,
@@ -42,6 +62,11 @@ pub(super) struct Approaches {
     /// The move leaving the last stop. A corner's approach ends there: the
     /// toolhead starts afresh past it.
     stop_departure: Option<u64>,
+    /// The path behind the newest held move a later corner may still slow
+    /// and split: its approach at the stream's acceleration, and the sliver
+    /// the split leaves.
+    settle_mm: f64,
+    max_accel_mm_s2: f64,
 }
 
 /// A blend still held, as its curve cap needs it once the next corner
@@ -54,7 +79,7 @@ struct HeldApex {
 }
 
 impl Approaches {
-    pub(super) fn new(config: CornerFitConfig) -> Self {
+    pub(super) fn new(config: CornerFitConfig, max_accel_mm_s2: f64) -> Self {
         Self {
             corners: config.shaped_corners,
             config,
@@ -65,15 +90,42 @@ impl Approaches {
             last_apex: None,
             unsettled_clothoid: None,
             stop_departure: None,
+            settle_mm: config
+                .shaped_corners
+                .map_or(0.0, |corners| corner_reach_mm(corners, max_accel_mm_s2)),
+            max_accel_mm_s2,
         }
     }
 
-    /// Takes `m` and releases every move no later corner can slow.
+    /// Takes `m` and releases, cut into pieces, every move no later corner
+    /// can slow.
     pub(super) fn push(&mut self, m: Move, release: &mut impl FnMut(Move)) {
         let Some(corners) = self.corners else {
-            release(m);
+            cut(m, release);
             return;
         };
+        assert!(
+            m.segment.spatial.is_none() || m.limits.accel_mm_s2 <= self.max_accel_mm_s2,
+            "approaches: line {} accelerates at {} mm/s², past the {} mm/s² of the \
+             stream's limits its corners' reach is held to",
+            m.source.start_line,
+            m.limits.accel_mm_s2,
+            self.max_accel_mm_s2
+        );
+        if self.continues(&m) {
+            self.extend(m);
+        } else {
+            self.hold(m, corners);
+        }
+        while self.held.len() > HELD_MOVES {
+            for piece in self.held.pop_front().expect("held").1 {
+                cut(piece, release);
+            }
+        }
+        self.release_settled(corners, release);
+    }
+
+    fn hold(&mut self, m: Move, corners: &'static ShapedCorners) {
         let mut pieces = vec![m];
         let carried = self.slowing_ahead.take();
         let leg_mm = self.since_corner_mm;
@@ -151,11 +203,101 @@ impl Approaches {
         self.since_corner_mm += pieces.iter().map(path_length).sum::<f64>();
         self.held.push_back((self.next_id, pieces));
         self.next_id += 1;
-        while self.held.len() > HELD_MOVES {
-            for piece in self.held.pop_front().expect("held").1 {
-                release(piece);
+    }
+
+    /// Whether `m` goes on with the line the newest held move ends with:
+    /// the fit stage sends a long line's head ahead of the rest of it.
+    fn continues(&self, m: &Move) -> bool {
+        self.held
+            .back()
+            .and_then(|(_, pieces)| pieces.last())
+            .is_some_and(|head| goes_on(head, m))
+    }
+
+    /// Joins `m` onto the line it goes on with, as one move: every corner
+    /// reads the whole line, as it would have arrived whole.
+    fn extend(&mut self, m: Move) {
+        assert!(
+            self.slowing_ahead.is_none(),
+            "approaches: a corner's approach runs past the head the fit stage sent of line {}",
+            m.source.start_line
+        );
+        self.since_corner_mm += path_length(&m);
+        let (_, pieces) = self.held.back_mut().expect("a line goes on from a held head");
+        let head = pieces.pop().expect("a line goes on from a held head");
+        pieces.push(joined(&head, m));
+    }
+
+    /// Releases what no later move can change: the held moves more than
+    /// `settle_mm` of path before the newest one ends, or starts where it
+    /// may be a blend's first half, up to a blend whose curve cap the next
+    /// corner may still lower or a clothoid still unsettled.
+    fn release_settled(&mut self, corners: &ShapedCorners, release: &mut impl FnMut(Move)) {
+        let pending = self.pending(corners);
+        let newest_mm = self.held.back().map_or(0.0, |(_, pieces)| {
+            let opens_blend = pieces
+                .last()
+                .is_some_and(|piece| matches!(piece.segment.spatial, Some(Segment::Clothoid(_))));
+            if opens_blend {
+                pieces.iter().map(path_length).sum()
+            } else {
+                0.0
+            }
+        });
+        let held_mm: f64 = self
+            .held
+            .iter()
+            .flat_map(|(_, pieces)| pieces)
+            .map(path_length)
+            .sum();
+        let mut settled_mm = held_mm - newest_mm - self.settle_mm;
+        for (id, pieces) in self.held.iter_mut() {
+            if pending.contains(&*id) {
+                return;
+            }
+            while let Some(piece) = pieces.first() {
+                let length = path_length(piece);
+                if length <= settled_mm {
+                    settled_mm -= length;
+                    cut(pieces.remove(0), release);
+                    continue;
+                }
+                if line_length(piece).is_some() && settled_mm >= PIECE_S * piece.feedrate_mm_s {
+                    let (head, rest) = split_at(piece, settled_mm);
+                    pieces[0] = rest;
+                    cut(head, release);
+                }
+                return;
             }
         }
+    }
+
+    /// The held moves a later corner may still cap: the newest blend's
+    /// halves while the next corner may lie close enough to lower their
+    /// speed, and an unsettled clothoid.
+    fn pending(&self, corners: &ShapedCorners) -> Vec<u64> {
+        let mut pending: Vec<u64> = self.unsettled_clothoid.into_iter().collect();
+        let Some(apex) = &self.last_apex else {
+            return pending;
+        };
+        if self.since_corner_mm >= apex.leg_in_mm {
+            return pending;
+        }
+        let fastest = self
+            .held
+            .iter()
+            .filter(|(id, _)| apex.halves.contains(id))
+            .flat_map(|(_, pieces)| pieces)
+            .map(|piece| piece.feedrate_mm_s)
+            .fold(0.0, f64::max);
+        let radii = (
+            self.since_corner_mm / apex.theta,
+            apex.leg_in_mm / apex.theta,
+        );
+        if fastest > corners.arc_speed_floor(radii, apex.room_mm) {
+            pending.extend(apex.halves);
+        }
+        pending
     }
 
     /// Slows `approach_mm` of path back from the end of the held moves
@@ -245,7 +387,7 @@ impl Approaches {
         }
         self.reset();
         for piece in self.held.drain(..).flat_map(|(_, pieces)| pieces) {
-            release(piece);
+            cut(piece, release);
         }
     }
 
@@ -383,7 +525,7 @@ fn bake(m: &mut Move, accel: f64) {
 /// Whether `m` is a line cut `at` mm along leaves no piece shorter than a
 /// quarter of `approach_mm`.
 fn splits(m: &Move, at: f64, approach_mm: f64) -> bool {
-    let sliver = 0.25 * approach_mm;
+    let sliver = SLIVER_SHARE * approach_mm;
     line_length(m).is_some_and(|length| at >= sliver && length - at >= sliver)
 }
 
@@ -397,25 +539,82 @@ fn line_length(m: &Move) -> Option<f64> {
 /// `m`, a line, cut `at` mm along it into two collinear moves carrying its
 /// limits, source and the share of its followers each covers.
 fn split_at(m: &Move, at: f64) -> (Move, Move) {
+    let length = line_length(m).expect("only a line is split");
+    (span(m, 0.0, at), span(m, at, length))
+}
+
+/// Releases `m`, a line lasting longer than [`PIECE_S`] at its feedrate
+/// cut into equal collinear pieces.
+fn cut(m: Move, release: &mut impl FnMut(Move)) {
+    let Some(length) = line_length(&m) else {
+        release(m);
+        return;
+    };
+    let count = (m.shortest_secs() / PIECE_S).ceil();
+    if count <= 1.0 {
+        release(m);
+        return;
+    }
+    let step_mm = length / count;
+    let ends = (1..count as usize).map(|index| index as f64 * step_mm);
+    let mut from = 0.0;
+    for to in ends.chain(std::iter::once(length)) {
+        release(span(&m, from, to));
+        from = to;
+    }
+}
+
+/// The part of `m`, a line, from `from` to `to` mm along it.
+fn span(m: &Move, from: f64, to: f64) -> Move {
     let Some(Segment::Line(line)) = &m.segment.spatial else {
-        unreachable!("only a line is split")
+        unreachable!("only a line is cut")
     };
     let length = line.s_len();
-    let piece = |from: f64, to: f64| {
-        let segment = Line::try_new(line.point_at(from), line.point_at(to))
-            .expect("a split line keeps a positive length");
-        let followers = m
-            .segment
-            .followers
-            .iter()
-            .map(|f| f.span(from, to, length))
-            .filter(|f| f.max_abs_ratio() > 0.0)
-            .collect();
-        Move {
-            segment: PathSegment::try_new(Segment::Line(segment), followers)
-                .expect("a split line's followers fit it"),
-            ..m.clone()
-        }
+    let segment = Line::try_new(line.point_at(from), line.point_at(to))
+        .expect("a cut line keeps a positive length");
+    let followers = m
+        .segment
+        .followers
+        .iter()
+        .map(|f| f.span(from, to, length))
+        .filter(|f| f.max_abs_ratio() > 0.0)
+        .collect();
+    Move {
+        segment: PathSegment::try_new(Segment::Line(segment), followers)
+            .expect("a cut line's followers fit it"),
+        ..m.clone()
+    }
+}
+
+/// Whether `next` goes on with `head` as one line: the same G-code line,
+/// limits and feedrate, from where it ends, the same way.
+fn goes_on(head: &Move, next: &Move) -> bool {
+    let (Some(Segment::Line(a)), Some(Segment::Line(b))) =
+        (&head.segment.spatial, &next.segment.spatial)
+    else {
+        return false;
     };
-    (piece(0.0, at), piece(at, length))
+    let (ta, tb) = (a.heading_at(0.0), b.heading_at(0.0));
+    let cos = ta[0] * tb[0] + ta[1] * tb[1] + ta[2] * tb[2];
+    head.source == next.source
+        && head.limits == next.limits
+        && head.feedrate_mm_s == next.feedrate_mm_s
+        && head.segment.followers == next.segment.followers
+        && a.end == b.start
+        && cos >= 1.0 - COLLINEAR_COS_EPS
+}
+
+/// `head` and `next`, one line going on with the other, as one line.
+fn joined(head: &Move, next: Move) -> Move {
+    let (Some(Segment::Line(a)), Some(Segment::Line(b))) =
+        (&head.segment.spatial, &next.segment.spatial)
+    else {
+        unreachable!("only lines join")
+    };
+    let segment = Line::try_new(a.start, b.end).expect("a joined line keeps a positive length");
+    Move {
+        segment: PathSegment::try_new(Segment::Line(segment), next.segment.followers.clone())
+            .expect("a joined line's followers fit it"),
+        ..next
+    }
 }

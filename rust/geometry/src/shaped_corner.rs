@@ -47,6 +47,9 @@ const RATIO_BISECTIONS: u32 = 24;
 const CUT_CANDIDATES: i32 = 16;
 const ROOM_ACCEL_OCTAVES: i32 = 10;
 const TURN_EPS_RAD: f64 = 1e-6;
+/// How much of a room [`ShapedCorners::arc_speed_floor`] gives up for the
+/// rounding of a node speed's pull at another radius.
+const ROOM_ROUNDING: f64 = 1e-9;
 /// The most curvature, against its apex's, a corner blend starts and ends
 /// at: a pair leaving an arc into a sharp corner starts at the arc's
 /// curvature, a small share of its peak, while a pair easing between two
@@ -757,6 +760,43 @@ impl ShapedCorners {
             }
         }
         lo
+    }
+
+    /// A floor under [`Self::arc_speed_cap`] for every radius in
+    /// `radius_lo_mm..=radius_hi_mm`, which may be unbounded: an arc's
+    /// pull at a node speed grows with its radius, so the cap's search
+    /// passes every node the widest arc keeps within `room_mm`, and the
+    /// node speeds grow with the radius. Unbounded, the floor is the least
+    /// over radii doubling from `radius_lo_mm` until even the slowest node
+    /// speed passes it.
+    #[must_use]
+    pub fn arc_speed_floor(&self, (radius_lo_mm, radius_hi_mm): (f64, f64), room_mm: f64) -> f64 {
+        if room_mm <= 0.0 {
+            return 0.0;
+        }
+        assert!(
+            radius_lo_mm > 0.0 && radius_lo_mm <= radius_hi_mm,
+            "arc speed floor over radii {radius_lo_mm}..={radius_hi_mm} mm"
+        );
+        if radius_hi_mm.is_finite() {
+            return self.arc_speed_floor_between(radius_lo_mm, radius_hi_mm, room_mm);
+        }
+        let mut floor = f64::INFINITY;
+        let mut radius_mm = radius_lo_mm;
+        while circle_node(0) * radius_mm / self.sigma_s < floor {
+            floor = floor.min(self.arc_speed_floor_between(radius_mm, 2.0 * radius_mm, room_mm));
+            radius_mm *= 2.0;
+        }
+        floor
+    }
+
+    fn arc_speed_floor_between(&self, radius_lo_mm: f64, radius_hi_mm: f64, room_mm: f64) -> f64 {
+        let speed_at = |i: usize| circle_node(i) * radius_hi_mm / self.sigma_s;
+        let rounded_room_mm = room_mm * (1.0 - ROOM_ROUNDING);
+        let node = (1..CIRCLE_NODES)
+            .find(|&i| self.arc_shrink_mm(radius_hi_mm, speed_at(i)) > rounded_room_mm)
+            .map_or(CIRCLE_NODES - 1, |i| i - 1);
+        circle_node(node) * radius_lo_mm / self.sigma_s
     }
 
     /// Whether a stop at a corner turning `theta`, blended with apex
