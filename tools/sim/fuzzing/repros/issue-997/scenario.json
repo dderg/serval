@@ -1,0 +1,92 @@
+{
+ "seed": 10766,
+ "printer": {
+  "base": "bench",
+  "topology": "one_mcu",
+  "max_velocity": 1000.0,
+  "max_accel": 10000.0,
+  "corner": "corner_deviation",
+  "corner_value": 0.21,
+  "max_z_velocity": 25.0,
+  "max_z_accel": 100.0,
+  "shaper_x": null,
+  "shaper_y": null,
+  "pa_k": null,
+  "extruder_kernel": null,
+  "mesh": "flat",
+  "mesh_points": [
+   [
+    0.013,
+    0.006,
+    -0.008,
+    -0.001,
+    -0.008
+   ],
+   [
+    0.004,
+    0.009,
+    0.011,
+    0.001,
+    0.014
+   ],
+   [
+    -0.008,
+    0.006,
+    -0.017,
+    0.013,
+    -0.005
+   ],
+   [
+    0.018,
+    -0.001,
+    -0.016,
+    -0.007,
+    0.012
+   ],
+   [
+    0.014,
+    -0.014,
+    -0.013,
+    0.001,
+    0.003
+   ]
+  ],
+  "mesh_fade": false,
+  "mesh_at_start": true,
+  "heaters": false,
+  "pause_macro": "base",
+  "cancel_macro": "base",
+  "end_steps": [],
+  "idle_timeout_s": null
+ },
+ "programs": [
+  {
+   "name": "A",
+   "segments": [
+    {
+     "kind": "retract",
+     "lines": [
+      "G1 E-0.8 F2400",
+      "G90",
+      "G1 X241.123 Y132.745 F52860",
+      "G1 E0.8 F2400"
+     ]
+    },
+    {
+     "kind": "mesh_seam",
+     "lines": [
+      "G90",
+      "G1 Z1.3 F600",
+      "G1 X279 Y281 F20640",
+      "G1 X281 Y279 F46080",
+      "G1 X102.557 Y219.066 F20640"
+     ]
+    }
+   ],
+   "end_print": false
+  }
+ ],
+ "prints": [
+  "A"
+ ]
+}
