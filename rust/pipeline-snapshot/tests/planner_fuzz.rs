@@ -1215,3 +1215,141 @@ fn an_extrusion_between_two_travels_keeps_its_source_fit() {
     assert!(report.hard_ok(), "{report}");
     assert!(report.target_ok(), "{report}");
 }
+
+/// Print-like fuzz seed 107, shrunk: a crawl valley whose before side
+/// waited for a ratio step's final width while the projection took the
+/// path behind it, then found no side on the path left and held the weight
+/// at zero back to the stream start, which the projection had passed.
+const SEED_107_PRINTER: &str = "[printer]
+max_velocity: 300
+max_accel: 7537.213174089488
+square_corner_velocity: 0
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 19375.069920562964
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.05987164252539586
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 53.02952157777028
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 106.43648156271938
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+#[test]
+fn a_crawl_waiting_on_a_step_keeps_its_before_side_on_untaken_path() {
+    let moves = [
+        PrintMove::Line { turn: 0.5581263465705404, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: -0.25910234519181824, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: -0.3732766402430854, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 8.634078274694607, feed_mm_s: 272.7737433730867, ratio_jitter: Some(0.3418686509066707) },
+        PrintMove::Line { turn: 0.0, length_mm: 0.12460863258698181, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 3.141592653589793, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+    ];
+    let failure = print_like_failure(SEED_107_PRINTER, 0.0506342928097271, &moves);
+    assert!(failure.is_none(), "{}", failure.unwrap_or_default());
+}
+
+/// Print-like fuzz seed 116, shrunk: main plans it. Budgeting the ramps
+/// of the unowned steps inside the before side asked a 21.2 mm side of a
+/// crawl the leaders reach 1.70 mm around; the side is now held at the
+/// lead budget and the ramps are the leaders' speed's to fit.
+const SEED_116_PRINTER: &str = "[printer]
+max_velocity: 300
+max_accel: 66430.71505287588
+corner_deviation: 1
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 18876.98144294022
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.03820863970495176
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 110.02050780375808
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 93.88770551221835
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+#[test]
+fn step_ramps_inside_a_lead_held_crawl_side_fit_the_extruder() {
+    let moves = [
+        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(-0.39332805590604747) },
+        PrintMove::Line { turn: 0.0, length_mm: 2.989920269118111, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 5.0349722288363745, feed_mm_s: 20.0, ratio_jitter: Some(-0.49831958520602304) },
+        PrintMove::Line { turn: 0.0, length_mm: 5.1184025187851425, feed_mm_s: 278.40796362043454, ratio_jitter: Some(0.20222715099830577) },
+        PrintMove::Line { turn: 0.0, length_mm: 0.8140516725991794, feed_mm_s: 227.25216287748776, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 3.141592653589793, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 122.115339346924, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 1.0, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+        PrintMove::Line { turn: 0.0, length_mm: 10.75845666965621, feed_mm_s: 20.0, ratio_jitter: Some(0.0) },
+    ];
+    let failure = print_like_failure(SEED_116_PRINTER, 0.045351793198012864, &moves);
+    assert!(failure.is_none(), "{}", failure.unwrap_or_default());
+}
