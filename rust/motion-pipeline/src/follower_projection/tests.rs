@@ -250,7 +250,7 @@ fn an_odometer_leaf_grows_at_the_speed_between_its_nodes() {
     super::odometer_leaves(
         &speed,
         (0.0, duration),
-        super::EndZones::Skipped,
+        &super::EndZones::default(),
         &mut |end, leaf| leaves.push((end, leaf)),
     );
     let mut start = 0.0;
@@ -2988,4 +2988,21 @@ fn a_constant_source_stays_constant_whatever_is_laid_past_it() {
     };
     assert!(constant_of(&alone).is_some());
     assert_eq!(constant_of(&followed), constant_of(&alone));
+}
+
+/// A leader whose velocity `10·(u − 0.5)` crosses zero at 0.5: its watch
+/// over `[0.2, 0.9]` sees the reversal on any part holding 0.5, and none
+/// on parts clear of it.
+#[test]
+fn a_velocity_watch_sees_a_reversal_only_where_it_lies() {
+    let piece = BezierPiece {
+        u_start: 0.0,
+        u_end: 1.0,
+        coeffs: vec![3.0, -5.0, 5.0],
+    };
+    let watch = super::VelocityControls::of(&piece, 0.2, 0.9);
+    assert!(watch.may_reverse_on(0.2, 0.9));
+    assert!(watch.may_reverse_on(0.45, 0.55));
+    assert!(!watch.may_reverse_on(0.2, 0.45));
+    assert!(!watch.may_reverse_on(0.55, 0.9));
 }
