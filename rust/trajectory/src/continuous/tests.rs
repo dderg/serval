@@ -2757,3 +2757,61 @@ fn a_span_keeps_its_velocity_into_its_rounded_end() {
     );
     close(span.eval_axis(0, end).unwrap().position, length);
 }
+
+fn steep_mesh() -> Arc<SurfaceTransform> {
+    let mut mesh = MeshGrid::new(
+        MeshGridSpec {
+            x_min: 10.0,
+            y_min: 10.0,
+            dx: 140.0,
+            dy: 140.0,
+            nx: 3,
+            ny: 3,
+            tension: 0.2,
+        },
+        vec![0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5],
+    )
+    .unwrap();
+    mesh.zero_at(110.0, 110.0);
+    Arc::new(SurfaceTransform::new(
+        mesh,
+        Fade::new(1.0, 10.0, 0.0).unwrap(),
+    ))
+}
+
+fn span_leaving_the_mesh() -> AnalyticMoveSpan {
+    let line = Segment::Line(Line::try_new([150.0, 150.0, 0.2], [300.0, 150.0, 0.2]).unwrap());
+    AnalyticMoveSpan::try_new(
+        move_with(line, vec![]),
+        Arc::from([
+            LawSegment::new(0.0, 0.1, 0.0, 0.0, ScalarLaw::ConstAccel { a0: 10_000.0 }),
+            LawSegment::new(0.1, 0.05, 50.0, 1_000.0, ScalarLaw::ConstAccel { a0: 0.0 }),
+            LawSegment::new(0.15, 0.1, 100.0, 1_000.0, ScalarLaw::ConstAccel { a0: -10_000.0 }),
+        ]),
+        0.0,
+        0.0,
+        0.25,
+        Arc::from([150.0, 150.0, 0.2, 0.0]),
+        SurfaceMode::Variable(steep_mesh()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_surface_seam_lies_where_the_warped_z_leaves_the_mesh() {
+    let span = span_leaving_the_mesh();
+    let z_velocity = |t: f64| span.eval_axis(2, t).unwrap().velocity;
+
+    let seams = span.surface_seam_times().expect("the edge crossing is located");
+
+    let [seam] = seams[..] else {
+        panic!("one crossing of x = 290, got seams {seams:?}");
+    };
+    let across = z_velocity(next_toward(seam, f64::INFINITY)) - z_velocity(next_toward(seam, 0.0));
+    let around = z_velocity(seam + 1e-6) - z_velocity(seam - 1e-6);
+    assert!(
+        around.abs() > 0.5 && (across - around).abs() < 1e-3,
+        "the warped Z steps {around} mm/s around the seam at {seam} but {across} mm/s across \
+         its neighbouring ulps"
+    );
+}
