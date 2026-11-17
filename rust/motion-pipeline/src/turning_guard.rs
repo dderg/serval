@@ -1605,9 +1605,7 @@ impl TurningGuard {
             .iter()
             .take_while(|timing| timing.t0 < to)
             .map(|timing| timing.accel);
-        let emitted_from = self
-            .history
-            .partition_point(|summary| summary.t1 <= from);
+        let emitted_from = self.history.partition_point(|summary| summary.t1 <= from);
         let emitted = self
             .history
             .range(emitted_from..)
