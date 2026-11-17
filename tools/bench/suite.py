@@ -172,15 +172,21 @@ SOAK_MATRIX = [
     ),
 ]
 CRAWL_ISSUE = "#983"
-CRAWL_REST_PASSES = "crawl_s5_rest"
+CRAWL_PASSES = {"crawl_s5_rest", "crawl_s5_20s", "crawl_s5_lead"}
 CRAWL_MATRIX = [
-    Row(
-        spec.name,
-        spec.path,
-        run_wide_checks=True,
-        fails_until="" if spec.name == CRAWL_REST_PASSES else CRAWL_ISSUE,
-    )
-    for spec in crawl_gcode.CRAWL_PRINTS
+    *(
+        Row(
+            spec.name,
+            spec.path,
+            run_wide_checks=True,
+            fails_until="" if spec.name in CRAWL_PASSES else CRAWL_ISSUE,
+        )
+        for spec in crawl_gcode.CRAWL_PRINTS
+    ),
+    *(
+        Row(spec.name, spec.path, run_wide_checks=True)
+        for spec in crawl_gcode.MID_PRINTS
+    ),
 ]
 
 
