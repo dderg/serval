@@ -2402,8 +2402,9 @@ impl RatioSmoothing {
     /// would multiply their weights and rebuild it steeper than either.
     /// Laid crawl valleys never overlap. The turning guard leaves room for
     /// the sides from the same rule, so a new crawl valley reaches back all
-    /// of `before` or fails loudly: the guard cannot see what the
-    /// projection has taken.
+    /// of `before`, and a widened one holds zero from its end, on path the
+    /// projection has not taken, or fails loudly: the guard cannot see what
+    /// the projection has taken.
     fn place_valley(
         &mut self,
         turn: f64,
@@ -2423,6 +2424,7 @@ impl RatioSmoothing {
                  {laid:?} already holds the weight at zero, behind the last one laid"
             );
         }
+        let back = self.back_reach_limit(turn);
         let overlapped = self
             .valleys
             .iter_mut()
@@ -2436,12 +2438,17 @@ impl RatioSmoothing {
                     "follower projection: the crawl at s={turn} lies behind the end of the last \
                      crawl valley {last:?}"
                 );
+                assert!(
+                    back >= turn - last.end,
+                    "follower projection: the crawl at s={turn} widens the crawl valley {last:?} \
+                     from {} mm back, but the projection has taken the path to {back} mm before it",
+                    turn - last.end
+                );
                 last.end = end;
                 last.after = after;
                 last.floor_after = floor_after;
             }
             None => {
-                let back = self.back_reach_limit(turn);
                 assert!(
                     back >= turn - start + before,
                     "follower projection: the crawl valley at s={turn} reaches {} mm back, but \
@@ -2643,7 +2650,10 @@ impl RatioSmoothing {
     /// leaves its rebuild room within. A crawl still waiting lies behind
     /// the table's end, so that budget, and its own reach, are read back
     /// from it: while it waits the table grows past it, and a reserve read
-    /// from the end alone would let the projection take its path.
+    /// from the end alone would let the projection take its path. A crawl
+    /// valley a valley still to come may reach widens instead
+    /// ([`Self::place_valley`]), holding the weight at zero from its end, so
+    /// the path from there stays untaken while one can.
     fn unlaid_valley_reach(&self, table_end: f64) -> f64 {
         let budget_back_from = |s: f64| {
             self.trail
@@ -2660,7 +2670,15 @@ impl RatioSmoothing {
             .map_or(0.0, |&(turn, crossing)| {
                 table_end - budget_back_from(turn).min(turn - crossing.valley_reach())
             });
-        opening.max(lead).max(waiting)
+        let unlaid = opening.max(lead).max(waiting);
+        let widened_from = self
+            .valleys
+            .iter()
+            .rev()
+            .find(|valley| valley.kind == ValleyKind::Crawl)
+            .filter(|last| last.reach_end() > table_end - unlaid)
+            .map_or(table_end, |last| last.end);
+        unlaid.max(table_end - widened_from)
     }
 
     /// How far the smoothed ratio is final: its width there is, no window

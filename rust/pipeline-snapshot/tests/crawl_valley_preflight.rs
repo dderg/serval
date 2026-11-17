@@ -22,6 +22,12 @@ fn bench_printer_with(name: &str, corner: &str) -> PathBuf {
     config
 }
 
+fn printer_from(name: &str, text: &str) -> PathBuf {
+    let config = std::env::temp_dir().join(format!("{name}_{}.cfg", std::process::id()));
+    std::fs::write(&config, text).expect("temp config");
+    config
+}
+
 fn plans_within_the_extruder_limits(name: &str, gcode: &str, config: &Path) {
     let snapshot = corpus::plan(name, gcode, config).expect("the repro plans motion");
     let audit = corpus::extruder::extruder_audit(&snapshot, gcode, config)
@@ -572,8 +578,78 @@ G1 X148.381 Y146.838 E0.04764 F8351
 
 #[test]
 fn a_crawl_side_leaves_the_next_crawls_turning_to_its_valley() {
-    let config =
-        std::env::temp_dir().join(format!("two_reversals_printer_{}.cfg", std::process::id()));
-    std::fs::write(&config, TWO_REVERSALS_PRINTER).expect("temp config");
+    let config = printer_from("two_reversals_printer", TWO_REVERSALS_PRINTER);
     plans_within_the_extruder_limits("two_reversals", TWO_REVERSALS, &config);
+}
+
+/// #912: a corexy with 55 Hz smooth shapers and a kernel-free advance,
+/// drawn by the print-like planner fuzz.
+const REVERSAL_PAST_A_RETRACT_PRINTER: &str = "[printer]
+max_velocity: 640.5295844275342
+max_accel: 19421.576176581028
+square_corner_velocity: 19.3295380619992
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 17616.127335386354
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.044418270385394816
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 55.16682954926499
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 55.52886882081576
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #912: the reversal from the travel back over it, past a retract and a
+/// z hop, widened the crawl valley of the turn before the retract back to
+/// that valley's end, over the extruding move the projection had already
+/// read at the valley's after side: the advance stepped its position by
+/// 0.0035 mm where the move hands over to the retract.
+const REVERSAL_PAST_A_RETRACT: &str = "G90
+M83
+G1 X150.0 Y150.0 Z0.2 F30000
+G1 X152.723 Y154.752 E0.27212 F3571
+G1 X152.359 Y154.137 E0.01266 F16890
+G1 E-0.5 F2400
+G1 Z0.600 F600
+G1 X168.940 Y162.366 F12013
+G1 X166.127 Y162.161 E0.00136 F6996
+G1 X160.259 Y164.980 E0.26930 F6423
+";
+
+#[test]
+fn a_crawl_valley_widened_past_a_retract_holds_zero_on_untaken_path() {
+    let config = printer_from("reversal_past_a_retract_printer", REVERSAL_PAST_A_RETRACT_PRINTER);
+    plans_within_the_extruder_limits("reversal_past_a_retract", REVERSAL_PAST_A_RETRACT, &config);
 }
