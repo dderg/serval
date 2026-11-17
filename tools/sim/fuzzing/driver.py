@@ -133,6 +133,7 @@ class Session:
         self.mark_level = 0
         self.recheck: Optional[_Recheck] = None
         self.watching = False
+        self.print_index = 0
 
     # ------------------------------------------------------------ clock
 
@@ -392,6 +393,7 @@ class Session:
         self.watching = True
 
     def _print(self, index: int, name: str) -> None:
+        self.print_index = index
         lines = program.render(self.scenario.program(name))
         path = self.world.gcode_dir / f"fuzz_{name}.gcode"
         path.write_text("\n".join(lines) + "\n")

@@ -25,9 +25,9 @@ import shutil
 import signal
 import statistics
 import subprocess
-import threading
 import sys
 import tempfile
+import threading
 import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
