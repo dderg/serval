@@ -42,13 +42,16 @@ impl FollowerDemand {
         self.ratio.abs().max(self.ratio_end.abs())
     }
 
-    /// `de/ds` at arc-length `s` over a segment of length `len`.
+    /// `de/ds` at arc-length `s` over a segment of length `len`: between
+    /// `ratio` and `ratio_end`, and on them at the ends, whatever `s/len`
+    /// rounds to, so a ramp into a travel never reads a retract.
     #[must_use]
     pub fn ratio_at(&self, s: f64, len: f64) -> f64 {
         if self.ratio_end == self.ratio {
             self.ratio
         } else {
-            self.ratio + (self.ratio_end - self.ratio) * (s / len)
+            let along = (s / len).clamp(0.0, 1.0);
+            self.ratio * (1.0 - along) + self.ratio_end * along
         }
     }
 
