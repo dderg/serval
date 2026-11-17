@@ -45,7 +45,9 @@ def run_ci(tmp_path: Path, job: str, *, uvx: bool) -> tuple[int, list[str]]:
         text=True,
     )
     logged = calls.read_text().splitlines() if calls.exists() else []
-    return result.returncode, [line.replace(str(root), "ROOT") for line in logged]
+    return result.returncode, [
+        line.replace(str(root), "ROOT") for line in logged
+    ]
 
 
 def test_the_formatter_and_the_gate_run_the_pinned_ruff(tmp_path):
