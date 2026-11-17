@@ -5,7 +5,7 @@ use crate::frontend::{ExtruderCaps, LeaderSpillId, SettleDemand};
 use crate::path::CurvatureProfile;
 
 use super::disk;
-use super::extruder_caps::{DemandReach, extruder_accel_cap};
+use super::extruder_caps::{DemandReach, extruder_accel_cap, velocity_rate};
 use super::z_caps::z_capped;
 use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
 
@@ -84,6 +84,21 @@ fn realizable_accel(m: &Move, reachable_mm_s: f64) -> f64 {
     )
 }
 
+/// The fastest `m`'s extruder lets the leaders cross it on any budget: its
+/// velocity cap over `m`'s own ratio at its budgeted level, which the
+/// ratios in reach only lower ([`super::extruder_caps::extruder_capped`]);
+/// infinite where `m` extrudes nothing.
+fn still_speed(m: &Move) -> f64 {
+    let Some(caps) = m.limits.extruder else {
+        return f64::INFINITY;
+    };
+    let ratio = extruding_ratio(m, caps.axis_index);
+    if ratio == 0.0 {
+        return f64::INFINITY;
+    }
+    velocity_rate(&caps, ratio).still_speed(caps.max_velocity_mm_s)
+}
+
 /// What holds the leaders at a seam: the feed ceilings either side, and
 /// the disk of the sharper curvature there, `√(A/κ)` under a budget `A`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -147,6 +162,54 @@ impl SeamReach {
             self
         }
     }
+
+    /// Its limit on no budget: its ceiling where it is straight, standstill
+    /// on a curve or at a rest.
+    fn still_limit(&self) -> f64 {
+        self.limit.at(0.0)
+    }
+
+    /// Whether its limit on no budget lies under `speed`: a seam whose
+    /// limit stays at or above every speed a move may cross at never holds
+    /// the move's run.
+    fn holds_under(&self, speed: f64) -> bool {
+        self.still_limit() < speed
+    }
+}
+
+/// The seams behind the stream's tail a move reads its run from: each the
+/// slowest of those whose limit on no budget lies under its own, in the
+/// order of that limit, so the last whose limit lies under a speed is the
+/// slowest seam holding a move crossed under it.
+#[derive(Debug)]
+struct SeamsBehind(Vec<SeamReach>);
+
+impl SeamsBehind {
+    fn start(seam: SeamReach) -> Self {
+        Self(vec![seam])
+    }
+
+    fn note(&mut self, seam: SeamReach) {
+        let limit = seam.still_limit();
+        let below = self.0.partition_point(|kept| kept.still_limit() < limit);
+        let upto = below + self.0[below..].partition_point(|kept| kept.still_limit() <= limit);
+        if upto > 0 && self.0[upto - 1].speed_mm_s <= seam.speed_mm_s {
+            return;
+        }
+        let end = upto + self.0[upto..].partition_point(|kept| kept.speed_mm_s >= seam.speed_mm_s);
+        self.0.splice(below..end, [seam]);
+    }
+
+    fn slowest_under(&self, speed: f64) -> Option<SeamReach> {
+        let holding = self.0.partition_point(|kept| kept.holds_under(speed));
+        holding.checked_sub(1).map(|last| self.0[last])
+    }
+
+    fn across(&mut self, length: f64, accel: f64) {
+        for seam in &mut self.0 {
+            *seam = seam.across(length, accel);
+        }
+    }
 }
 
 /// One side of a seam as the move there limits it: the fastest the move
@@ -203,10 +266,12 @@ impl SeamSide {
 /// and the rests, the leaders accelerating no faster than the extruder's
 /// acceleration cap on a move's own ratio lets its limit
 /// ([`reaching_accel`]): whatever acceleration and seam caps the planner
-/// derives, its plan of the move stays at or under it. The seams that
-/// bound it either side hold the leaders under `entry` and `exit`,
-/// `run_mm` apart along the path, the move among the moves between,
-/// `behind_mm` after the entry seam and `ahead_mm` before the exit seam.
+/// derives, its plan of the move stays at or under it. The nearest seams
+/// either side whose limit on no budget lies under the move's
+/// [`still_speed`], the only ones that can hold it, bound the run its
+/// trades read: they hold the leaders under `entry` and `exit`, `run_mm`
+/// apart along the path, the move among the moves between, `behind_mm`
+/// after the entry seam and `ahead_mm` before the exit seam.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReachableSpeed {
     pub peak_mm_s: f64,
@@ -220,16 +285,23 @@ pub struct ReachableSpeed {
 impl ReachableSpeed {
     /// A move `length` long whose entry seam the leaders reach from behind
     /// at `behind` and whose exit seam they reach from ahead at `ahead`,
-    /// under `ceiling` and accelerating at up to `accel`.
-    fn across(behind: SeamReach, ahead: SeamReach, ceiling: f64, accel: f64, length: f64) -> Self {
+    /// under `ceiling` and accelerating at up to `accel`, its run between
+    /// `run_behind` and `run_ahead`.
+    fn across(
+        (behind, ahead): (SeamReach, SeamReach),
+        (run_behind, run_ahead): (SeamReach, SeamReach),
+        ceiling: f64,
+        accel: f64,
+        length: f64,
+    ) -> Self {
         let peak = peak_between(behind.speed_mm_s, ahead.speed_mm_s, accel, length);
         Self {
             peak_mm_s: (peak * (1.0 + REACHABLE_SLACK)).min(ceiling),
-            entry: behind.limit,
-            exit: ahead.limit,
-            run_mm: behind.run_mm + ahead.run_mm + length,
-            behind_mm: behind.run_mm,
-            ahead_mm: ahead.run_mm,
+            entry: run_behind.limit,
+            exit: run_ahead.limit,
+            run_mm: run_behind.run_mm + run_ahead.run_mm + length,
+            behind_mm: run_behind.run_mm,
+            ahead_mm: run_ahead.run_mm,
         }
     }
 
@@ -292,13 +364,13 @@ impl Reach {
 /// One move as the reach reads it: where it lies along the stream's path,
 /// its feed ceiling, the acceleration it may take and the most the planner
 /// can plan it at ([`reaching_accel`]), the limit of the seam it starts
-/// at and the reach of the seams behind there, an extrude-only move's
-/// least time, the spatial axes it moves on, what it extrudes, the reach
-/// of the extruder it is budgeted for, the extruder's caps, where the
-/// leaders last rest before it, and once the moves after it bound how fast
-/// the leaders can cross it, that speed and what follows from it. An
-/// extrude-only move is a rest of the leaders, and so is the stream's
-/// start.
+/// at and the reach of the seams behind there, its [`still_speed`] and the
+/// seam behind bounding its run, an extrude-only move's least time, the
+/// spatial axes it moves on, what it extrudes, the reach of the extruder it
+/// is budgeted for, the extruder's caps, where the leaders last rest before
+/// it, and once the moves after it bound how fast the leaders can cross it,
+/// that speed and what follows from it. An extrude-only move is a rest of
+/// the leaders, and so is the stream's start.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Mark {
     start_mm: f64,
@@ -308,6 +380,8 @@ struct Mark {
     reaching_accel_mm_s2: f64,
     seam: SeamReach,
     forward: SeamReach,
+    still_speed_mm_s: f64,
+    run_behind: SeamReach,
     rest_time_s: f64,
     rest: bool,
     moves_on: [bool; 3],
@@ -514,11 +588,13 @@ struct Marks {
     last_rest_mm: f64,
     rests_mm: VecDeque<f64>,
     tail: SeamSide,
+    seams_behind: SeamsBehind,
     settled_count: usize,
 }
 
 impl Marks {
     fn new(extrude_only: ExtrudeOnly, entry_mm_s: f64) -> Self {
+        let tail = SeamSide::start(entry_mm_s);
         Self {
             marks: VecDeque::new(),
             path_end_mm: 0.0,
@@ -526,7 +602,8 @@ impl Marks {
             extrude_only,
             last_rest_mm: 0.0,
             rests_mm: VecDeque::new(),
-            tail: SeamSide::start(entry_mm_s),
+            tail,
+            seams_behind: SeamsBehind::start(tail.forward),
             settled_count: 0,
         }
     }
@@ -555,6 +632,16 @@ impl Marks {
                 .meeting(&SeamSide::of(ceiling_mm_s, entry_kappa, reaching));
         let seam = SeamReach::at(entry_speed, entry_limit);
         let forward = self.tail.forward.slower(seam);
+        self.seams_behind.note(seam);
+        let still_speed_mm_s = still_speed(m);
+        let run_behind = if forward.holds_under(still_speed_mm_s) {
+            forward
+        } else {
+            self.seams_behind
+                .slowest_under(still_speed_mm_s)
+                .unwrap_or(forward)
+        };
+        self.seams_behind.across(length, reaching);
         self.tail = SeamSide {
             forward: forward.across(length, reaching),
             ..SeamSide::of(ceiling_mm_s, exit_kappa, reaching)
@@ -569,6 +656,8 @@ impl Marks {
             reaching_accel_mm_s2: reaching,
             seam,
             forward,
+            still_speed_mm_s,
+            run_behind,
             rest_time_s,
             rest,
             moves_on: m.segment.spatial.as_ref().map_or([false; 3], moves_on),
@@ -601,30 +690,41 @@ impl Marks {
         }
     }
 
-    /// The reach from ahead of the seam leaving `marks[index]`: its own
-    /// limit, and the limit of every seam ahead carried back to it, up to
-    /// where the climb back alone is as fast as the slowest so far. `None`
-    /// while moves still to come could lower it.
-    fn backward_at_exit(&self, index: usize, closed: bool) -> Option<SeamReach> {
+    /// The reach from ahead of the seam leaving `marks[index]` among the
+    /// seams that hold a move under `still_speed`: its own limit, and the
+    /// limit of every seam ahead carried back to it, up to where the climb
+    /// back alone is as fast as the slowest so far. `None` while moves
+    /// still to come could lower it.
+    fn backward_at_exit(&self, index: usize, closed: bool, still_speed: f64) -> Option<SeamReach> {
         if self.marks[index].rest {
             return Some(SeamReach::rest());
         }
-        let mut slowest = self.seam_at(index + 1, closed)?;
+        let exit = self.seam_at(index + 1, closed)?;
+        let mut slowest = exit.holds_under(still_speed).then_some(exit);
         let mut back = SeamReach::rest();
         for ahead in index + 1..self.marks.len() {
             let mark = &self.marks[ahead];
             back = back.across(mark.length_mm(), mark.reaching_accel_mm_s2);
-            if back.speed_mm_s >= slowest.speed_mm_s {
-                return Some(slowest);
+            if slowest.is_some_and(|slowest| back.speed_mm_s >= slowest.speed_mm_s) {
+                return slowest;
             }
             let seam = self.seam_at(ahead + 1, closed)?;
-            slowest = slowest.slower(SeamReach {
+            if !seam.holds_under(still_speed) {
+                continue;
+            }
+            let carried = SeamReach {
                 speed_mm_s: libm::hypot(seam.speed_mm_s, back.speed_mm_s),
                 limit: seam.limit,
                 run_mm: back.run_mm,
-            });
+            };
+            slowest = Some(slowest.map_or(carried, |slowest| slowest.slower(carried)));
         }
-        Some(slowest)
+        assert!(
+            slowest.is_some(),
+            "no seam ahead of mark {index} holds a move under {still_speed} mm/s, not even the \
+             rest closing the stream"
+        );
+        slowest
     }
 
     /// Settles the reachable speed of every mark whose exit seam the moves
@@ -638,14 +738,23 @@ impl Marks {
     ) {
         while self.settled_count < self.marks.len() {
             let index = self.settled_count;
-            let Some(ahead) = self.backward_at_exit(index, closed) else {
+            let Some(ahead) = self.backward_at_exit(index, closed, f64::INFINITY) else {
                 return;
             };
             let mark = self.marks[index];
+            let run_ahead = if ahead.holds_under(mark.still_speed_mm_s) {
+                ahead
+            } else {
+                let Some(run_ahead) = self.backward_at_exit(index, closed, mark.still_speed_mm_s)
+                else {
+                    return;
+                };
+                run_ahead
+            };
             let length = mark.length_mm();
             let reachable = ReachableSpeed::across(
-                mark.forward,
-                ahead,
+                (mark.forward, ahead),
+                (mark.run_behind, run_ahead),
                 mark.ceiling_mm_s,
                 mark.reaching_accel_mm_s2,
                 length,
