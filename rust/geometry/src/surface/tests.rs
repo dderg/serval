@@ -138,7 +138,7 @@ fn fade_factor_ramps_and_disables() {
     assert_eq!(fade.factor(10.0), 0.0);
     assert_eq!(fade.factor(50.0), 0.0);
     assert_eq!(fade.dfactor(0.5), 0.0);
-    assert!((fade.dfactor(5.5) + 1.0 / 9.0).abs() < 1e-12);
+    assert!((fade.dfactor(5.5) + SMOOTHSTEP_STEEPEST_SLOPE / 9.0).abs() < 1e-12);
     assert_eq!(fade.dfactor(10.0), 0.0);
 
     let off = Fade::disabled();
@@ -179,6 +179,7 @@ fn warp_partials_match_finite_differences() {
         assert!((w.wxy - fd(&|e| t.warp(x, y + e, z).wx)).abs() < 1e-6);
         assert!((w.wxz - fd(&|e| t.warp(x, y, z + e).wx)).abs() < 1e-6);
         assert!((w.wyz - fd(&|e| t.warp(x, y, z + e).wy)).abs() < 1e-6);
+        assert!((w.wzz - fd(&|e| t.warp(x, y, z + e).wz)).abs() < 1e-6);
     }
 }
 
@@ -457,7 +458,7 @@ fn clothoid_transition_distance_is_solved_against_the_curve() {
 }
 
 #[test]
-fn fade_boundaries_are_c0_transitions() {
+fn fade_boundaries_are_c1_transitions() {
     let surface = SurfaceTransform::new(
         MeshGrid::new(
             MeshGridSpec {
@@ -479,15 +480,15 @@ fn fade_boundaries_are_c0_transitions() {
     );
     assert_transition_s(
         &surface.path_transition_distances(&segment).unwrap(),
-        &[(1.0, SurfaceContinuity::C0), (3.0, SurfaceContinuity::C0)],
+        &[(1.0, SurfaceContinuity::C1), (3.0, SurfaceContinuity::C1)],
     );
 }
 
 #[test]
 fn coincident_crossings_are_sorted_deduplicated_and_keep_lowest_continuity() {
-    let surface = transition_transform(Fade::new(10.0, 30.0, 0.0).unwrap());
+    let surface = transition_transform(Fade::new(20.0, 40.0, 0.0).unwrap());
     let segment = crate::path::Segment::Line(
-        crate::path::Line::try_new([5.0, 5.0, 5.0], [15.0, 15.0, 15.0]).unwrap(),
+        crate::path::Line::try_new([15.0, 15.0, 15.0], [25.0, 25.0, 25.0]).unwrap(),
     );
     let transitions = surface.path_transition_distances(&segment).unwrap();
     assert_eq!(transitions.len(), 1);

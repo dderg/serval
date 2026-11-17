@@ -34,10 +34,13 @@ def _cfg(world):
 
 
 def _fade_factor(z):
+    """One minus the cubic smoothstep across the 1-10 mm band: the engine's
+    C1 fade (geometry FADE_FACTOR_IN_BAND), not mainline's linear ramp."""
     if z >= 10.0:
         return 0.0
     if z >= 1.0:
-        return (10.0 - z) / 9.0
+        t = (z - 1.0) / 9.0
+        return 1.0 - t * t * (3.0 - 2.0 * t)
     return 1.0
 
 

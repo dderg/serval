@@ -124,8 +124,11 @@ impl std::fmt::Display for MeshActivationError {
             ),
             Self::FadeBandTooNarrow { band, mesh_span } => write!(
                 f,
-                "fade band {band:.3}mm is not wider than the mesh deviation {mesh_span:.3}mm \
-                 — the transform would not be invertible"
+                "fade band {band:.3}mm (fade_end - fade_start) is not wider than \
+                 {FADE_STEEPEST_SLOPE} x the mesh's deviation from the fade target \
+                 {mesh_span:.3}mm — the fade's steepest slope would fold the transform; \
+                 widen the fade band to more than {:.3}mm",
+                FADE_STEEPEST_SLOPE * mesh_span
             ),
         }
     }
@@ -432,10 +435,22 @@ impl MeshGrid {
     }
 }
 
-/// Mainline fade semantics: full correction below `start`, linear ramp to
-/// zero at `end`, correction fading toward `target` rather than toward 0,
-/// constant `target` above the band. A disabled fade keeps factor 1 at every
-/// height (`start = end = +∞`), which also makes `target` irrelevant.
+/// The fade factor across the band as a polynomial in the band's progress
+/// `t = (z − start)/(end − start)`, lowest power first: `1 − 3t² + 2t³`,
+/// one minus the cubic smoothstep. It leaves 1 and reaches 0 with zero
+/// slope, so machine Z velocity keeps across both band edges.
+pub const FADE_FACTOR_IN_BAND: [f64; 4] = [1.0, 0.0, -3.0, 2.0];
+
+/// The smoothstep's slope at the band's middle, `|d/dt FADE_FACTOR_IN_BAND|`
+/// at `t = 1/2`, over the linear fade's: the band must be this much wider
+/// than the mesh's deviation from the target for the warp to stay invertible.
+const FADE_STEEPEST_SLOPE: f64 = 1.5;
+
+/// Mainline fade semantics with C1 edges: full correction below `start`,
+/// [`FADE_FACTOR_IN_BAND`] to zero at `end`, correction fading toward
+/// `target` rather than toward 0, constant `target` above the band. A
+/// disabled fade keeps factor 1 at every height (`start = end = +∞`), which
+/// also makes `target` irrelevant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fade {
     start: f64,
@@ -467,28 +482,51 @@ impl Fade {
         (self.start, self.end)
     }
 
+    fn width(&self) -> f64 {
+        self.end - self.start
+    }
+
+    fn in_band(&self, z: f64) -> bool {
+        (self.start..self.end).contains(&z)
+    }
+
+    fn progress(&self, z: f64) -> f64 {
+        (z - self.start) / self.width()
+    }
+
     pub fn factor(&self, z: f64) -> f64 {
         if z >= self.end {
             0.0
         } else if z >= self.start {
-            (self.end - z) / (self.end - self.start)
+            let [c0, c1, c2, c3] = FADE_FACTOR_IN_BAND;
+            let t = self.progress(z);
+            c0 + t * (c1 + t * (c2 + t * c3))
         } else {
             1.0
         }
     }
 
     pub fn dfactor(&self, z: f64) -> f64 {
-        if (self.start..self.end).contains(&z) {
-            -1.0 / (self.end - self.start)
-        } else {
-            0.0
+        if !self.in_band(z) {
+            return 0.0;
         }
+        let [_, c1, c2, c3] = FADE_FACTOR_IN_BAND;
+        let t = self.progress(z);
+        (c1 + t * (2.0 * c2 + t * 3.0 * c3)) / self.width()
+    }
+
+    pub fn d2factor(&self, z: f64) -> f64 {
+        if !self.in_band(z) {
+            return 0.0;
+        }
+        let [_, _, c2, c3] = FADE_FACTOR_IN_BAND;
+        let t = self.progress(z);
+        (2.0 * c2 + t * 6.0 * c3) / (self.width() * self.width())
     }
 }
 
 /// The warp value `w = fade(z)·(mesh(x,y) − target) + target` and its partial
-/// derivatives; `z_machine = z_gcode + w`. `wzz` is identically zero (the
-/// fade is piecewise linear in z), so it is not carried.
+/// derivatives; `z_machine = z_gcode + w`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WarpSample {
     pub w: f64,
@@ -500,6 +538,7 @@ pub struct WarpSample {
     pub wyy: f64,
     pub wxz: f64,
     pub wyz: f64,
+    pub wzz: f64,
 }
 
 /// The complete surface-following transform the lowerer applies: mesh × fade,
@@ -691,8 +730,10 @@ impl SurfaceTransform {
         }
         let (start, end) = fade.band();
         let bounds = transform.bounds();
-        let mesh_span = bounds.z_max.abs().max(bounds.z_min.abs());
-        if end - start <= mesh_span {
+        let mesh_span = (bounds.z_max - fade.target)
+            .abs()
+            .max((bounds.z_min - fade.target).abs());
+        if end - start <= FADE_STEEPEST_SLOPE * mesh_span {
             return Err(MeshActivationError::FadeBandTooNarrow {
                 band: end - start,
                 mesh_span,
@@ -740,8 +781,8 @@ impl SurfaceTransform {
                 Vec::new()
             } else {
                 vec![
-                    (self.fade.start, SurfaceContinuity::C0),
-                    (self.fade.end, SurfaceContinuity::C0),
+                    (self.fade.start, SurfaceContinuity::C1),
+                    (self.fade.end, SurfaceContinuity::C1),
                 ]
             },
         ]
@@ -838,6 +879,7 @@ impl SurfaceTransform {
         let s = self.mesh.sample(x, y);
         let f = self.fade.factor(z);
         let df = self.fade.dfactor(z);
+        let d2f = self.fade.d2factor(z);
         let dev = s.z - self.fade.target;
         WarpSample {
             w: f * dev + self.fade.target,
@@ -849,6 +891,7 @@ impl SurfaceTransform {
             wyy: f * s.zyy,
             wxz: df * s.zx,
             wyz: df * s.zy,
+            wzz: d2f * dev,
         }
     }
 
@@ -859,8 +902,9 @@ impl SurfaceTransform {
     /// Recover the gcode Z from a measured machine Z at (x, y): the inverse
     /// of `z_machine = z_g + fade(z_g)·(mesh − target) + target`. The forward
     /// map is strictly increasing in z_g whenever the fade band is wider than
-    /// the mesh deviation (validated at activation), so exactly one branch —
-    /// below, inside, or above the band — is consistent.
+    /// the fade's steepest slope times the mesh deviation (validated at
+    /// activation), so exactly one branch — below, inside, or above the band —
+    /// is consistent, and inside it the root is bracketed by the band.
     pub fn gcode_z(&self, x: f64, y: f64, z_machine: f64) -> f64 {
         let mesh_z = self.mesh.sample(x, y).z;
         let target = self.fade.target;
@@ -874,20 +918,32 @@ impl SurfaceTransform {
         if faded >= end {
             return faded;
         }
-        let dist = end - start;
         let dev = mesh_z - target;
-        let denom = 1.0 - dev / dist;
+        let steepest = 1.0 - FADE_STEEPEST_SLOPE * dev / (end - start);
         assert!(
-            denom > 0.0,
-            "surface inverse is not monotonic: fade band {dist}mm narrower than mesh \
-             deviation {dev}mm — activation validation must reject this"
+            steepest > 0.0,
+            "surface inverse is not monotonic: fade band {}mm narrower than {FADE_STEEPEST_SLOPE} \
+             times the mesh deviation {dev}mm — activation validation must reject this",
+            end - start
         );
-        let mid = (z_machine - target - end * dev / dist) / denom;
-        assert!(
-            (start - 1e-9..=end + 1e-9).contains(&mid),
-            "no fade branch consistent inverting machine z {z_machine} at ({x}, {y})"
-        );
-        mid.clamp(start, end)
+        let excess = |z_g: f64| z_g + self.fade.factor(z_g) * dev + target - z_machine;
+        let (mut below, mut above) = (start, end);
+        loop {
+            let mid = 0.5 * below + 0.5 * above;
+            if mid <= below || mid >= above {
+                break;
+            }
+            if excess(mid) < 0.0 {
+                below = mid;
+            } else {
+                above = mid;
+            }
+        }
+        if excess(above).abs() < excess(below).abs() {
+            above
+        } else {
+            below
+        }
     }
 
     /// Exact inverse of the lowerer's `warped_z` chain rule for one instant:
@@ -896,9 +952,9 @@ impl SurfaceTransform {
     /// same instant. Machine forward is
     /// `z_m = z_g + w(x, y, z_g)`,
     /// `ż_m = ż_g·(1 + w_z) + w_x·ẋ + w_y·ẏ`,
-    /// `z̈_m = z̈_g·(1 + w_z) + 2·(w_xz·ẋ + w_yz·ẏ)·ż_g
-    ///        + w_xx·ẋ² + 2·w_xy·ẋẏ + w_yy·ẏ² + w_x·ẍ + w_y·ÿ`
-    /// (`w_zz ≡ 0`: the fade is piecewise linear). `1 + w_z > 0` is the
+    /// `z̈_m = z̈_g·(1 + w_z) + 2·(w_xz·ẋ + w_yz·ẏ)·ż_g + w_zz·ż_g²
+    ///        + w_xx·ẋ² + 2·w_xy·ẋẏ + w_yy·ẏ² + w_x·ẍ + w_y·ÿ`.
+    /// `1 + w_z > 0` is the
     /// monotonicity the activation gate validates, so the division is safe;
     /// assert it anyway rather than return a wrong state.
     pub fn unwarp_z_state(
@@ -921,6 +977,7 @@ impl SurfaceTransform {
         let zg_vel = (z_machine.1 - w.wx * vx - w.wy * vy) / denom;
         let zg_accel = (z_machine.2
             - 2.0 * (w.wxz * vx + w.wyz * vy) * zg_vel
+            - w.wzz * zg_vel * zg_vel
             - (w.wxx * vx * vx + 2.0 * w.wxy * vx * vy + w.wyy * vy * vy)
             - w.wx * xy_accel[0]
             - w.wy * xy_accel[1])
