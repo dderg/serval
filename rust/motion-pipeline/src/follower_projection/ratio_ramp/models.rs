@@ -593,7 +593,7 @@ trait ValleyModel {
     /// [`Self::side`] in path order, which tells the outside before the
     /// valley from the one past it.
     fn order(&self, s: f64) -> u8;
-    fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> [TaylorModel; 3];
+    fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> Option<[TaylorModel; 3]>;
 }
 
 impl ValleyModel for AdvanceValley {
@@ -632,12 +632,14 @@ impl ValleyModel for AdvanceValley {
     /// the valley flattened by its crawl floor `f` as the evaluator reads
     /// it ([`AdvanceValley::weight`]): `d²/(√(d² + f²) + f) = √(d² + f²) − f`.
     /// Where the root's model reaches zero it is its range instead, held at
-    /// `f` from below, which it never passes.
-    fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> [TaylorModel; 3] {
+    /// `f` from below, which it never passes. `None` where that range has
+    /// no reciprocal model over `s`, as a crawl floor tiny against the
+    /// model's spread leaves it: a narrower window of `s` has one.
+    fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> Option<[TaylorModel; 3]> {
         let constant = |value: f64| TaylorModel::constant(Ball::exact(value));
         let (distance, width, floor, outward) = match side {
-            ValleySide::Outside => return [constant(1.0), constant(0.0), constant(0.0)],
-            ValleySide::Inside => return [constant(0.0), constant(0.0), constant(0.0)],
+            ValleySide::Outside => return Some([constant(1.0), constant(0.0), constant(0.0)]),
+            ValleySide::Inside => return Some([constant(0.0), constant(0.0), constant(0.0)]),
             ValleySide::Before => (
                 s.scale(Ball::exact(-1.0)).add_ball(Ball::exact(self.start)),
                 self.before,
@@ -671,9 +673,7 @@ impl ValleyModel for AdvanceValley {
                 Some(root) if root.reciprocal().is_some() => root,
                 _ => range(),
             };
-            let inverse = spread
-                .reciprocal()
-                .expect("a crawl floor keeps the spread off zero");
+            let inverse = spread.reciprocal()?;
             let floor_over = inverse.scale(Ball::exact(floor));
             (
                 spread.add_ball(Ball::exact(-floor)),
@@ -692,7 +692,7 @@ impl ValleyModel for AdvanceValley {
             .scale(Ball::exact(-1.0))
             .add_ball(Ball::exact(1.0));
         let inside_squared = inside.mul(&inside);
-        [
+        Some([
             inside_squared
                 .mul(&inside)
                 .scale(Ball::exact(-1.0))
@@ -705,7 +705,7 @@ impl ValleyModel for AdvanceValley {
                 .mul(&slope)
                 .scale(per_span * per_span * Ball::exact(-6.0))
                 .add(&inside_squared.mul(&bend).scale(per_span * Ball::exact(3.0))),
-        ]
+        ])
     }
 }
 
@@ -1091,7 +1091,7 @@ impl RatioSmoothing {
             if side == ValleySide::Outside {
                 continue;
             }
-            let [v, v1, v2] = valley.weight_model(side, s);
+            let [v, v1, v2] = valley.weight_model(side, s)?;
             total = Some(match total {
                 None => [v, v1, v2],
                 Some([w, w1, w2]) => [
