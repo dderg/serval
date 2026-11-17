@@ -244,7 +244,12 @@ command is its own velocity-continuous fit of that exact gained convolution
 (`fit_motor_commands`, fit context `motor_command`), never a derivative of
 the fitted toolhead track: a fit is only C1–C2 at its knots, so
 differentiating it twice would step the command's velocity by `k2·Δjerk` at
-every seam. The snapshot pipeline uses the tap to emit optional
+every seam. For the same reason the source it convolves is fitted
+velocity-continuous where the kernel's edges have a slope
+(`convolved_source_seams`): a source velocity step `Δv` at `b` puts
+`k2·Δv·k′(t − b)` into the command's velocity, a step wherever such an edge
+passes `b`. The ZV, MZV and triangle kernels have one; the bell's slope
+vanishes there, and its sources keep position-only seams. The snapshot pipeline uses the tap to emit optional
 `toolhead_*_pieces`, which is what the snapshot viewer and playground plot
 as the toolhead signal alongside the motor command.
 `CompiledChain::has_motor_side_gains` / `AxisChainSet::has_motor_side_stages`

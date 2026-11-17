@@ -17,6 +17,7 @@ from . import (
     msgproto,
     pins,
     serialhdl,
+    structured_log,
 )
 from .extras.danger_options import get_danger_options
 from .mcu_commands import CommandQueryWrapper, CommandWrapper
@@ -426,8 +427,25 @@ class MCU:
         self._printer.send_event(self._non_critical_disconnect_event_name)
         self.gcode.respond_info(f"mcu: '{self._name}' disconnected!", log=True)
 
+    def _abandon_reconnect(self, reason):
+        self.non_critical_disconnected = True
+        self._get_status_info["non_critical_disconnected"] = True
+        self._clocksync.disconnect()
+        self._disconnect()
+        structured_log.event(
+            "mcu-comms",
+            "non_critical_reconnect_failed",
+            level=logging.WARNING,
+            mcu=self._name,
+            reason=str(reason),
+        )
+
     def non_critical_recon_event(self, eventtime):
-        success = self.recon_mcu()
+        try:
+            success = self.recon_mcu()
+        except (error, serialhdl.error) as e:
+            self._abandon_reconnect(e)
+            return eventtime + self.reconnect_interval
         if success:
             self.gcode.respond_info(
                 f"mcu: '{self._name}' reconnected!", log=True

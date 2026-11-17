@@ -184,21 +184,6 @@ impl ReactorHarness {
         }
     }
 
-    pub fn new_with_parser(parser: Arc<MsgProtoParser>) -> Self {
-        let (port, port_handles) = FakeSerialPort::new();
-        let clock = MockClock::new();
-        let (submission_tx, submission_rx) = std::sync::mpsc::channel();
-        let status_snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
-        let reactor =
-            Reactor::new_for_tests(port, parser, submission_rx, status_snapshot, clock.clone());
-        Self {
-            reactor,
-            clock,
-            port_handles,
-            submission_tx,
-        }
-    }
-
     pub fn new_with_seq_state(seq: IdentifySeqState) -> Self {
         let (port, port_handles) = FakeSerialPort::new();
         let clock = MockClock::new();
@@ -298,19 +283,6 @@ impl ReactorHarness {
         reply_rx
             .recv()
             .expect("reply_rx recv failed in register_interceptor")
-    }
-
-    pub fn into_background_io(self) -> (Arc<crate::host_io::McuHostIo>, FakePortHandles) {
-        let submission_tx = self.submission_tx.clone();
-        let port_handles = self.port_handles.clone();
-        let mut reactor = self.reactor;
-        let handle = std::thread::spawn(move || reactor.run());
-        let io = crate::host_io::McuHostIo::from_submission_tx_for_test(
-            submission_tx,
-            Some(handle),
-            Arc::new(crate::host_io::parser::MsgProtoParser::new_empty()),
-        );
-        (io, port_handles)
     }
 }
 

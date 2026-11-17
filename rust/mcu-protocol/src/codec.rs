@@ -148,15 +148,6 @@ pub fn put_i32(out: &mut Vec<u8>, v: i32) {
 pub fn put_f32(out: &mut Vec<u8>, v: f32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
-pub fn put_f32_array(out: &mut Vec<u8>, vs: &[f32]) {
-    put_u32(
-        out,
-        u32::try_from(vs.len()).expect("array length exceeds u32"),
-    );
-    for v in vs {
-        put_f32(out, *v);
-    }
-}
 
 pub fn get_u8(c: &mut Cursor<'_>) -> Result<u8, DecodeError> {
     Ok(c.take(1)?[0])
@@ -221,29 +212,4 @@ pub fn get_str(c: &mut Cursor<'_>) -> Result<String, DecodeError> {
     }
     let slice = c.take(len)?;
     String::from_utf8(slice.to_vec()).map_err(|_| DecodeError::BadUtf8)
-}
-
-/// Read a `u32_le`-length-prefixed `f32` array. Validates that the claimed
-/// length fits the remaining buffer before allocating, so a hostile peer
-/// can't induce a multi-GB allocation.
-pub fn get_f32_array(c: &mut Cursor<'_>) -> Result<Vec<f32>, DecodeError> {
-    let n = get_u32(c)?;
-    let n_usize = n as usize;
-    let needed = n_usize
-        .checked_mul(4)
-        .ok_or(DecodeError::ArrayLengthExceedsBuffer {
-            claimed: n,
-            available: c.remaining(),
-        })?;
-    if needed > c.remaining() {
-        return Err(DecodeError::ArrayLengthExceedsBuffer {
-            claimed: n,
-            available: c.remaining(),
-        });
-    }
-    let mut v = Vec::with_capacity(n_usize);
-    for _ in 0..n_usize {
-        v.push(get_f32(c)?);
-    }
-    Ok(v)
 }
