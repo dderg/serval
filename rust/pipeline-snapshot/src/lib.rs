@@ -111,6 +111,42 @@ pub struct Snapshot {
     pub seam_max_dv: [f64; 4],
     pub seam_max_da: [f64; 4],
     pub worst_seams: Vec<SeamMetric>,
+    /// What the plan commanded over each shaped segment, in order; empty on
+    /// a snapshot read back from its serialized form.
+    #[serde(skip)]
+    pub commands: Vec<SegmentCommand>,
+}
+
+/// What the plan commanded over one shaped segment: whether the toolhead
+/// follows a path, the move it runs (the `seq` [`plan_steps`] numbers it
+/// by) and the followers it drives.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentCommand {
+    pub t_start: f64,
+    pub t_end: f64,
+    pub spatial_path: bool,
+    pub source_line: u32,
+    pub followers: Vec<Follower>,
+}
+
+impl SegmentCommand {
+    fn of(segment: &ContinuousSegment) -> Self {
+        Self {
+            t_start: segment.t_start,
+            t_end: segment.t_end,
+            spatial_path: segment.spatial_path,
+            source_line: segment.source_line,
+            followers: segment
+                .followers
+                .iter()
+                .map(|follower| Follower {
+                    axis_index: follower.axis_index,
+                    ratio: follower.ratio,
+                    ratio_end: follower.ratio_end,
+                })
+                .collect(),
+        }
+    }
 }
 
 pub fn pipeline_snapshot(
@@ -285,6 +321,7 @@ fn snapshot_from_segments(
         seam_max_dv: seams.max_dv,
         seam_max_da: seams.max_da,
         worst_seams: seams.worst,
+        commands: shaped.iter().map(SegmentCommand::of).collect(),
     }
 }
 

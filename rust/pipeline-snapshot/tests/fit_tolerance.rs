@@ -21,10 +21,35 @@ use motion_pipeline::fit_audit::{FitViolation, take_violations};
 mod corpus;
 
 const DENSE_PRINT: &str = "voron_dense_top_layers";
+const BOWDEN_TEST_CONFIG: &str = "rust/motion-core/tests/configs/p1_bowden_ramp.cfg";
+const HYBRID_TEST_CONFIG: &str = "rust/motion-core/tests/configs/bench_ramp_hybrid.cfg";
 const NO_ADVANCE_CONFIG: &str = "rust/motion-core/tests/configs/bench_no_advance.cfg";
 
 fn dense_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
     corpus::print_cases(DENSE_PRINT, configs)
+}
+
+/// The z-hopped dense print on the bowden test config: a linear advance of
+/// k = 0.5 with no kernel after it under smooth MZV leaders, whose sloped
+/// kernel edges turned a source fit's velocity step at each layer end into
+/// a jerk step the advance passed on to the extruder.
+fn bowden_cases() -> Vec<(String, String, PathBuf)> {
+    corpus::print_cases("voron_dense_top_layers_zhop", &[BOWDEN_TEST_CONFIG])
+}
+
+/// The first layers and the neptune cube's discontinuity on the hybrid test
+/// config: a 2 ms kernel after the advance.
+fn hybrid_cases() -> Vec<(String, String, PathBuf)> {
+    let mut cases = corpus::print_cases("voron_first_layers", &[HYBRID_TEST_CONFIG]);
+    cases.push((
+        format!("neptune_cube/discontinuity/{HYBRID_TEST_CONFIG}"),
+        std::fs::read_to_string(
+            corpus::repo().join("snapshots/cases/neptune_cube/discontinuity.gcode"),
+        )
+        .expect("the neptune cube's discontinuity case"),
+        corpus::repo().join(HYBRID_TEST_CONFIG),
+    ));
+    cases
 }
 
 /// Held across an audited replay: the fit audit gathers violations from
@@ -236,6 +261,16 @@ fn every_fit_piece_of_the_dense_print_holds_the_fit_tolerance_on_the_bowden_corn
 }
 
 #[test]
+fn every_fit_piece_of_the_dense_zhop_print_holds_the_fit_tolerance_on_the_bowden_test_config() {
+    assert_every_accepted_fit_piece_holds(bowden_cases());
+}
+
+#[test]
+fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_hybrid_test_config() {
+    assert_every_accepted_fit_piece_holds(hybrid_cases());
+}
+
+#[test]
 fn every_fit_piece_of_the_corner_flow_cases_holds_the_fit_tolerance_on_the_bench_configs() {
     assert_every_accepted_fit_piece_holds(
         corpus::corner_flow_cases(&corpus::SIM_CONFIGS)
@@ -347,6 +382,8 @@ fn audited_case_names() -> BTreeSet<String> {
         &corpus::FIRST_LAYERS_FROM_74_S,
         &["tools/bench/configs/trident_kernel.cfg"],
     ));
+    cases.extend(bowden_cases());
+    cases.extend(hybrid_cases());
     for config in corpus::PROFILE_CONFIGS {
         cases.extend(profile_gate_cases(config));
     }

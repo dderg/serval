@@ -1,23 +1,20 @@
 //! The extruder excesses known engine bugs leave on a case, pinned per
 //! class by count and worst value under the [`super::ratchet`] rules.
 
-use super::extruder::{AccelCause, ExtruderAudit, ExtruderExcess, ToolheadPhase};
+use super::extruder::{AccelCause, Commanded, ExtruderAudit, ExtruderExcess};
 use super::ratchet::{Tally, departures, rounded, tally};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExcessClass {
-    /// An acceleration excess while the toolhead moves that the path's
+    /// An acceleration excess while e follows the toolhead that the path's
     /// turning does not explain.
     Accel,
-    /// An acceleration excess while the toolhead moves that the shaped
+    /// An acceleration excess while e follows the toolhead that the shaped
     /// path's turning asks of a kernel-free advance, see
     /// [`AccelCause::PathTurning`].
     Turning,
-    /// A velocity excess while the toolhead moves.
+    /// A velocity excess while e follows the toolhead.
     Velocity,
-    /// A velocity excess in a rest transition, where the extruder chain
-    /// moves e for the motion around a rest.
-    RestTransitionVelocity,
     /// A velocity step beyond its allowance.
     VelocityStep,
 }
@@ -27,7 +24,7 @@ impl ExcessClass {
         match *excess {
             ExtruderExcess::Acceleration {
                 value,
-                phase: ToolheadPhase::Moving,
+                command: Commanded::Following,
                 cause,
                 ..
             } => Some((
@@ -39,14 +36,9 @@ impl ExcessClass {
             )),
             ExtruderExcess::Velocity {
                 value,
-                phase: ToolheadPhase::Moving,
+                command: Commanded::Following,
                 ..
             } => Some((Self::Velocity, value)),
-            ExtruderExcess::Velocity {
-                value,
-                phase: ToolheadPhase::RestTransition,
-                ..
-            } => Some((Self::RestTransitionVelocity, value)),
             ExtruderExcess::VelocityStep { step, .. } => Some((Self::VelocityStep, step)),
             ExtruderExcess::Acceleration { .. } | ExtruderExcess::Velocity { .. } => None,
         }
@@ -56,7 +48,7 @@ impl ExcessClass {
     fn printed(self, worst: f64) -> f64 {
         match self {
             Self::Accel | Self::Turning => rounded(worst, 1),
-            Self::Velocity | Self::RestTransitionVelocity | Self::VelocityStep => rounded(worst, 4),
+            Self::Velocity | Self::VelocityStep => rounded(worst, 4),
         }
     }
 }
@@ -71,7 +63,22 @@ pub struct KnownExcesses {
     pub worst: f64,
 }
 
-pub const KNOWN: &[KnownExcesses] = &[];
+/// #954: under the hybrid test config's 2 ms kernel after its advance, the
+/// extruder leaves its acceleration cap while the toolhead moves.
+pub const KNOWN: &[KnownExcesses] = &[
+    KnownExcesses {
+        case: "voron_first_layers/rust/motion-core/tests/configs/bench_ramp_hybrid.cfg",
+        class: ExcessClass::Accel,
+        count: 88,
+        worst: 6348.3,
+    },
+    KnownExcesses {
+        case: "neptune_cube/discontinuity/rust/motion-core/tests/configs/bench_ramp_hybrid.cfg",
+        class: ExcessClass::Accel,
+        count: 32,
+        worst: 7193.3,
+    },
+];
 
 /// Where the audit of the case named `case` departs from what [`KNOWN`]
 /// pins for it, as one failure line.
