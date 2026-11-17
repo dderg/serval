@@ -13,6 +13,8 @@ STEPPER_ON = "CONFIG_MOTION_MODULE_STEPPER=y"
 STEPPER_OFF = "# CONFIG_MOTION_MODULE_STEPPER is not set"
 STEPPER_FEATURE = "motion-module-stepper"
 OLDER_THAN_CONFIG = 1_000_000_000
+UNSHIPPED_DIR_PREFIXES = (".", "out")
+UNSHIPPED_DIRS = ("target", "node_modules")
 
 
 def _build_tree(tmp_path):
@@ -33,14 +35,20 @@ def _build_tree(tmp_path):
 
 
 def _committed_configs():
-    listed = subprocess.run(
-        ["git", "ls-files", "*.config"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return [ROOT / name for name in listed.stdout.split()]
+    found = []
+    for top, dirs, files in os.walk(ROOT):
+        dirs[:] = [
+            name
+            for name in dirs
+            if not name.startswith(UNSHIPPED_DIR_PREFIXES)
+            and name not in UNSHIPPED_DIRS
+        ]
+        found += [
+            pathlib.Path(top) / name
+            for name in files
+            if name.endswith(".config") and name != ".config"
+        ]
+    return sorted(found)
 
 
 COMMITTED_CONFIGS = _committed_configs()
