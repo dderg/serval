@@ -557,3 +557,32 @@ fn a_stream_after_a_drained_rest_budgets_as_a_fresh_one() {
     reach.close();
     assert_eq!(settled(&mut reach), streamed(&after));
 }
+
+#[test]
+fn a_move_reads_its_run_past_seams_its_extruder_never_lets_it_reach() {
+    let slow_extruder = ExtruderCaps {
+        max_velocity_mm_s: 10.0,
+        ..caps()
+    };
+    let moves = stream_under(
+        slow_extruder,
+        &[
+            (10.0, RATIO, 100.0),
+            (15.0, RATIO, 400.0),
+            (9.0, RATIO, 400.0),
+            (15.0, RATIO, 400.0),
+            (10.0, RATIO, 100.0),
+        ],
+    );
+    let run = extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY.0, EXTRUDE_ONLY.1)[2].reachable;
+    assert_eq!(
+        (
+            run.entry.ceiling_mm_s,
+            run.behind_mm,
+            run.exit.ceiling_mm_s,
+            run.ahead_mm
+        ),
+        (100.0, 15.0, 100.0, 15.0),
+        "{run:?}"
+    );
+}
