@@ -172,3 +172,62 @@ fn a_halt_during_a_drain_costs_no_runway() {
 
     assert_eq!(ingress.pacer.reserve_secs(), unmeasured_reserve_s);
 }
+
+const FIRST_SEGMENT_S: f64 = 0.0222;
+const FIRST_RUNWAY: Duration = Duration::from_secs(2);
+const READER_ARRIVES: Duration = Duration::from_millis(200);
+
+fn park_and_answer_barriers(
+    output: &crossbeam_channel::Receiver<motion_pipeline::TrajectoryItem>,
+    anchor: &std::sync::Mutex<crate::anchor::Anchor>,
+) {
+    while let Ok(item) = output.recv() {
+        match item {
+            motion_pipeline::TrajectoryItem::Parked => anchor.lock_ok().mark_parked(),
+            motion_pipeline::TrajectoryItem::Control(Control::Dispatch(
+                DispatchCommand::Barrier(reply),
+            )) => reply
+                .send(BarrierAck {
+                    dispatched_through: None,
+                    result: Ok(()),
+                })
+                .unwrap(),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn a_first_segment_mid_commit_is_never_seen_moving_without_its_runway() {
+    let (output_tx, output) = crossbeam_channel::unbounded();
+    let mut ingress = ingress(output_tx);
+    let anchor = Arc::clone(&ingress.timeline.anchor);
+    let frontier = Arc::clone(&ingress.timeline.frontier);
+    let host_now = ingress.timeline.router.lock_ok().host_now_secs();
+    let downstream = {
+        let anchor = Arc::clone(&anchor);
+        std::thread::spawn(move || park_and_answer_barriers(&output, &anchor))
+    };
+    ingress.pacer.note_move(Instant::now());
+    let (opened_tx, opened) = crossbeam_channel::bounded(0);
+    let dispatcher = std::thread::spawn(move || {
+        let mut anchor = anchor.lock_ok();
+        anchor.anchor_segment(0.0, FIRST_SEGMENT_S, host_now);
+        let committed_end = Instant::now() + FIRST_RUNWAY;
+        opened_tx.send(()).unwrap();
+        std::thread::sleep(READER_ARRIVES);
+        frontier.advance_to(committed_end);
+    });
+    opened.recv().unwrap();
+
+    let verdict = ingress.drain_or_runway(InboxFoundEmpty(()));
+    dispatcher.join().unwrap();
+    drop(ingress);
+    downstream.join().unwrap();
+
+    assert!(
+        verdict.is_some(),
+        "the pacer braked a stream whose first segment was still being committed: it \
+         read the anchor in motion and the frontier without the segment's runway"
+    );
+}

@@ -2320,8 +2320,15 @@ impl RatioSmoothing {
         if reach <= SPAN_MIN_LEN_MM {
             return;
         }
-        if !crossing.needs_valley(rule, peak_ratio_within(tables.0, turn, reach)) {
-            if turn + reach > table_end {
+        self.refresh_clusters();
+        let ratios = CrawlRatios::around(self, tables, turn, reach);
+        if !crossing.needs_valley(rule, ratios) {
+            let undecided = if guarded_by_the_turning_guard(rule) {
+                !self.reads_within(Table::Advance, turn + reach, table_end)
+            } else {
+                turn + reach > table_end
+            };
+            if undecided {
                 self.waiting_crawls.push((turn, crossing));
             }
             return;
@@ -4005,20 +4012,24 @@ impl Crossing {
 
     /// An advance of `rule`'s slope releases its lead around where the
     /// leaders turn around, or crawl where reading the path speed through
-    /// at `ratio` would ask the follower for more than its acceleration
-    /// limit: `r·(a + k·J)`, `J` the slope of the path's acceleration the
-    /// follower meets ([`Self::advanced_jerk`]). Elsewhere releasing the
-    /// lead over the crawl's short reach would ask more of the follower
-    /// than the crawl. A follower the turning guard holds
-    /// ([`guarded_by_the_turning_guard`]) releases it at every crawl: the
-    /// guard bounds the turning `a⊥²/v` the path speed carries only down to
+    /// at the ratio in reach would ask the follower for more than its
+    /// acceleration limit: `r·(a + k·J)`, `J` the slope of the path's
+    /// acceleration the follower meets ([`Self::advanced_jerk`]). Elsewhere
+    /// releasing the lead over the crawl's short reach would ask more of
+    /// the follower than the crawl. A follower the turning guard holds
+    /// ([`guarded_by_the_turning_guard`]) releases it at every crawl where
+    /// it extrudes ([`CrawlRatios::read`]): the guard bounds the turning
+    /// `a⊥²/v` the path speed carries only down to
     /// [`ADVANCE_VALLEY_SPEED_MM_S`], and leaves room for the rebuild of a
-    /// valley at every crawl it may find.
-    fn needs_valley(self, rule: &RatioRampRule, ratio: f64) -> bool {
+    /// valley at every crawl it may find. Where the advance reads no ratio
+    /// the turning asks nothing of the follower, and neither would the
+    /// valley.
+    fn needs_valley(self, rule: &RatioRampRule, ratios: CrawlRatios) -> bool {
         self.turns_around()
             || (self.crawls()
-                && (guarded_by_the_turning_guard(rule)
-                    || ratio * (self.rate + rule.advance_slope_s * self.advanced_jerk(rule))
+                && ((guarded_by_the_turning_guard(rule) && ratios.read > 0.0)
+                    || ratios.in_reach
+                        * (self.rate + rule.advance_slope_s * self.advanced_jerk(rule))
                         > rule.max_accel_mm_s2))
     }
 
@@ -4036,6 +4047,31 @@ impl Crossing {
     /// The floor a valley here keeps flat ([`crawl_floor`]).
     fn crawl_floor(self) -> f64 {
         crawl_floor(self.speed, self.rate)
+    }
+}
+
+/// The ratios around a crawl: the largest of the laid spans within the
+/// leaders' `reach` of it, and the largest the smoothed advance table
+/// reads there ([`RatioSmoothing::peak_ratio_in`]), which a ratio step's
+/// ramp reaches from as far as its window: an extrusion ending in a
+/// travel just before a crawl still ramps its ratio across it.
+#[derive(Debug, Clone, Copy)]
+struct CrawlRatios {
+    in_reach: f64,
+    read: f64,
+}
+
+impl CrawlRatios {
+    fn around(
+        smoothing: &RatioSmoothing,
+        (laid, advance): (&[RatioSpan], &[RatioSpan]),
+        turn: f64,
+        reach: f64,
+    ) -> Self {
+        Self {
+            in_reach: peak_ratio_within(laid, turn, reach),
+            read: smoothing.peak_ratio_in(Table::Advance, advance, turn - reach, turn + reach),
+        }
     }
 }
 

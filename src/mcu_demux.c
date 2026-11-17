@@ -180,6 +180,18 @@ mcu_demux_mcu_channel(void)
 // demuxer self-heals before the host gives up.
 static uint32_t last_byte_time;
 
+#if CONFIG_MACH_LINUX
+static uint16_t pump_fed;
+
+uint16_t
+mcu_demux_take_fed(void)
+{
+    uint16_t fed = pump_fed;
+    pump_fed = 0;
+    return fed;
+}
+#endif
+
 void
 mcu_demux_pump(const uint8_t *buf, uint16_t len)
 {
@@ -203,6 +215,9 @@ mcu_demux_pump(const uint8_t *buf, uint16_t len)
     uint32_t msg_count = 0;
     for (uint16_t i = 0; i < len; i++) {
         mcu_demux_output_t out = mcu_demux_feed_byte(buf[i]);
+#if CONFIG_MACH_LINUX
+        pump_fed = i + 1;
+#endif
         switch (out) {
         case MCU_DEMUX_OUT_NONE:
             break;

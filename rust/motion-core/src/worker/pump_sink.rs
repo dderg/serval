@@ -47,6 +47,15 @@ struct AnchorPoint {
     rest_from_host: Option<f64>,
 }
 
+/// Whether anchoring advances the committed frontier before it releases the
+/// anchor: the pacer reads both under that lock, so a segment it sees in
+/// motion already carries its runway.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Runway {
+    Publish,
+    Leave,
+}
+
 impl Projection {
     fn host_now(&self) -> f64 {
         self.router.lock_ok().host_now_secs()
@@ -317,11 +326,16 @@ impl Projection {
         }
     }
 
-    fn anchor(&self, t_start: f64, t_end: f64, drip_active: bool) -> AnchorPoint {
+    fn anchor(&self, t_start: f64, t_end: f64, drip_active: bool, runway: Runway) -> AnchorPoint {
         let mut anchor = self.anchor.lock_ok();
         let host_now = self.host_now();
         let rest_from_host = anchor.committed_end_host();
         let (t0, epoch) = anchor.anchor_segment(t_start, t_end, host_now);
+        let runway_s = t0 + t_end - host_now;
+        if runway == Runway::Publish && runway_s > 0.0 {
+            self.frontier
+                .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
+        }
         AnchorPoint {
             t0,
             epoch,
@@ -341,7 +355,7 @@ impl Projection {
         t_end: f64,
         drip_active: bool,
     ) -> Result<AnchorPoint, DispatchError> {
-        let at = self.anchor(t_start, t_end, drip_active);
+        let at = self.anchor(t_start, t_end, drip_active, Runway::Publish);
         if at.epoch.is_fresh() || self.frozen_projection.is_empty() {
             self.resync_at_rest(at.t0 + t_start, at.rest_from_host)?;
         }
@@ -375,12 +389,6 @@ impl Projection {
         );
 
         let at = self.anchor_segment(seg.t_start, seg.t_end, pump.drip_active())?;
-
-        let runway_s = at.t0 + seg.t_end - at.host_now;
-        if runway_s > 0.0 {
-            self.frontier
-                .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
-        }
 
         if at.epoch.is_fresh() {
             self.log_seg0_lead(
@@ -460,7 +468,12 @@ impl Projection {
             return Err(DispatchError::NudgeTargetMissing { mcu_id, axis });
         }
 
-        let at = self.anchor(profile.t_start(), profile.t_end(), pump.drip_active());
+        let at = self.anchor(
+            profile.t_start(),
+            profile.t_end(),
+            pump.drip_active(),
+            Runway::Leave,
+        );
         self.anchor.lock_ok().mark_parked();
 
         let seam_host = at.t0 + profile.t_start();

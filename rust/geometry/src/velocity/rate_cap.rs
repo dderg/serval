@@ -16,6 +16,11 @@ impl LinearRate {
         self.per_velocity * v + self.per_accel * accel
     }
 
+    /// The speed at which the rate reaches `max` on no budget at all.
+    pub(super) fn still_speed(&self, max: f64) -> f64 {
+        max / self.per_velocity
+    }
+
     /// `rate ≤ max` on a move the plan crosses at no more than `reachable`,
     /// under a ceiling held to the reachable peak, which loses the plan
     /// nothing. Where the budget does not fit at that ceiling, the two
@@ -57,7 +62,7 @@ impl LinearRate {
         if per_accel == 0.0 {
             return (cut_ceiling, accel);
         }
-        let still_speed = max / per_velocity;
+        let still_speed = self.still_speed(max);
         let budget_at = |v: f64| (max - per_velocity * v) / per_accel;
         let peak_at = |v: f64| reachable.peak_under(budget_at(v));
         if peak_at(still_speed) >= still_speed {

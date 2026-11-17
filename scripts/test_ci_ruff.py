@@ -1,0 +1,97 @@
+"""ship.py formats Python with `ci.sh ruff-format` and the quick gate checks
+it with `ci.sh ruff`: both run the one ruff ci.sh pins, and every other place
+that names a ruff version (CI's lint workflow, the uv dev group and lock, the
+pre-commit hook) pins that same one."""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+SCRIPTS = Path(__file__).parent
+ROOT = SCRIPTS.parent
+PINNED = re.search(
+    r'^RUFF_VERSION="([^"]+)"$', (SCRIPTS / "ci.sh").read_text(), re.M
+).group(1)
+
+
+def link_path_without(hidden: set[str], into: Path) -> None:
+    into.mkdir()
+    for directory in os.environ["PATH"].split(os.pathsep):
+        if not os.path.isdir(directory):
+            continue
+        for entry in os.scandir(directory):
+            link = into / entry.name
+            if entry.name in hidden or os.path.lexists(link):
+                continue
+            link.symlink_to(entry.path)
+
+
+def run_ci(
+    tmp_path: Path, job: str, *, uvx: bool
+) -> tuple[int, list[str], str]:
+    root = tmp_path.resolve()
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy(SCRIPTS / "ci.sh", root / "scripts" / "ci.sh")
+    fakes = root / "bin"
+    fakes.mkdir()
+    call_log = root / "calls"
+    for tool in ["ruff", "uvx"] if uvx else ["ruff"]:
+        fake = fakes / tool
+        fake.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{call_log}"\n')
+        fake.chmod(0o755)
+    system = root / "system"
+    link_path_without({"ruff", "uv", "uvx"}, system)
+    result = subprocess.run(
+        [shutil.which("bash"), str(root / "scripts" / "ci.sh"), job],
+        env={
+            "PATH": f"{fakes}{os.pathsep}{system}",
+            "HOME": str(root),
+            "CI_NO_SLOT": "1",
+            "CI_MIN_FREE_GB": "0",
+        },
+        capture_output=True,
+        text=True,
+    )
+    logged = call_log.read_text().splitlines() if call_log.exists() else []
+    calls = [line.replace(str(root), "ROOT") for line in logged]
+    return result.returncode, calls, result.stdout + result.stderr
+
+
+def test_the_formatter_and_the_gate_run_the_pinned_ruff(tmp_path):
+    rc, calls, output = run_ci(tmp_path / "format", "ruff-format", uvx=True)
+    assert (rc, calls) == (0, [f"uvx ruff@{PINNED} format ROOT"]), output
+    rc, calls, output = run_ci(tmp_path / "check", "ruff", uvx=True)
+    assert (rc, calls) == (
+        0,
+        [
+            f"uvx ruff@{PINNED} check ROOT",
+            f"uvx ruff@{PINNED} format --check ROOT",
+        ],
+    ), output
+
+
+def test_without_uvx_neither_job_falls_back_to_an_unpinned_ruff(tmp_path):
+    for job in ("ruff", "ruff-format"):
+        rc, calls, output = run_ci(tmp_path / job, job, uvx=False)
+        assert rc != 0 and calls == [], (job, calls, output)
+        assert "uvx not found" in output, output
+
+
+def test_every_other_ruff_pin_is_the_gates():
+    workflow = (ROOT / ".github/workflows/ci-lintformat.yaml").read_text()
+    assert set(re.findall(r'version: "([^"]+)"', workflow)) == {PINNED}
+
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    assert set(re.findall(r'"ruff([^"]*)"', pyproject)) == {f"=={PINNED}"}
+
+    lock = (ROOT / "uv.lock").read_text()
+    locked = re.findall(r'name = "ruff"\nversion = "([^"]+)"', lock)
+    assert locked == [PINNED]
+
+    pre_commit = (ROOT / ".pre-commit-config.yaml").read_text()
+    revs = re.findall(r"ruff-pre-commit\n\s+rev: v(\S+)", pre_commit)
+    assert revs == [PINNED]
