@@ -8,7 +8,7 @@ use geometry::{
 
 use super::{
     FloorLeaders, LeaderReads, OdometerLeaves, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM,
-    ShapedLeaders, Table,
+    ShapedLeaders, Table, span_alignment_envelope,
 };
 
 mod crawl_sides;
@@ -2622,7 +2622,10 @@ impl RatioSmoothing {
     }
 
     /// The queued segments no node, seam or valley still to come can reach
-    /// into, in order.
+    /// into, in order. The path they take is read on the span table, where
+    /// floors and valleys lie: a segment's own arc, summed from its aligned
+    /// start, ends within the span alignment envelope of the table's end
+    /// it was laid with, and an ulp past it is the same point.
     pub(super) fn take_final(&mut self, spans: &[RatioSpan]) -> Vec<PendingSegment> {
         self.refresh_clusters();
         let table_end = spans.last().map_or(self.floor, |last| last.s1);
@@ -2640,10 +2643,15 @@ impl RatioSmoothing {
             .count();
         let drained: Vec<PendingSegment> = self.backlog.drain(..ready).collect();
         if let Some(last) = drained.last() {
-            self.taken_through = self
-                .taken_through
-                .max(last.table_end)
-                .max(last.s_start + last.s_length);
+            let arc_end = last.s_start + last.s_length;
+            assert!(
+                arc_end - last.table_end <= span_alignment_envelope(last.table_end),
+                "follower projection: the segment over [{}, {arc_end}] runs past the end of the \
+                 span table it was laid on, {}",
+                last.s_start,
+                last.table_end
+            );
+            self.taken_through = self.taken_through.max(last.table_end);
         }
         self.trail.forget_before(self.floor.max(self.taken_through));
         drained

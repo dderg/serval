@@ -17,6 +17,5 @@ tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-* --repeat 3
 | #897 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-897` | panic `crawl_sides.rs:568` assert_flow_fits "the ratio steps ... ask N mm/s² of the follower's flow" |
 | #902 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-902` | panic `turning_guard.rs` "the cell at t=Ns still asks N mm/s² of the extruder" |
 | #903 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-903` | panic `turning_guard.rs` "the crawl ... still lays a valley side" (4 travel moves, no E) |
-| #988 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-988` | panic `ratio_ramp.rs:2462` "the crawl valley ... reaches X mm back, but the projection has taken the path to Y mm" with X − Y ≈ 1e-13 |
 | #993 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-993` | idle_timeout: `state 'Printing', extruder target 150.0` 8.5 s after the second print, which followed a 40 s idle gap |
 | #997 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-997` | panic `shaper.rs:1103` "axis 2 (materialize_source): the signal's velocity changes by ..." on a travel through the mesh corner (280, 280) |
