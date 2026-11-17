@@ -59,6 +59,7 @@ struct sim_gpio_line {
     int direction;   // 0 = input, 1 = output, -1 = unconfigured
     int value;
     unsigned long edges;
+    uint64_t last_edge_vtime_ns;
 };
 static struct sim_gpio_line gpio_lines[MAX_GPIO_CHIPS][MAX_GPIO_LINES];
 static pthread_mutex_t gpio_state_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -451,9 +452,11 @@ static void control_handle_line(int client_fd, char *line) {
         pthread_mutex_lock(&gpio_state_mtx);
         unsigned long edges = gpio_lines[chip][line_off].edges;
         int v = gpio_lines[chip][line_off].value;
+        uint64_t last_ns = gpio_lines[chip][line_off].last_edge_vtime_ns;
         pthread_mutex_unlock(&gpio_state_mtx);
-        char buf[64];
-        snprintf(buf, sizeof(buf), "edges=%lu value=%d\n", edges, v);
+        char buf[96];
+        snprintf(buf, sizeof(buf), "edges=%lu value=%d last_ns=%llu\n", edges,
+                 v, (unsigned long long)last_ns);
         send_resp(client_fd, buf);
         return;
     }
@@ -920,7 +923,10 @@ static int gpio_handle_set_values(int line_fd, struct gpiohandle_data *data) {
     pthread_mutex_lock(&gpio_state_mtx);
     int prev = gpio_lines[chip_id][offset].value ? 1 : 0;
     gpio_lines[chip_id][offset].value = v;
-    if (v != prev) gpio_lines[chip_id][offset].edges++;
+    if (v != prev) {
+        gpio_lines[chip_id][offset].edges++;
+        gpio_lines[chip_id][offset].last_edge_vtime_ns = shared_vtime_ns();
+    }
     slot->u.gpioline.last_value = v;
     if (gpio_step_tracking && v != prev) {
         for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {

@@ -372,6 +372,12 @@ impl Anchor {
     }
 
     pub fn claim_earliest_start(&mut self, host_now: f64) -> Result<f64, String> {
+        let earliest = self.earliest_start(host_now)?;
+        self.claimed_start_host = self.claimed_start_host.max(earliest);
+        Ok(earliest)
+    }
+
+    fn earliest_start(&self, host_now: f64) -> Result<f64, String> {
         let natural = match self.classify(self.stream_end, host_now) {
             AnchorClass::Reposition | AnchorClass::IdleResume { .. } => {
                 host_now + self.start_lead_s()
@@ -387,9 +393,22 @@ impl Anchor {
                 ));
             }
         };
-        let earliest = natural.max(self.held_start_host);
-        self.claimed_start_host = self.claimed_start_host.max(earliest);
-        Ok(earliest)
+        Ok(natural.max(self.held_start_host))
+    }
+
+    /// The stream seconds a dwell ordered at rest first rests for, so that
+    /// it counts from the earliest start, as Klipper's dwell counts from
+    /// `max(last move end, now + lead)`, not from an end the playhead left
+    /// behind. A timeline a reset left unmapped holds its next start past
+    /// the dwell instead and rests none.
+    pub(crate) fn rest_before_dwell(&mut self, host_now: f64, dwell_s: f64) -> Result<f64, String> {
+        let earliest = self.earliest_start(host_now)?;
+        if self.classify(self.stream_end, host_now) == AnchorClass::Reposition {
+            self.hold_start_until(earliest + dwell_s)?;
+            return Ok(0.0);
+        }
+        let t0 = self.t0.expect("a stream past its reposition is anchored");
+        Ok(earliest - (t0 + self.stream_end))
     }
 
     pub fn hold_start_until(&mut self, host_s: f64) -> Result<(), String> {

@@ -398,6 +398,15 @@ impl Ingress {
         );
     }
 
+    fn rest_before_dwell(&self, dwell_s: f64) -> f64 {
+        let host_now = self.timeline.router.lock_ok().host_now_secs();
+        self.timeline
+            .anchor
+            .lock_ok()
+            .rest_before_dwell(host_now, dwell_s)
+            .unwrap_or_else(|error| fatal(&format!("a drained stream refused a dwell: {error}")))
+    }
+
     /// The pacer's decision while moves keep arriving. A saturated inbox
     /// never lets the idle path run, so a planner committing slower than
     /// the playhead consumes would overrun the committed end; see
@@ -470,11 +479,12 @@ impl Ingress {
             }
             StreamMsg::Dwell { duration_s, notify } => {
                 self.drain_and_fence();
-                if duration_s > 0.0 {
-                    self.send(StreamInput::Control(Control::Dwell { secs: duration_s }));
+                if duration_s > 0.0 && !self.links.shutting_down.load(Ordering::Acquire) {
+                    let secs = self.rest_before_dwell(duration_s) + duration_s;
+                    self.send(StreamInput::Control(Control::Dwell { secs }));
                     let before = self.t_next;
                     if self.barrier().dispatched_through.is_none() {
-                        self.t_next = before + duration_s;
+                        self.t_next = before + secs;
                     }
                 }
                 let _ = notify.send(());
