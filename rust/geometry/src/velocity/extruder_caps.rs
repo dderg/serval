@@ -1,4 +1,4 @@
-use super::extrusion_reach::ExtrusionBudget;
+use super::extrusion_reach::{ExtrusionBudget, REACHABLE_SLACK};
 use crate::frontend::ExtruderCaps;
 use std::sync::Arc;
 
@@ -265,6 +265,87 @@ fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
         .map_or((0.0, 0.0), |follower| (follower.ratio, follower.ratio_end))
 }
 
+/// The ratio `m` lays on its extruder's axis at its start and end, 0 where
+/// it lays none.
+pub(super) fn extruder_ratio_ends(m: &crate::Move) -> (f64, f64) {
+    m.limits
+        .extruder
+        .map_or((0.0, 0.0), |caps| ratios_on(&m.segment, caps.axis_index))
+}
+
+/// A join of two moves along the path where the extrusion ratio moves: the
+/// caps holding both, the ratio at either end of each, and how far it moves
+/// across them, the step and a blend's slide along either included (a
+/// window gathers the slide whole).
+pub(super) struct StepJoin {
+    caps: ExtruderCaps,
+    ratios: [f64; 4],
+    moved: f64,
+}
+
+impl StepJoin {
+    /// The join of two moves along the path with `caps` and the ratios
+    /// `ends` at either end of each; `None` where neither has an extruder
+    /// or the ratio does not move.
+    pub(super) fn new(
+        (up_caps, dn_caps): (Option<ExtruderCaps>, Option<ExtruderCaps>),
+        ends: [(f64, f64); 2],
+    ) -> Option<Self> {
+        let caps = ExtruderCaps::stricter(up_caps, dn_caps)?;
+        let ratios = [ends[0].0, ends[0].1, ends[1].0, ends[1].1];
+        let moved = ratios
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .sum();
+        (moved != 0.0).then_some(Self {
+            caps,
+            ratios,
+            moved,
+        })
+    }
+
+    /// Whether a crossing of it from a stop binds the moves either side
+    /// ([`rest_crossing_accel`]): without a follower kernel.
+    pub(super) fn binds_stop_crossings(&self) -> bool {
+        self.caps.plans_isolated_switches()
+    }
+
+    fn of(up: &crate::Move, dn: &crate::Move) -> Option<Self> {
+        if up.segment.spatial.is_none() || dn.segment.spatial.is_none() {
+            return None;
+        }
+        Self::new(
+            (up.limits.extruder, dn.limits.extruder),
+            [extruder_ratio_ends(up), extruder_ratio_ends(dn)],
+        )
+    }
+
+    /// The leaders crossing the join at the planned speed `planned` as
+    /// `flow` lays their speeds around it out, `rest_room_mm` from their
+    /// nearest rest and at a path jerk of up to `jerk_mm_s3`.
+    fn crossing(
+        &self,
+        flow: &StepFlow,
+        (rest_room_mm, jerk_mm_s3): (f64, f64),
+        planned: f64,
+    ) -> StepCrossing {
+        let speed_mm_s = flow.shaped_speed(planned);
+        let half_ramp_s = 0.5 * longest_ramp_time(speed_mm_s, rest_room_mm);
+        StepCrossing {
+            step: RatioStep {
+                ratio_step: self.moved,
+                peak_ratio: flow.peak_ratio,
+                speed_mm_s,
+                accel_mm_s2: flow.accel,
+                jerk_mm_s3,
+            },
+            rest_room_mm,
+            edge_speed_mm_s: flow.shaped_speed(planned + flow.accel * half_ramp_s),
+            own_flow_mm_s: flow.own_flow(planned),
+        }
+    }
+}
+
 /// The speed ceiling at the join of `up` into `dn` where the extrusion
 /// ratio moves: the follower's ratio ramp spreads the step there, with the
 /// change along either segment (a blend's ratio slides from one move's to
@@ -279,9 +360,9 @@ fn ratios_on(segment: &crate::path::PathSegment, axis: usize) -> (f64, f64) {
 /// two moves' planned budgets, `planned_accel`, and the leaders cross the
 /// step at a path jerk of up to `G·A`, `G` the planned jerk gain of the
 /// axes within either budget's reach
-/// ([`ExtruderCaps::planned_path_jerk_gain`]): the moves about the step
-/// budget that jerk and leave the step's ramp room to cross at rest
-/// ([`extruder_capped`]). With a follower kernel the moves budget the
+/// ([`ExtruderCaps::planned_path_jerk_gain`]): both budgets hold a crossing
+/// from a stop within the limits ([`rest_crossing_accel`]), so a crossing
+/// that fits is always found. With a follower kernel the moves budget the
 /// path's jerk at its total variation, and the step reads none of it at
 /// `A = strongest_accel`, the largest acceleration a move within either
 /// budget's reach can realize.
@@ -301,18 +382,10 @@ pub(super) fn ratio_step_ceiling(
     (up_budget, dn_budget): (&ExtrusionBudget, &ExtrusionBudget),
     (planned_accel, strongest_accel): (f64, f64),
 ) -> f64 {
-    let Some(caps) = ExtruderCaps::stricter(up.limits.extruder, dn.limits.extruder) else {
+    let Some(join) = StepJoin::of(up, dn) else {
         return f64::INFINITY;
     };
-    if up.segment.spatial.is_none() || dn.segment.spatial.is_none() {
-        return f64::INFINITY;
-    }
-    let (up_start, up_end) = ratios_on(&up.segment, caps.axis_index);
-    let (dn_start, dn_end) = ratios_on(&dn.segment, caps.axis_index);
-    let moved = (up_end - up_start).abs() + (dn_start - up_end).abs() + (dn_end - dn_start).abs();
-    if moved == 0.0 {
-        return f64::INFINITY;
-    }
+    let caps = &join.caps;
     let fastest = up_budget
         .fastest_reachable_mm_s
         .min(dn_budget.fastest_reachable_mm_s);
@@ -332,23 +405,78 @@ pub(super) fn ratio_step_ceiling(
     } else {
         (strongest_accel, 0.0)
     };
-    let flow = StepFlow::new(&caps, [up_start, up_end, dn_start, dn_end], fastest, accel);
-    caps.ratio_ramp_rule().step_speed_cap(fastest, |planned| {
-        let speed_mm_s = flow.shaped_speed(planned);
-        let half_ramp_s = 0.5 * longest_ramp_time(speed_mm_s, dn_budget.rest_room_mm);
-        StepCrossing {
-            step: RatioStep {
-                ratio_step: moved,
-                peak_ratio: flow.peak_ratio,
-                speed_mm_s,
-                accel_mm_s2: accel,
-                jerk_mm_s3,
-            },
-            rest_room_mm: dn_budget.rest_room_mm,
-            edge_speed_mm_s: flow.shaped_speed(planned + accel * half_ramp_s),
-            own_flow_mm_s: flow.own_flow(planned),
+    let flow = StepFlow::new(caps, join.ratios, fastest, accel);
+    let ceiling = caps.ratio_ramp_rule().step_speed_cap(fastest, |planned| {
+        join.crossing(&flow, (dn_budget.rest_room_mm, jerk_mm_s3), planned)
+    });
+    assert!(
+        ceiling > 0.0 || !caps.plans_isolated_switches(),
+        "the leaders cross the ratio step into line {} from a stop past the extruder's limits \
+         at {accel} mm/s², above the {} and {} mm/s² the budgets either side allow it",
+        dn.source.start_line,
+        up_budget.step_accel_mm_s2,
+        dn_budget.step_accel_mm_s2
+    );
+    ceiling
+}
+
+/// The largest acceleration up to `accel` at which the moves either side
+/// of `join` let the leaders cross it from a stop within a kernel-free
+/// follower's limits, `rest_room_mm` from the leaders' nearest rest, read
+/// as [`ratio_step_ceiling`] reads it: the leaders around it up to
+/// `fastest` and the path moving on `axes`. Infinite with a follower
+/// kernel, and where even `accel` fits.
+///
+/// A planned stop does not stop the shaped leaders: the kernels spill the
+/// motion either side of it into a crossing at up to `A` times their first
+/// moment ([`crate::LeaderSpill`]), the advance reads the step's ramp at
+/// that speed, and a rest near the join narrows the ramp, so no slowing of
+/// the join lowers that crossing's demand and only the acceleration of the
+/// moves either side does. Both take it, so the larger of their budgets
+/// always crosses the join from a stop within the limits, and a stop there,
+/// the fitter's at a step it does not blend included, keeps them.
+///
+/// The crossing's demand rounds differently at accelerations an ulp apart,
+/// and the velocity cap's trade (`LinearRate::capped`, `rate_cap.rs`)
+/// may plan a move an ulp under its budget: a budget at the bisected edge
+/// of the fitting crossings would leave the plan where the check at the
+/// join flips. Both the limit kept and the budget returned therefore hold
+/// [`REACHABLE_SLACK`] of the acceleration clear of that edge, the budget
+/// one checked to fit.
+pub(super) fn rest_crossing_accel(
+    join: &StepJoin,
+    (fastest, axes): (f64, [bool; SPATIAL_AXES]),
+    rest_room_mm: f64,
+    accel: f64,
+) -> f64 {
+    let caps = &join.caps;
+    if !caps.plans_isolated_switches() {
+        return f64::INFINITY;
+    }
+    let rule = caps.ratio_ramp_rule();
+    let jerk_gain = caps.planned_path_jerk_gain(axes);
+    let fits = |accel: f64| {
+        let flow = StepFlow::new(caps, join.ratios, fastest, accel);
+        rule.crossing_fits(&join.crossing(&flow, (rest_room_mm, jerk_gain * accel), 0.0))
+    };
+    if fits(accel * (1.0 + REACHABLE_SLACK)) {
+        return f64::INFINITY;
+    }
+    let (mut fitting, mut exceeding) = (0.0, accel);
+    for _ in 0..BISECTION_STEPS {
+        let mid = 0.5 * (fitting + exceeding);
+        if fits(mid) {
+            fitting = mid;
+        } else {
+            exceeding = mid;
         }
-    })
+    }
+    let below_trade_rounding = fitting * (1.0 - REACHABLE_SLACK);
+    assert!(
+        fits(below_trade_rounding),
+        "the crossing from a stop fits at {fitting} mm/s² but not {REACHABLE_SLACK} under it"
+    );
+    below_trade_rounding
 }
 
 /// What the leaders' kernels make of a planned speed `v₀` at a ratio step
