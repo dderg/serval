@@ -27,7 +27,8 @@
 // the request `bed_mesh` hands `set_bed_mesh`, and the G-code starts from
 // the Z the activation renamed. --check fails on any emitted segment that
 // does not evaluate to finite positions. Any failure prints one
-// `REPLAY_FAILURE {json}` line for scripts/preflight.py.
+// `REPLAY_FAILURE {json}` line for scripts/preflight.py; a panic then exits
+// with EXIT_REPORTED_PANIC instead of aborting, so it leaves no core dump.
 
 use std::env;
 use std::fs;
@@ -47,6 +48,7 @@ use pipeline_snapshot::{PlanStep, SnapshotError};
 use trajectory::ContinuousSegment;
 
 const EXIT_FAILURE: i32 = 1;
+const EXIT_REPORTED_PANIC: i32 = 70;
 
 #[derive(Clone, Copy)]
 enum FailureKind {
@@ -130,8 +132,8 @@ fn record_failure(kind: FailureKind, message: &str, location: Option<&str>) {
     let _ = std::io::stdout().flush();
 }
 
-/// Release builds abort on panic, so a panic on any thread records its
-/// failure from the hook.
+/// A panic on any thread records its failure from the hook; the record is
+/// flushed by then, so the process exits at once.
 fn record_panics() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -144,6 +146,7 @@ fn record_panics() {
         let location = info.location().map(ToString::to_string);
         record_failure(FailureKind::Panic, &message, location.as_deref());
         default_hook(info);
+        process::exit(EXIT_REPORTED_PANIC);
     }));
 }
 
