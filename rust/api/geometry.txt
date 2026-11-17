@@ -753,6 +753,8 @@ pub geometry::surface::WarpSample::wy: f64
 pub geometry::surface::WarpSample::wyy: f64
 pub geometry::surface::WarpSample::wyz: f64
 pub geometry::surface::WarpSample::wz: f64
+pub geometry::surface::WarpSample::wzz: f64
+pub const geometry::surface::FADE_FACTOR_IN_BAND: [f64; 4]
 pub mod geometry::vec3
 pub fn geometry::vec3::dist([f64; 3], [f64; 3]) -> f64
 pub mod geometry::velocity
@@ -1548,6 +1550,7 @@ pub const geometry::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
 pub const geometry::CRAWL_SIDE_WIDEST_MM: f64
 pub const geometry::DEFAULT_CORNER_ALLOWANCE_MM: f64
+pub const geometry::FADE_FACTOR_IN_BAND: [f64; 4]
 pub const geometry::MIN_DEVICE_INTERVAL_S: f64
 pub const geometry::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::RATIO_RAMP_MAX_TIME_S: f64

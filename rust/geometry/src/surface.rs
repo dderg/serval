@@ -515,7 +515,7 @@ impl Fade {
         (c1 + t * (2.0 * c2 + t * 3.0 * c3)) / self.width()
     }
 
-    pub fn d2factor(&self, z: f64) -> f64 {
+    fn d2factor(&self, z: f64) -> f64 {
         if !self.in_band(z) {
             return 0.0;
         }
