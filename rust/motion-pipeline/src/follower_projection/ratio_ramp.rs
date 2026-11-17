@@ -1438,14 +1438,13 @@ impl WidthField {
         })
     }
 
-    /// Where the leaders rest next after the first candidate, as far as
-    /// the candidates show it.
-    fn rest_ahead(&self) -> f64 {
+    /// The first candidate from `from` on where the leaders rest.
+    fn next_rest_from(&self, from: usize) -> Option<usize> {
         self.candidates
             .iter()
-            .skip(1)
-            .find_map(Candidate::rest)
-            .unwrap_or(f64::INFINITY)
+            .enumerate()
+            .skip(from)
+            .find_map(|(at, candidate)| candidate.rest().map(|_| at))
     }
 
     /// The last rest at or before `s` among the candidates still to become
@@ -1460,8 +1459,12 @@ impl WidthField {
 
     /// Turns every candidate at or before `through` whose base is known
     /// into a node or drops it, in order, then every seam no candidate
-    /// still to come takes a ramp time or a width from.
+    /// still to come takes a ramp time or a width from. Where the leaders
+    /// rest next past the candidate in hand is found once per rest, not per
+    /// candidate: a leg minutes long at a millimetre a second lays tens of
+    /// thousands of samples with no rest among them.
     fn assign(&mut self, through: f64) {
+        let mut ahead = self.next_rest_from(1);
         while let Some(&candidate) = self.candidates.front() {
             match candidate {
                 Candidate::Rest(s) => self.rest_at(s),
@@ -1472,12 +1475,17 @@ impl WidthField {
                     if base == 0.0 {
                         self.rest_at(sample.s);
                     } else {
-                        self.keep_if_due(sample, base);
+                        let rest_ahead = ahead.map_or(f64::INFINITY, |at| self.candidates[at].s());
+                        self.keep_if_due(sample, base, rest_ahead);
                     }
                 }
             }
             self.candidates.pop_front();
             self.pending = self.pending.and_then(|pending| pending.checked_sub(1));
+            ahead = match ahead {
+                Some(1) => self.next_rest_from(1),
+                at => at.map(|at| at - 1),
+            };
         }
         let (needed_from, front_s) = match self.candidates.front() {
             Some(&Candidate::Time(sample)) => (sample.t, sample.s),
@@ -1514,9 +1522,8 @@ impl WidthField {
     /// zero width would space the nodes after it, and a motion shorter than
     /// half a ramp time between two rests would keep no open node, a ratio
     /// step in it unramped.
-    fn keep_if_due(&mut self, sample: TimeSample, base: f64) {
+    fn keep_if_due(&mut self, sample: TimeSample, base: f64, rest_ahead: f64) {
         let ramp_time = self.ramp_time_at(sample.t);
-        let rest_ahead = self.rest_ahead();
         let target = (base * ramp_time / RATIO_RAMP_MIN_TIME_S)
             .max(self.seam_width_at(sample.t, sample.s, rest_ahead));
         let last_kept = self

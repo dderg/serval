@@ -52,6 +52,7 @@ EXPECTED_ROW_S = {
     "cancel_macro_mesh": 100,
     "end_print_mesh": 170,
     "firmware_restart": 110,
+    "host_restart": 260,
     "estop": 120,
     "estop_g4": 130,
     "soak_mesh_session": SOAK_SESSION_ROW_S,

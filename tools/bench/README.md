@@ -117,6 +117,7 @@ Bounds are `Bound` constants in `session_scenarios.py`, each naming the issue it
 | post_check | all | a post-check move fails, or klippy is not ready after it |
 | stop_after_pause / _cancel / _firmware_restart | pause_resume, pause_cancel, cancel_plain, firmware_restart | steps go on > 6 s after the request (#844) |
 | stop_after_emergency_stop | estop, estop_g4 | steps go on > 0.1 s after the request (#406) |
+| stop_after_host_restart | host_restart | steps go on > 35 s after the request, or resume before the next print (#939; RESTART plays out the queued motion, which main-firmware_restart measured at 26.9 s) |
 | second_print | print_twice, cancel_then_print | the last completed print's motion span differs > 10 % from the first's (#843) |
 | pacer_reserve | print_twice, cancel_then_print | `pacer_reserve_raised.reserve_s` > 2 s (#843) |
 
@@ -134,10 +135,13 @@ A stop check also fails when no motion was in flight at the request: such a run 
 | cancel_macro_mesh | #406 | + macros, mesh | first_layers, mesh loaded | cancel +20 s (macro clears the mesh) |
 | end_print_mesh | #362 | + macros, mesh | first 1500 lines, mesh loaded, END_PRINT (no leading M400) | print |
 | firmware_restart | #844 | printer.cfg | first_layers | FIRMWARE_RESTART +20 s |
+| host_restart | #939 | + `heater_without_load.cfg` | first 1500 lines, extruder heated to full power after the preamble, `TURN_OFF_HEATERS` before the ending | RESTART +20 s; print again 5 s after the first ends |
 | estop | #855 | printer.cfg | first_layers | e-stop +20 s, FIRMWARE_RESTART +5.5 s, wait 10 s |
 | estop_g4 | #406 | printer.cfg | first 200 lines, 120-stroke zigzag, `G4 P1` | e-stop 2 s after the reader reaches `G4 P1`, FIRMWARE_RESTART +5.5 s, wait 10 s |
 
 The e-stop recovery lands 5.5 s after the e-stop because the stepcompress barrier deadline latches the false endpoint death 5.2–5.4 s after it (#869); a restart just after that latch aborted klippy 5 s later on main (#855). The 10 s wait keeps that abort inside the journal window.
+
+The bench's only output with a `max_duration` is the extruder heater on PA1 (3 s, `MAX_HEAT_TIME`); no heater is wired to it and its sensor is `temperature_mcu`, so heating never raises the reading and `heater_without_load.cfg` lifts verify_heater's gain check. The capture board does not record PA1: `host_restart` cannot observe the heater pin, only what a pin left on across the restart causes (`Previous MCU 'mcu' shutdown: Missed scheduling of next digital out event`, failing the shutdown, outcomes and actions checks), plus the drain and the quiet stepper lines until the next print.
 
 No session row is analyzed: the analyzer plans its reference from the gcode alone, without a bed mesh, as one uninterrupted print, and every session row has a mesh, an interruption or several prints. `scripts/preflight.py --mesh` (branch `preflight`) replays a meshed print through the planner but yields no step reference. `session_checks.json` names the reason (`not_analyzed`).
 

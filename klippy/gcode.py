@@ -9,6 +9,8 @@ import os
 import re
 import shlex
 
+import greenlet
+
 from . import APP_NAME, mathutil
 
 
@@ -321,6 +323,8 @@ class GCodeDispatch:
                 self.printer.send_event("gcode:command_error")
                 if not need_ack:
                     raise
+            except greenlet.GreenletExit:
+                raise
             except:
                 msg = 'Internal error on command:"%s"' % (cmd,)
                 logging.exception(msg)
