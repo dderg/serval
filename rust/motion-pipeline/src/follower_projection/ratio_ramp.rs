@@ -1128,6 +1128,16 @@ impl Candidate {
             Self::Rest(s) => s,
         }
     }
+
+    /// Where the leaders rest, if this candidate is a rest: a rest itself,
+    /// or a sample whose base is none.
+    fn rest(&self) -> Option<f64> {
+        match *self {
+            Self::Rest(s) => Some(s),
+            Self::Time(sample) if sample.base == Some(0.0) => Some(sample.s),
+            Self::Time(_) => None,
+        }
+    }
 }
 
 /// A ratio step as its ramp time is derived: where and when the leaders
@@ -1434,12 +1444,18 @@ impl WidthField {
         self.candidates
             .iter()
             .skip(1)
-            .find_map(|candidate| match *candidate {
-                Candidate::Rest(s) => Some(s),
-                Candidate::Time(sample) if sample.base == Some(0.0) => Some(sample.s),
-                Candidate::Time(_) => None,
-            })
+            .find_map(Candidate::rest)
             .unwrap_or(f64::INFINITY)
+    }
+
+    /// The last rest at or before `s` among the candidates still to become
+    /// nodes.
+    fn pending_rest_before(&self, s: f64) -> Option<f64> {
+        self.candidates
+            .iter()
+            .filter(|candidate| candidate.s() <= s)
+            .filter_map(Candidate::rest)
+            .reduce(f64::max)
     }
 
     /// Turns every candidate at or before `through` whose base is known
@@ -2231,25 +2247,31 @@ impl RatioSmoothing {
             .map_or(self.floor, |rest| rest.end.max(self.floor))
     }
 
-    /// The valley at the crawl `turn`, unless the last one laid already
-    /// holds the weight flat at zero there ([`AdvanceValley::holds_zero_at`]):
-    /// a crawl at a seam is the slowest point of the leg before or after it
-    /// too, read a hair inside that leg. Each side is as wide as its rebuild
+    /// The valley at the crawl `turn`, unless one laid already holds the
+    /// weight flat at zero there ([`Self::holds_zero_at`]). Each side is as
+    /// wide as its rebuild
     /// needs ([`crawl_side`]), past the leaders' `reach`; the before side
     /// only where the valley does not widen the last one over it
     /// ([`Self::place_valley`]). Where no before side reaching no further
-    /// back than the leaders last rested fits, the valley holds the weight
-    /// at zero back to there instead: the leaders leave that rest with no
-    /// lead to release, and the after side rebuilds it. A follower the
-    /// turning guard does not hold ([`guarded_by_the_turning_guard`]) has
-    /// no room left for its sides: its before side is the leaders' reach,
-    /// as far back as the projection still holds the path.
+    /// back than the leaders last rested, nor into the path the projection
+    /// has taken, fits, the valley holds the weight at zero back to the rest
+    /// instead: the leaders leave that rest with no lead to release, and the
+    /// after side rebuilds it. A follower the turning guard does not hold
+    /// ([`guarded_by_the_turning_guard`]) has no room left for its sides:
+    /// its before side is the leaders' reach, as far back as the projection
+    /// still holds the path.
     ///
     /// For a follower the guard holds, a ratio step of either table within
     /// [`geometry::crawl_step_window`] of the crawl, or inside a side, is
     /// the valley's own ([`StepWindows`]): the weight is held at zero over
     /// its capped window, so the advance reads none of its ramp, and the
-    /// sides start past it, from the leaders crossing its edges.
+    /// sides start past it, from the leaders crossing its edges. Steps
+    /// spaced closer than the reach, a slicer's line widths along an
+    /// outline, would each pull the before side past the next one back to
+    /// the last rest: a step inside the before side is owned only where a
+    /// side of the leaders' reach past it still lies on untaken path, or
+    /// the rest does. One left inside the side ramps there, under
+    /// [`Self::assert_ramp_in_a_crawl_side_fits`].
     fn lay_valley(
         &mut self,
         tables: (&[RatioSpan], &[RatioSpan]),
@@ -2259,11 +2281,7 @@ impl RatioSmoothing {
         table_end: f64,
     ) -> Result<(), Unlaid> {
         let turn = crawl.0;
-        if self
-            .valleys
-            .last()
-            .is_some_and(|valley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM))
-        {
+        if self.holds_zero_at(turn) {
             return Ok(());
         }
         self.refresh_clusters();
@@ -2272,6 +2290,10 @@ impl RatioSmoothing {
         let untaken = |s: f64| self.step_window_untaken(s);
         steps.own_within(tables, (turn - steps.window, turn + steps.window), &untaken);
         let rested = self.rested_through(turn);
+        let held = turn - self.back_reach_limit(turn);
+        let window = steps.window;
+        let leaves_a_side_untaken = |s: f64| rested >= held || s - window - reach >= held;
+        let ownable = |s: f64| untaken(s) && leaves_a_side_untaken(s);
         let laid = (&*self, tables.1, table_end);
         let (zero, sides, floors) = loop {
             let zero = steps.zero_stretch();
@@ -2290,7 +2312,7 @@ impl RatioSmoothing {
             } else if widens_the_last {
                 (zero.0, reach)
             } else {
-                crawl_side(Side::Before, edges.0, reach, laid, rule, zero.0 - rested)?
+                crawl_side(Side::Before, edges.0, reach, laid, rule, zero.0 - rested.max(held))?
                     .map_or((rested, 0.0), |before| (zero.0, before))
             };
             let side_from = if widens_the_last {
@@ -2298,7 +2320,7 @@ impl RatioSmoothing {
             } else {
                 start - before
             };
-            if !steps.own_within(tables, (side_from, zero.1 + after), &untaken) {
+            if !steps.own_within(tables, (side_from, zero.1 + after), &ownable) {
                 break (
                     (start, zero.1),
                     (before, after),
@@ -2338,6 +2360,21 @@ impl RatioSmoothing {
         self.taken_through <= read_from
     }
 
+    /// Whether a valley laid holds the weight flat at zero at the crawl
+    /// `turn` ([`AdvanceValley::holds_zero_at`]): the last one, or any one
+    /// where `turn` lies no further back than the last one's zero stretch.
+    /// A crawl at a seam is the slowest point of the leg before or after it
+    /// too, read a hair inside that leg, and a crawl valley's flat floor
+    /// runs on past a rest valley laid at its end, a retract after a
+    /// reversal.
+    fn holds_zero_at(&self, turn: f64) -> bool {
+        let Some(last) = self.valleys.last() else {
+            return false;
+        };
+        let held = |valley: &AdvanceValley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM);
+        held(last) || (turn >= last.start && self.valleys.iter().any(held))
+    }
+
     fn last_crawl_reach_end(&self) -> f64 {
         self.valleys
             .iter()
@@ -2362,11 +2399,7 @@ impl RatioSmoothing {
         ((start, end), (before, after)): ((f64, f64), (f64, f64)),
         (floor_before, floor_after): (f64, f64),
     ) {
-        if self
-            .valleys
-            .last()
-            .is_some_and(|valley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM))
-        {
+        if self.holds_zero_at(turn) {
             return;
         }
         if let Some(laid) = self
@@ -2942,11 +2975,21 @@ impl RatioSmoothing {
         far
     }
 
-    /// How far back from `s` its window averages the table.
+    /// How far back from `s` its window averages the table. Past the last
+    /// width node that node's width stands in, but no further back than
+    /// `|h'| ≤ λ` lets the width rise off a rest still to become a node: no
+    /// window reads across a rest.
     pub(super) fn reach_back(&self, s: f64) -> f64 {
-        match (self.width.nodes.first(), self.width.nodes.last()) {
-            (Some(first), Some(last)) if s >= first.s => self.width.width(s.min(last.s)),
-            _ => 0.0,
+        let (Some(first), Some(last)) = (self.width.nodes.first(), self.width.nodes.last()) else {
+            return 0.0;
+        };
+        if s < first.s {
+            return 0.0;
+        }
+        let width = self.width.width(s.min(last.s));
+        match self.width.pending_rest_before(s) {
+            Some(rest) if s > last.s => width.min(WIDTH_SLOPE_BOUND * (s - rest).max(0.0)),
+            _ => width,
         }
     }
 
@@ -3084,19 +3127,25 @@ impl RatioSmoothing {
     /// Fails loudly where the ramp of a ratio step of `table` reaches `s`
     /// inside a crawl valley's side of a follower the turning guard holds
     /// ([`guarded_by_the_turning_guard`]) and the follower's acceleration
-    /// there, its flow's `flow_accel` and the advance's slope times
-    /// `advanced_accel`, the second time derivative of the weighted read,
-    /// passes its limit: the ramp's rule and the side's rebuild each fit it
-    /// alone, and nothing budgets their sum. Such a valley owns the steps
-    /// inside its sides and holds the weight at zero over their windows
-    /// ([`Self::lay_valley`]); a step past a side whose window reaches back
-    /// into it is not owned. A follower behind its own kernel has that
-    /// kernel spread both.
+    /// there passes its limit: its flow's `flow_accel` and the advance's
+    /// slope times `ramp_and_rebuild`, the terms of the weighted read's
+    /// second time derivative the ramp's slopes and the side's weight
+    /// make, `3R'·ṡ·s̈ + R''·ṡ³` with `R = W·r̃`. The ramp's rule and the
+    /// side's rebuild each fit it alone, and nothing budgets their sum. The
+    /// leaders' own `R·s⃛` is left to what bounds it from their motion, the
+    /// turning guard and [`crawl_side`]'s mean over each probe interval:
+    /// read at `s` off their fit, which holds acceleration within its
+    /// tolerance and leaves jerk free, a sliver piece carries billions of
+    /// mm/s³ wherever it lies. Such a valley owns the steps inside its sides
+    /// and holds the weight at zero over their windows ([`Self::lay_valley`]);
+    /// a step past a side whose window reaches back into it, or one owning
+    /// would push the side onto taken path, is not owned. A follower behind
+    /// its own kernel has that kernel spread both.
     pub(super) fn assert_ramp_in_a_crawl_side_fits(
         &self,
         table: Table,
         s: f64,
-        (flow_accel, advanced_accel): (f64, f64),
+        (flow_accel, ramp_and_rebuild): (f64, f64),
     ) {
         let Some(rule) = self.width.rule.filter(guarded_by_the_turning_guard) else {
             return;
@@ -3107,7 +3156,7 @@ impl RatioSmoothing {
         else {
             return;
         };
-        let accel = (flow_accel + rule.advance_slope_s * advanced_accel).abs();
+        let accel = (flow_accel + rule.advance_slope_s * ramp_and_rebuild).abs();
         if accel <= rule.max_accel_mm_s2 {
             return;
         }

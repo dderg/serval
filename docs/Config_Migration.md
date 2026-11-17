@@ -378,7 +378,7 @@ too, so the macro stays portable in both directions:
 
 | Command | Fork behavior |
 |---|---|
-| `SET_VELOCITY_LIMIT` | Still registered. Accepts `VELOCITY>0`, `ACCEL>0`, and one of `SQUARE_CORNER_VELOCITY>=0` or `CORNER_DEVIATION>=0`. `MINIMUM_CRUISE_RATIO` and `ACCEL_TO_DECEL` are accepted as command-level legacy no-ops. With no values it reports velocity, acceleration, and corner values. |
+| `SET_VELOCITY_LIMIT` | Still registered. Accepts `VELOCITY>0`, `ACCEL>0`, and one of `SQUARE_CORNER_VELOCITY>=0` or `CORNER_DEVIATION>0`. `MINIMUM_CRUISE_RATIO` and `ACCEL_TO_DECEL` are accepted as command-level legacy no-ops. With no values it reports velocity, acceleration, and corner values. |
 | `RESET_VELOCITY_LIMIT` | Still registered; clears the dynamic velocity, acceleration, and corner-deviation caps. |
 | `SET_PRESSURE_ADVANCE` | Compatibility command. Accepts optional `EXTRUDER`, `ADVANCE>=0`, and `SMOOTH_TIME>=0`, and updates named post-processors. |
 | `SET_INPUT_SHAPER` | Not registered; no command equivalent. Change the post-processor configuration instead. |

@@ -84,6 +84,30 @@ fn steps_with_ratios(ratio: impl Strategy<Value = f64>) -> impl Strategy<Value =
     ]
 }
 
+/// Runs of short strokes, each at its own ratio, mostly one way: a
+/// slicer's lines along an outline, whose ratio steps lie closer together
+/// than the valley of the turnaround after them reaches.
+fn dense_stroke_strategy() -> impl Strategy<Value = Step> {
+    (
+        prop::bool::weighted(0.15),
+        0.05..1.5_f64,
+        10.0..200.0_f64,
+        0.0..300.0_f64,
+        0.5..1.5_f64,
+        0.01..0.1_f64,
+    )
+        .prop_map(
+            |(reverse, length, pace, end_speed, shaped_speed_scale, ratio)| Step::Stroke {
+                reverse,
+                length,
+                pace,
+                end_speed,
+                shaped_speed_scale,
+                ratio,
+            },
+        )
+}
+
 /// One segment as the oracle knows it: its shaped leader distance along
 /// the line as a cubic in local time from where along the travelled path
 /// it starts, its ratio, or the extrude-only cubic it moves the extruder
@@ -941,6 +965,25 @@ proptest! {
         let track = build_profiled_track(heading, &steps, Profile::Quintic);
         let limits = limits.map(|limits| track.extruder_peaks.limits_above(advance_k, limits));
         let chains = chains(limited(follower_chain(Some(advance_k), smooth_time), limits));
+        let one_shot = project_all_at_once(&track, &chains);
+        let streamed = project_streamed(&track, &chains, &batch_sizes);
+        assert_streams_like_one_shot(&streamed, &one_shot)?;
+    }
+
+    /// An advance the turning guard holds, along outlines of short lines at
+    /// their own ratios into a turnaround, whose crawl valley owns the
+    /// steps inside its sides.
+    #[test]
+    fn an_advance_streams_dense_ratio_steps_like_it_projects_all_at_once(
+        heading in 0.0..std::f64::consts::TAU,
+        steps in prop::collection::vec(dense_stroke_strategy(), 4..24),
+        batch_sizes in prop::collection::vec(1..4_usize, 1..4),
+        advance_k in 0.005..0.08_f64,
+        limits in follower_limits_strategy(),
+    ) {
+        let track = build_profiled_track(heading, &steps, Profile::Quintic);
+        let limits = limits.map(|limits| track.extruder_peaks.limits_above(advance_k, limits));
+        let chains = chains(limited(follower_chain(Some(advance_k), None), limits));
         let one_shot = project_all_at_once(&track, &chains);
         let streamed = project_streamed(&track, &chains, &batch_sizes);
         assert_streams_like_one_shot(&streamed, &one_shot)?;
