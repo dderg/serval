@@ -45,6 +45,7 @@ ACTION_PATHS = {
     Act.RESUME: "/printer/print/resume",
     Act.CANCEL: "/printer/print/cancel",
     Act.FIRMWARE_RESTART: "/printer/firmware_restart",
+    Act.HOST_RESTART: "/printer/restart",
     Act.EMERGENCY_STOP: "/printer/emergency_stop",
 }
 POST_CHECK = (
