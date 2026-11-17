@@ -135,6 +135,11 @@ fn stall_detection_fires_when_floor_stuck() {
     );
 }
 
+const ADVANCING_SPANS: u32 = 60;
+const STALL_TIMEOUT_MS: u64 = 60;
+const BEAT_MS: u64 = 3;
+const _: () = assert!(BEAT_MS * (ADVANCING_SPANS as u64 - 1) >= 2 * STALL_TIMEOUT_MS);
+
 #[test]
 fn advancing_lane_does_not_hide_a_stalled_lane() {
     let advancing = AxisKey { mcu_id: 0, axis: 0 };
@@ -169,7 +174,9 @@ fn advancing_lane_does_not_hide_a_stalled_lane() {
             .map(|key| LaneProjection {
                 epoch_freq: None,
                 key,
-                spans: (0..20).map(|i| span_dur(i as u64, 0.003)).collect(),
+                spans: (0..ADVANCING_SPANS)
+                    .map(|i| span_dur(u64::from(i), 0.003))
+                    .collect(),
                 epoch: crate::anchor::StreamEpoch::Continuation,
                 lead_secs: DRIP_WINDOW_SECS,
                 source_line: SOURCE_LINE,
@@ -179,7 +186,7 @@ fn advancing_lane_does_not_hide_a_stalled_lane() {
     .unwrap();
 
     let send_deadline = Instant::now() + Duration::from_secs(2);
-    while sink.sent().len() < 40 {
+    while sink.sent().len() < 2 * ADVANCING_SPANS as usize {
         assert!(
             Instant::now() < send_deadline,
             "pump did not send both lanes"
@@ -190,11 +197,14 @@ fn advancing_lane_does_not_hide_a_stalled_lane() {
     ctl.send(PumpMsg::DripArm(DripArm {
         cohort: 56,
         participants: vec![advancing, stalled],
-        timeout: Duration::from_millis(60),
+        timeout: Duration::from_millis(STALL_TIMEOUT_MS),
     }))
     .unwrap();
 
-    for retired in 1..=5 {
+    for retired in 1..ADVANCING_SPANS {
+        if !stall_msgs.lock_ok().is_empty() {
+            break;
+        }
         ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
             mcu_id: 0,
             axes: vec![0, 1],
@@ -203,8 +213,18 @@ fn advancing_lane_does_not_hide_a_stalled_lane() {
             retired_by: RetiredBy::Pulse,
         }))
         .unwrap();
-        std::thread::sleep(Duration::from_millis(20));
+        let (taken_tx, taken_rx) = std::sync::mpsc::sync_channel(1);
+        ctl.send(PumpMsg::Barrier(taken_tx)).unwrap();
+        taken_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|_| panic!("pump did not take heartbeat {retired}"));
+        std::thread::sleep(Duration::from_millis(BEAT_MS));
     }
+    assert!(
+        !stall_msgs.lock_ok().is_empty(),
+        "the stalled lane did not fault while the other advanced {} times",
+        ADVANCING_SPANS - 1
+    );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
