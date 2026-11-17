@@ -25,8 +25,14 @@ fn plan(config_text: &str, gcode: &str) {
 fn bell_shaped_leaders_carry_a_z_and_e_move() {
     let config = bench_config_with(
         &[
-            ("type: smooth_mzv\nfrequency_hz: 50", "type: smooth_bell\nsmooth_time: 0.02"),
-            ("type: smooth_zv\nfrequency_hz: 44", "type: smooth_bell\nsmooth_time: 0.025"),
+            (
+                "type: smooth_mzv\nfrequency_hz: 50",
+                "type: smooth_bell\nsmooth_time: 0.02",
+            ),
+            (
+                "type: smooth_zv\nfrequency_hz: 44",
+                "type: smooth_bell\nsmooth_time: 0.025",
+            ),
         ],
         "",
     );
@@ -45,15 +51,24 @@ fn recipr_advance_rides_unshaped_leaders_through_epochs() {
         .take(28)
         .collect::<Vec<_>>()
         .join("\n");
-    plan(&std::fs::read_to_string(Path::new(&config)).unwrap(), &gcode);
+    plan(
+        &std::fs::read_to_string(Path::new(&config)).unwrap(),
+        &gcode,
+    );
 }
 
 #[test]
 fn mode_inverse_after_the_kernels_turns_a_corner() {
     let config = bench_config_with(
         &[
-            ("post_processors: shaper_x\n", "post_processors: shaper_x, inv_x\n"),
-            ("post_processors: shaper_y\n", "post_processors: shaper_y, inv_y\n"),
+            (
+                "post_processors: shaper_x\n",
+                "post_processors: shaper_x, inv_x\n",
+            ),
+            (
+                "post_processors: shaper_y\n",
+                "post_processors: shaper_y, inv_y\n",
+            ),
         ],
         "\n[post_processor inv_x]\ntype: mode_inverse\nfrequency_hz: 50\ndamping_ratio: 0.1\n\
          \n[post_processor inv_y]\ntype: mode_inverse\nfrequency_hz: 44\ndamping_ratio: 0.1\n",
