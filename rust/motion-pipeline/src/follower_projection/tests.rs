@@ -247,9 +247,12 @@ fn an_odometer_leaf_grows_at_the_speed_between_its_nodes() {
         1.0 + 1e-4 * libm::exp(-offset * offset)
     };
     let mut leaves = Vec::new();
-    super::odometer_leaves(&speed, 0.0, duration, &mut |end, leaf| {
-        leaves.push((end, leaf))
-    });
+    super::odometer_leaves(
+        &speed,
+        (0.0, duration),
+        &super::EndZones::default(),
+        &mut |end, leaf| leaves.push((end, leaf)),
+    );
     let mut start = 0.0;
     let half_stencil = 1e-10;
     for (end, leaf) in &leaves {
@@ -2985,4 +2988,36 @@ fn a_constant_source_stays_constant_whatever_is_laid_past_it() {
     };
     assert!(constant_of(&alone).is_some());
     assert_eq!(constant_of(&followed), constant_of(&alone));
+}
+
+/// A piece over `[2, 3]` whose velocity `10·(u − 0.5)` crosses zero at
+/// 2.5 isolates that reversal to where the velocity stays within the
+/// odometer's rate tolerance, 1e-7 either side; a piece whose velocity
+/// keeps its sign has none.
+#[test]
+fn a_piece_isolates_its_velocity_reversal() {
+    let reversing = BezierPiece {
+        u_start: 2.0,
+        u_end: 3.0,
+        coeffs: vec![3.0, -5.0, 5.0],
+    };
+    let mut reversals = Vec::new();
+    super::VelocityControls::of(&reversing).reversals(&mut reversals);
+    assert!(
+        reversals.iter().any(|&(from, to)| from <= 2.5 && to >= 2.5),
+        "{reversals:?}"
+    );
+    let reach = 4e-7;
+    for &(from, to) in &reversals {
+        assert!(from >= 2.5 - reach && to <= 2.5 + reach, "{from}..{to}");
+    }
+
+    let monotone = BezierPiece {
+        u_start: 2.0,
+        u_end: 3.0,
+        coeffs: vec![3.0, 1.0, 5.0],
+    };
+    let mut none = Vec::new();
+    super::VelocityControls::of(&monotone).reversals(&mut none);
+    assert!(none.is_empty(), "{none:?}");
 }
