@@ -42,6 +42,39 @@ def test_a_capture_without_steps_has_no_spans():
     assert session_evidence.activity_spans(deltas, TICK_HZ, START) == []
 
 
+def _state(t: float, klippy: str) -> dict:
+    return {"t": t, "klippy": klippy, "print": "standby"}
+
+
+def test_a_restart_is_timed_to_ready_and_to_the_first_motion_after_it():
+    actions = [
+        {"act": "pause", "sent": START + 1.0},
+        {"act": "firmware_restart", "sent": START + 10.0},
+    ]
+    states = [
+        _state(START, "ready"),
+        _state(START + 10.5, "startup"),
+        _state(START + 11.3, "ready"),
+    ]
+    spans = [[START + 2.0, START + 9.0, 50], [START + 27.8, START + 28.0, 9]]
+
+    [timing] = session_evidence.restart_timings(actions, states, spans)
+
+    assert timing["act"] == "firmware_restart"
+    assert timing["ready_s"] == pytest.approx(1.3)
+    assert timing["first_motion_s"] == pytest.approx(17.8)
+
+
+def test_a_restart_that_never_moved_again_has_no_first_motion():
+    actions = [{"act": "host_restart", "sent": START}]
+    states = [_state(START + 0.5, "startup"), _state(START + 1.0, "ready")]
+
+    [timing] = session_evidence.restart_timings(actions, states, [])
+
+    assert timing["ready_s"] == pytest.approx(1.0)
+    assert timing["first_motion_s"] is None
+
+
 def test_only_klippy_and_print_state_changes_are_kept():
     samples = [
         {

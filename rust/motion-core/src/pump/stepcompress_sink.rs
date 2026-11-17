@@ -306,6 +306,9 @@ struct StepBuzz {
     signals: Vec<Option<Arc<MotorSpan>>>,
     anchor_clock_exact: f64,
     cycles_per_second: f64,
+    /// Each motor's slope before the buzz moved it onto `cycles_per_second`;
+    /// the next stream continues on it.
+    epoch_rates: Vec<f64>,
     stream_t_origin: f64,
     next_stream_t: f64,
     stream_t_end: f64,
@@ -380,6 +383,7 @@ pub mod clock_probe {
             signals: Vec::new(),
             anchor_clock_exact,
             cycles_per_second,
+            epoch_rates: Vec::new(),
             stream_t_origin,
             next_stream_t: stream_t_origin,
             stream_t_end: stream_t_origin,
@@ -800,6 +804,7 @@ impl StepcompressEndpoint {
         sign_mask: u8,
         profile: &Arc<BuzzProfile>,
         start_clock: u64,
+        clock_freq_hz: f64,
     ) -> Result<(), SendError> {
         if self.buzz.is_some() {
             return Err(self.fatal("resonance buzz is already active"));
@@ -841,17 +846,21 @@ impl StepcompressEndpoint {
                 "resonance buzz axis mask 0x{axis_mask:02x} selects no motor"
             )));
         }
+        let mut epoch_rates = Vec::with_capacity(self.lanes.len());
         for motor in 0..self.lanes.len() {
+            epoch_rates.push(self.shim.motor_cycles_per_second(motor));
             if signals[motor].is_some() {
                 self.shim
                     .detach_span_seam(motor)
                     .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+                self.shim.set_motor_cycles_per_second(motor, clock_freq_hz);
             }
         }
         self.buzz = Some(StepBuzz {
             signals,
             anchor_clock_exact: start_clock as f64,
-            cycles_per_second: self.shim.motor_cycles_per_second(0),
+            cycles_per_second: clock_freq_hz,
+            epoch_rates,
             stream_t_origin: profile.t_start(),
             next_stream_t: profile.t_start(),
             stream_t_end: profile.t_end(),
@@ -1161,7 +1170,10 @@ impl StepcompressEndpoint {
             lane.seams.clear();
             lane.commanded_base = self.shim.commanded_position(motor);
             if let Some(buzz) = &mut self.buzz {
-                buzz.signals[motor] = None;
+                if buzz.signals[motor].take().is_some() {
+                    self.shim
+                        .set_motor_cycles_per_second(motor, buzz.epoch_rates[motor]);
+                }
             }
         }
         if self
@@ -2013,6 +2025,8 @@ impl StepcompressEndpoint {
                     self.shim
                         .detach_span_seam(motor)
                         .map_err(|e| shim_error_to_send_error(self.mcu_id, e))?;
+                    self.shim
+                        .set_motor_cycles_per_second(motor, buzz.epoch_rates[motor]);
                 }
             }
         } else {
