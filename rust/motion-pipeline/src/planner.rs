@@ -10,10 +10,10 @@ use crate::step_capacity_log::{StepCapacityLog, StepCapacityReport};
 use approach::Approaches;
 
 mod approach;
-pub(crate) use approach::EARLY_RELEASE_S;
 use crate::fit_stage::Lookahead;
 use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig, StreamInput};
 use crate::worker_pool::WorkerPool;
+pub(crate) use approach::EARLY_RELEASE_S;
 
 /// Cost governor, not a lookahead bound: velocity planning is ~linear in the
 /// window, so re-planning on every arriving move would be quadratic. The window

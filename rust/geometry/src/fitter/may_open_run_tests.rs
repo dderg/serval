@@ -44,7 +44,13 @@ fn step(from: [f64; 3], angle: f64, length: f64) -> [f64; 3] {
 
 /// The third facet a circle through the pair's three vertices would
 /// continue with, at the second facet's chord, and spread around it.
-fn continuations(p0: [f64; 3], p1: [f64; 3], p2: [f64; 3], turns: &[f64], lengths: &[f64]) -> Vec<[f64; 3]> {
+fn continuations(
+    p0: [f64; 3],
+    p1: [f64; 3],
+    p2: [f64; 3],
+    turns: &[f64],
+    lengths: &[f64],
+) -> Vec<[f64; 3]> {
     let out = crate::vec3::sub(p2, p1);
     let out_angle = out[1].atan2(out[0]);
     let in_vec = crate::vec3::sub(p1, p0);
@@ -148,7 +154,10 @@ fn a_zigzag_near_reversal_cannot_open_a_run() {
     let deviation = 0.05;
     let first = line([60.0, 20.0, 0.3], [140.0, 20.0, 0.3], 0.00375, deviation);
     let second = line([140.0, 20.0, 0.3], [60.0, 20.4, 0.3], 0.00375, deviation);
-    assert!(arc_candidate_fits(&[first.clone(), second.clone()], config()));
+    assert!(arc_candidate_fits(
+        &[first.clone(), second.clone()],
+        config()
+    ));
     assert!(!may_open_run(&first, &second, config()));
 }
 

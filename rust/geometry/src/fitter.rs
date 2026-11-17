@@ -262,19 +262,20 @@ pub fn may_open_run(first: &Move, second: &Move, config: CornerFitConfig) -> boo
     let lean = |chord: f64| {
         let sagging = 2.0 * (t / rho).sqrt();
         let tilting = 2.0 * t / chord * rho / (rho - t) + longest / (2.0 * (rho - t));
-        (sagging.max(tilting) * (1.0 + RUN_BOUND_SLACK)).min(1.0).asin()
+        (sagging.max(tilting) * (1.0 + RUN_BOUND_SLACK))
+            .min(1.0)
+            .asin()
     };
     let (lean_a, lean_b) = (lean(a), lean(b));
-    let theta = libm::acos(
-        dot(line_a.heading_at(line_a.s_len()), line_b.heading_at(0.0)).clamp(-1.0, 1.0),
-    );
+    let theta =
+        libm::acos(dot(line_a.heading_at(line_a.s_len()), line_b.heading_at(0.0)).clamp(-1.0, 1.0));
     let heads_alike = theta - cone <= lean_a + lean_b;
     let psi_lo = PI - theta - cone;
     let psi_hi = PI - theta + cone;
     let alpha = lean_a.min(lean_b) + 0.5 * psi_hi;
     let stray = a.min(b) * alpha.cos() * (0.5 * psi_lo.max(0.0)).sin();
-    let doubles_back = alpha >= FRAC_PI_2
-        || stray <= t * (rho + t) / (rho - t) * (1.0 + RUN_BOUND_SLACK);
+    let doubles_back =
+        alpha >= FRAC_PI_2 || stray <= t * (rho + t) / (rho - t) * (1.0 + RUN_BOUND_SLACK);
     heads_alike || doubles_back
 }
 
@@ -938,6 +939,6 @@ mod consumption_tests;
 #[cfg(test)]
 mod cruise_onset_tests;
 #[cfg(test)]
-mod plan_velocity_bench;
-#[cfg(test)]
 mod may_open_run_tests;
+#[cfg(test)]
+mod plan_velocity_bench;

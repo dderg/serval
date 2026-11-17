@@ -755,8 +755,7 @@ impl FitStage {
         let seam = (self.seam_in_reduction, self.seam_head_trim);
         let half_mm = CLAIMED_SHARE * line.s_len();
         let unclaimed = plan_junction_reduced(m, next, self.corner, seam, (0.0, 0.0)).ok()?;
-        let claimed =
-            plan_junction_reduced(m, next, self.corner, seam, (half_mm, half_mm)).ok()?;
+        let claimed = plan_junction_reduced(m, next, self.corner, seam, (half_mm, half_mm)).ok()?;
         plans_alike(&unclaimed, &claimed).then_some((0.0, 0.0))
     }
 }

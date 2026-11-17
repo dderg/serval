@@ -19,27 +19,61 @@ const EXTRUDE_PER_MM: f64 = 0.035;
 /// One stretch of a generated stream, what slicers emit.
 #[derive(Debug, Clone)]
 enum Stretch {
-    Dense { count: usize, length: f64, turn: f64 },
-    Sparse { length: f64, turn: f64 },
-    Travel { length: f64, turn: f64 },
-    Reversal { length: f64, offset: f64 },
-    Arc { facets: usize, radius: f64, sweep: f64 },
-    Retract { de: f64 },
-    Accel { cap: Option<f64> },
-    Feed { mm_s: f64 },
+    Dense {
+        count: usize,
+        length: f64,
+        turn: f64,
+    },
+    Sparse {
+        length: f64,
+        turn: f64,
+    },
+    Travel {
+        length: f64,
+        turn: f64,
+    },
+    Reversal {
+        length: f64,
+        offset: f64,
+    },
+    Arc {
+        facets: usize,
+        radius: f64,
+        sweep: f64,
+    },
+    Retract {
+        de: f64,
+    },
+    Accel {
+        cap: Option<f64>,
+    },
+    Feed {
+        mm_s: f64,
+    },
     Drain,
 }
 
 fn stretch() -> impl Strategy<Value = Stretch> {
     prop_oneof![
-        (2_usize..12, 0.1_f64..2.0, -0.6_f64..0.6)
-            .prop_map(|(count, length, turn)| Stretch::Dense { count, length, turn }),
-        (15.0_f64..200.0, -3.1_f64..3.1).prop_map(|(length, turn)| Stretch::Sparse { length, turn }),
+        (2_usize..12, 0.1_f64..2.0, -0.6_f64..0.6).prop_map(|(count, length, turn)| {
+            Stretch::Dense {
+                count,
+                length,
+                turn,
+            }
+        }),
+        (15.0_f64..200.0, -3.1_f64..3.1)
+            .prop_map(|(length, turn)| Stretch::Sparse { length, turn }),
         (5.0_f64..200.0, -3.1_f64..3.1).prop_map(|(length, turn)| Stretch::Travel { length, turn }),
         (10.0_f64..150.0, -0.6_f64..0.6)
             .prop_map(|(length, offset)| Stretch::Reversal { length, offset }),
-        (3_usize..14, 2.0_f64..400.0, 0.02_f64..0.4)
-            .prop_map(|(facets, radius, sweep)| Stretch::Arc { facets, radius, sweep }),
+        (3_usize..14, 2.0_f64..400.0, 0.02_f64..0.4).prop_map(|(facets, radius, sweep)| {
+            Stretch::Arc {
+                facets,
+                radius,
+                sweep,
+            }
+        }),
         (0.2_f64..3.0).prop_map(|de| Stretch::Retract { de }),
         prop::option::of(1000.0_f64..10_000.0).prop_map(|cap| Stretch::Accel { cap }),
         (5.0_f64..400.0).prop_map(|mm_s| Stretch::Feed { mm_s }),
@@ -100,7 +134,11 @@ impl Layout {
 
     fn lay(&mut self, stretch: &Stretch) {
         match *stretch {
-            Stretch::Dense { count, length, turn } => {
+            Stretch::Dense {
+                count,
+                length,
+                turn,
+            } => {
                 for _ in 0..count {
                     self.heading += turn;
                     self.go(length, EXTRUDE_PER_MM * length);
@@ -119,7 +157,11 @@ impl Layout {
                 self.heading += std::f64::consts::PI + 1e-3 * offset;
                 self.go(length, EXTRUDE_PER_MM * length);
             }
-            Stretch::Arc { facets, radius, sweep } => {
+            Stretch::Arc {
+                facets,
+                radius,
+                sweep,
+            } => {
                 let chord = 2.0 * radius * (0.5 * sweep / facets as f64).sin();
                 for _ in 0..facets {
                     self.heading += sweep / facets as f64;
@@ -138,12 +180,26 @@ impl Layout {
 }
 
 fn assert_same(settled: &[PlannedItem], counted: &[PlannedItem]) -> Result<(), TestCaseError> {
-    prop_assert_eq!(settled.len(), counted.len(), "a different number of planned items");
+    prop_assert_eq!(
+        settled.len(),
+        counted.len(),
+        "a different number of planned items"
+    );
     for (index, (a, b)) in settled.iter().zip(counted).enumerate() {
         match (a, b) {
             (PlannedItem::Move(a), PlannedItem::Move(b)) => {
-                prop_assert_eq!(&a.geometry, &b.geometry, "move {} differs in geometry", index);
-                prop_assert_eq!(&a.velocity, &b.velocity, "move {} differs in velocity", index);
+                prop_assert_eq!(
+                    &a.geometry,
+                    &b.geometry,
+                    "move {} differs in geometry",
+                    index
+                );
+                prop_assert_eq!(
+                    &a.velocity,
+                    &b.velocity,
+                    "move {} differs in velocity",
+                    index
+                );
                 prop_assert_eq!(&a.budget, &b.budget, "move {} differs in budget", index);
             }
             (PlannedItem::Drain, PlannedItem::Drain) => {}

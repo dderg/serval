@@ -522,7 +522,9 @@ fn the_guard_holds_extrusion_with_the_leaders_at_rest_within_its_windows() {
 #[test]
 fn the_front_holds_a_zigzag_within_its_windows() {
     let chain = BenchChain::new();
-    chain.front_held(&zigzag()).assert_within_bound("the zigzag");
+    chain
+        .front_held(&zigzag())
+        .assert_within_bound("the zigzag");
 }
 
 #[test]
