@@ -1,11 +1,13 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use trajectory::{ContinuousSegment, NudgeProfile};
 
 use motion_pipeline::{BarrierAck, Control, DispatchCommand, TrajectoryItem};
 
 use super::{CommittedFrontier, fatal};
+use crate::lock_ext::LockExt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
@@ -78,11 +80,22 @@ pub(crate) struct WorkerLinks {
     /// motion queued ahead on it, and a stream sets off only with that much
     /// committed.
     reserve_bits: AtomicU64,
+    set_off_hold: Mutex<Option<SetOffHold>>,
     #[cfg(test)]
     pub(crate) pacer_drains: PacerDrains,
     pub(crate) fences: crate::fence::FenceRegistry,
     pub(crate) start_claims: super::StartClaims,
     pub(crate) wakeup: crate::feed_wakeup::FeedWakeup,
+}
+
+/// A stream at rest the dispatcher holds back from setting off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SetOffHold {
+    pub(crate) since: Instant,
+    /// Stream time held, from the first segment's start.
+    pub(crate) held_s: f64,
+    /// Stream time the held segments run through.
+    pub(crate) through_s: f64,
 }
 
 /// Brakes to rest the pacer ordered, by the path that ordered them; a
@@ -118,6 +131,10 @@ impl WorkerLinks {
         self.reserve_bits
             .store(reserve_s.to_bits(), Ordering::Release);
     }
+
+    pub(crate) fn set_off_hold(&self) -> Option<SetOffHold> {
+        *self.set_off_hold.lock_ok()
+    }
 }
 
 /// Final pipeline stage: dispatches shaped segments into the sink and
@@ -127,10 +144,13 @@ impl WorkerLinks {
 /// is reported at the next `Barrier`.
 ///
 /// A stream at rest sets off only once the pacer's reserve is committed past
-/// its start, or it ends at rest: the planning front releases the first
-/// segments of a stream while it still holds the motion behind them (#983:
-/// the lowerer's 8.4 ms rest hold, then 0.3-0.8 s of planning on the Pi), and
-/// a stream started on less could not be braked before its playhead overran.
+/// its start, it ends at rest, or a control token follows it: the planning
+/// front releases the first segments of a stream while it still holds the
+/// motion behind them (#983: the lowerer's 8.4 ms rest hold, then 0.3-0.8 s
+/// of planning on the Pi), and a stream started on less could not be braked
+/// before its playhead overran. A homing or probing move sets off as it
+/// comes: it is drained the moment it is sent, so nothing waits behind it,
+/// and its trigger timing stays as it was.
 pub(crate) struct Dispatcher {
     links: Arc<WorkerLinks>,
     frontier: Arc<CommittedFrontier>,
@@ -158,7 +178,7 @@ impl Dispatcher {
         if self.terminal_halt.is_none() {
             self.terminal_halt = Some(reason.to_string());
             self.dispatched_through = None;
-            self.setting_off.clear();
+            self.drop_hold();
             self.frontier.clear();
             self.links.fences.on_reset();
             self.links.wakeup.notify_fence_resolved();
@@ -188,17 +208,37 @@ impl Dispatcher {
 
     fn handle_segment(&mut self, seg: ContinuousSegment, sink: &mut impl SegmentSink) {
         if self.drops_segments() {
-            self.setting_off.clear();
+            self.drop_hold();
             return;
         }
-        if self.setting_off.is_empty() && !sink.sets_off(&seg) {
+        let homing = self.links.finite_homing_admission.load(Ordering::Acquire);
+        if self.setting_off.is_empty() && (homing || !sink.sets_off(&seg)) {
             self.dispatch(&seg, sink);
             return;
         }
-        self.setting_off.push(seg);
+        self.hold(seg);
         if self.held_off_secs() >= self.links.reserve_secs() {
             self.set_off(sink);
         }
+    }
+
+    fn hold(&mut self, seg: ContinuousSegment) {
+        let since = self
+            .links
+            .set_off_hold()
+            .map_or_else(Instant::now, |hold| hold.since);
+        let through_s = seg.t_end;
+        self.setting_off.push(seg);
+        *self.links.set_off_hold.lock_ok() = Some(SetOffHold {
+            since,
+            held_s: self.held_off_secs(),
+            through_s,
+        });
+    }
+
+    fn drop_hold(&mut self) {
+        self.setting_off.clear();
+        *self.links.set_off_hold.lock_ok() = None;
     }
 
     /// Stream time held back for the set-off, from its first segment on.
@@ -211,7 +251,9 @@ impl Dispatcher {
 
     /// Dispatches the segments held back for the set-off, in order.
     fn set_off(&mut self, sink: &mut impl SegmentSink) {
-        for seg in std::mem::take(&mut self.setting_off) {
+        let held = std::mem::take(&mut self.setting_off);
+        self.drop_hold();
+        for seg in held {
             if self.drops_segments() {
                 return;
             }
@@ -348,3 +390,6 @@ fn log_dispatch(seg: &ContinuousSegment) {
         "[pipe] dispatch"
     );
 }
+
+#[cfg(test)]
+mod tests;

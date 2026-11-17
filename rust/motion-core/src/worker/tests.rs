@@ -103,7 +103,59 @@ fn spawn_on_timeline(
     sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
 ) -> TestWorker {
-    spawn_recorded(config, chains, home, sink, timeline, None, None)
+    spawn_recorded(
+        config,
+        chains,
+        home,
+        sink,
+        timeline,
+        None,
+        Production::AsShaped,
+    )
+}
+
+/// How the shaped trajectory reaches the dispatcher.
+enum Production {
+    AsShaped,
+    /// The producer takes `gap` on `clock` to hand on the motion behind each
+    /// stream's first segment: #983's Pi, planning a slow section after the
+    /// lowerer's rest hold was out.
+    GapAfterFirstSegments {
+        clock: Arc<host_rt::clock::MockClock>,
+        gap: Duration,
+    },
+}
+
+impl Production {
+    /// Relays `shaped` to the dispatcher as this producer would hand it on.
+    fn relay(
+        self,
+        shaped: crossbeam_channel::Receiver<motion_pipeline::TrajectoryItem>,
+    ) -> crossbeam_channel::Receiver<motion_pipeline::TrajectoryItem> {
+        let Self::GapAfterFirstSegments { clock, gap } = self else {
+            return shaped;
+        };
+        let (relay, relayed) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+        std::thread::spawn(move || {
+            let mut segments_since_rest = 0_usize;
+            for item in shaped {
+                match item {
+                    motion_pipeline::TrajectoryItem::Seg(_) => {
+                        segments_since_rest += 1;
+                        if segments_since_rest == 2 {
+                            clock.advance(gap);
+                        }
+                    }
+                    motion_pipeline::TrajectoryItem::Parked => segments_since_rest = 0,
+                    motion_pipeline::TrajectoryItem::Control(_) => {}
+                }
+                if relay.send(item).is_err() {
+                    return;
+                }
+            }
+        });
+        relayed
+    }
 }
 
 fn spawn_recorded(
@@ -113,7 +165,7 @@ fn spawn_recorded(
     mut sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
     dispatch_record: Option<Arc<DispatchRecorder>>,
-    compute_charge: Option<ComputeCharge>,
+    production: Production,
 ) -> TestWorker {
     struct NoEndpoint;
     impl crate::pump::SpanSink for NoEndpoint {
@@ -128,7 +180,8 @@ fn spawn_recorded(
         }
     }
     let (control, control_rx) = crossbeam_channel::unbounded();
-    let (output, trajectory_rx) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+    let (output, shaped) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+    let trajectory_rx = production.relay(shaped);
     let links = Arc::new(WorkerLinks::default());
     let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&timeline.frontier));
     let admission = Arc::clone(&links);
@@ -160,7 +213,6 @@ fn spawn_recorded(
             trajectory: output,
             input_tap: None,
             dispatch_record,
-            compute_charge,
         },
         links,
         timeline,
@@ -930,7 +982,6 @@ fn finite_homing_admission_and_cancellation_preserve_backpressure() {
             trajectory: output,
             input_tap: None,
             dispatch_record: None,
-            compute_charge: None,
         },
         links,
         idle_timeline(frontier),
@@ -2382,7 +2433,7 @@ fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_pl
         sink.clone(),
         timeline,
         Some(Arc::clone(&record)),
-        None,
+        Production::AsShaped,
     );
     let mut at = [0.0_f64, 0.0, 0.0];
     let mut line_no = 1;

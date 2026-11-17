@@ -616,3 +616,19 @@ fn a_dwell_long_after_the_end_rests_until_a_fresh_start() {
 
     assert!((end_host + rest - (host_now + DEFAULT_LEAD_SECS)).abs() < 1e-9);
 }
+
+#[test]
+fn a_fresh_stream_sets_off_from_rest() {
+    assert!(Anchor::new().sets_off(0.0, 100.0));
+}
+
+#[test]
+fn a_stream_in_motion_continues_and_a_parked_one_sets_off_again() {
+    assert!(!primed(false).sets_off(1.0, 100.1));
+    assert!(primed(true).sets_off(1.0, 100.1));
+}
+
+#[test]
+fn a_reset_timeline_sets_off_even_from_motion() {
+    assert!(primed(false).sets_off(0.0, 100.1));
+}

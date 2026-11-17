@@ -29,7 +29,7 @@ use turning_guard::TurningGuard;
 
 pub use follower_projection::follower_velocity_step_allowance;
 pub use lower_stage::Lowerer;
-pub use staged::{ComputeCharge, SHAPER_INBOX_CAP, StagedPipeline};
+pub use staged::{SHAPER_INBOX_CAP, StagedPipeline};
 pub use types::{
     BarrierAck, BaseItem, CONTIGUITY_EPS_MM, Control, DispatchCommand, InputTrace, PlannedItem,
     StreamConfig, StreamError, StreamInput, TrajectoryItem, advance_odometer,

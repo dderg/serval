@@ -12,7 +12,7 @@ use motion_pipeline::{
     StreamInput, advance_odometer,
 };
 
-use super::dispatch::WorkerLinks;
+use super::dispatch::{SetOffHold, WorkerLinks};
 use super::intake_gate::{self, IntakeGate};
 use super::{ExecutionTimeline, HomeDripParams, NudgeParams, StreamMsg, fatal};
 use crate::dispatch_record::{DispatchRecorder, DrainCause};
@@ -22,6 +22,44 @@ mod pacer;
 
 use pacer::IdleVerdict;
 pub(super) use pacer::Pacer;
+
+/// How long a stream at rest may wait for its reserve to be committed: the
+/// widest intake cap. No stream the pacer keeps queues more motion ahead of
+/// its playhead, so a set-off still short of its reserve after that long is
+/// held back by a stage that keeps the motion behind it.
+const SET_OFF_STALL_S: f64 = pacer::RESERVE_CAP_S + intake_gate::STALL_HEADROOM_S;
+
+/// The stall, naming the stage that holds the motion, of a set-off held
+/// since `hold.since` that has not set off by `now`: a stream handed on
+/// through `planned_through_s` past the held segments sits in the shaper's
+/// threads, otherwise in the planning front.
+fn stalled_set_off(
+    hold: SetOffHold,
+    now: Instant,
+    planned_through_s: f64,
+    last_line: u32,
+) -> Option<String> {
+    let waited_s = now.saturating_duration_since(hold.since).as_secs_f64();
+    if waited_s < SET_OFF_STALL_S {
+        return None;
+    }
+    let holder = if planned_through_s > hold.through_s {
+        format!(
+            "the shaper holds the {:.3}s of planned motion past it",
+            planned_through_s - hold.through_s
+        )
+    } else {
+        format!(
+            "the planning front (fit stage, planner, turning guard, lowerer) holds every \
+             move fed after it, through line {last_line}"
+        )
+    };
+    Some(format!(
+        "set-off stalled: a stream at rest held {:.3}s of motion for {waited_s:.1}s, short \
+         of its reserve, and never parked: {holder}",
+        hold.held_s
+    ))
+}
 
 /// Proof the ingress just found its inbox empty: the idle path's runway
 /// rule only holds then, and a stream whose moves keep arriving is paced by
@@ -134,6 +172,7 @@ impl Ingress {
             if self.links.shutting_down.load(Ordering::Acquire) {
                 return;
             }
+            self.fail_a_stalled_set_off();
             let received = if self.pacer.undrained() {
                 match rx.try_recv() {
                     Ok(msg) => Some(msg),
@@ -220,6 +259,30 @@ impl Ingress {
                 received => return received,
             }
         }
+    }
+
+    fn fail_a_stalled_set_off(&self) {
+        let Some(hold) = self.links.set_off_hold() else {
+            return;
+        };
+        let Some(stall) = stalled_set_off(
+            hold,
+            Instant::now(),
+            self.pipeline.planned_through_s(),
+            self.last_line,
+        ) else {
+            return;
+        };
+        tracing::error!(
+            subsystem = "motion",
+            event = "set_off_stalled",
+            held_s = hold.held_s,
+            through_s = hold.through_s,
+            planned_through_s = self.pipeline.planned_through_s(),
+            last_line = self.last_line,
+            "[pacer] a stream at rest never committed its reserve nor parked"
+        );
+        fatal(&stall);
     }
 
     /// Starts a measured interval: marks the frontier and returns the runway

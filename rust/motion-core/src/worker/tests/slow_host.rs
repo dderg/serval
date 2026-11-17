@@ -1,29 +1,30 @@
 //! #983: on the Pi bench a short lead-in at print speed followed by a long
-//! slow section aborted klippy at the print start. The planning front held
-//! the lead-in until it had planned much of the slow section, but the shaper
-//! let the lowerer's 8.4 ms rest hold through first: the stream set off on
-//! it, and the motion behind it came 0.3-0.8 s later, past the lead. The
-//! pipeline's threads here wait out scaled CPU time, as a slower host would.
+//! slow section aborted klippy at the print start. The shaper let the
+//! lowerer's 8.4 ms rest hold through first while the planning front still
+//! held the motion behind it, and the Pi took 0.28-0.84 s to plan its way to
+//! that motion: the stream had set off on the hold, and its playhead
+//! overran it. Here the real pipeline plans the bench's print on a mock
+//! clock, and the producer takes the bench's longest gap to hand on the
+//! motion behind each stream's first segment.
 
 use super::*;
 use crate::anchor::LOW_MARGIN_WARN_SECS;
 use crate::seam_test_harness::LiveScript;
 use geometry::GcodePos;
-use motion_pipeline::StreamInput;
+use pipeline_snapshot::PlanStep;
 
-/// CPU time each pipeline thread waits out on top of spending it: a host
-/// three times slower than this one, past the Pi 5 bench's ~1.8.
-const HOST_SLOWDOWN: f64 = 2.0;
+/// crawl_s5's gap between the first segment and the next on the Pi bench.
+const BENCH_GAP_AFTER_FIRST_SEGMENT: Duration = Duration::from_millis(840);
 const CRAWL_S: f64 = 60.0;
 const PIECE_S: f64 = 2.0;
 const SIDES: usize = 6;
 const PRINT_FEED: f64 = 6000.0;
 const E_PER_MM: f64 = 0.0374;
 const SQUARE_HEADINGS: [(f64, f64); 4] = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)];
+const REST_BEFORE_THE_CRAWL: &str = "G4 P500";
 
 /// A dispatched segment the anchor would have aborted on: its start was
 /// `margin_s` ahead of the playhead, under the transport floor, mid-motion.
-#[derive(Debug)]
 struct Overrun {
     seg_t_start: f64,
     margin_s: f64,
@@ -91,10 +92,10 @@ fn extrude(x: f64, y: f64, mm: f64, feed: f64) -> String {
 }
 
 /// The bench's crawl rows (`crawl_gcode.py`): a 2.3 s lead-in at 100 mm/s,
-/// then `M220 S<factor_pct>` and `CRAWL_S` of extruding square laps in
-/// `PIECE_S` pieces that never come to rest, then the travel that ends the
-/// crawl and a retract.
-fn crawl_print(factor_pct: f64, crawl_feed: f64) -> String {
+/// `before_crawl`, then `M220 S<factor_pct>` and `CRAWL_S` of extruding
+/// square laps in `PIECE_S` pieces that never come to rest, then the travel
+/// that ends the crawl and a retract.
+fn crawl_print(factor_pct: f64, crawl_feed: f64, before_crawl: &[&str]) -> String {
     let speed_mm_s = crawl_feed / 60.0 * factor_pct / 100.0;
     let side_mm = speed_mm_s * CRAWL_S / SIDES as f64;
     let pieces = (side_mm / (speed_mm_s * PIECE_S)).round();
@@ -107,8 +108,9 @@ fn crawl_print(factor_pct: f64, crawl_feed: f64) -> String {
         extrude(140.0, 50.0, 100.0, PRINT_FEED),
         extrude(140.0, 60.0, 10.0, PRINT_FEED),
         extrude(40.0, 60.0, 100.0, PRINT_FEED),
-        format!("M220 S{factor_pct}"),
     ];
+    lines.extend(before_crawl.iter().map(ToString::to_string));
+    lines.push(format!("M220 S{factor_pct}"));
     let (mut x, mut y) = (40.0, 60.0);
     for side in 0..SIDES {
         let (dx, dy) = SQUARE_HEADINGS[side % SQUARE_HEADINGS.len()];
@@ -141,17 +143,21 @@ fn submit(h: &StreamWorkerHandle, m: &geometry::Move) {
     }
 }
 
-/// Prints `gcode` on the bench printer's config through a worker whose
-/// pipeline threads run `HOST_SLOWDOWN` times slower, on the real clock, and
-/// returns every segment the anchor would have aborted on.
+/// Prints `gcode` on the bench printer's config with each stream's
+/// producer handing on the motion behind its first segment the bench's
+/// gap later, and returns every segment the anchor would have aborted on.
 fn overruns_printing(gcode: &str) -> Vec<Overrun> {
-    let mut script = LiveScript::new(gcode, &bench_planner(), None, GcodePos([0.0; 3]))
+    let script = LiveScript::new(gcode, &bench_planner(), None, GcodePos([0.0; 3]))
         .unwrap_or_else(|e| panic!("crawl print: {e}"));
-    let inputs = script.take_inputs(None);
+    let clock = host_rt::clock::MockClock::new();
     let timeline = ExecutionTimeline {
         frontier: Arc::default(),
         anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
-        router: Arc::new(Mutex::new(real_router())),
+        router: Arc::new(Mutex::new(
+            host_rt::passthrough_queue::PassthroughRouter::with_clock(
+                Arc::clone(&clock) as Arc<dyn host_rt::clock::Clock + Send + Sync>
+            ),
+        )),
     };
     let watch = OverrunWatch {
         inner: AnchoredSink::on(&timeline),
@@ -164,48 +170,58 @@ fn overruns_printing(gcode: &str) -> Vec<Overrun> {
         watch.clone(),
         timeline,
         None,
-        Some(ComputeCharge {
-            scale: HOST_SLOWDOWN,
-            thread_cpu: host_rt::clock::thread_cpu_time,
-        }),
+        Production::GapAfterFirstSegments {
+            clock,
+            gap: BENCH_GAP_AFTER_FIRST_SEGMENT,
+        },
     );
-    for input in inputs {
-        let StreamInput::Move(m) = input else {
-            panic!("the crawl print rests nowhere, yet fed {input:?}");
-        };
-        submit(&h, &m);
+    for step in script.steps {
+        match step {
+            PlanStep::Move(m) => submit(&h, &m),
+            PlanStep::Rest { dwell_s } => h
+                .dwell_try_start(dwell_s)
+                .expect("the dwell is queued")
+                .recv()
+                .expect("the dwell is planned"),
+        }
     }
     h.flush().unwrap();
     h.shutdown();
     std::mem::take(&mut *watch.overruns.lock_ok())
 }
 
-fn assert_starts_without_overrun(factor_pct: f64, crawl_feed: f64) {
-    let overruns = overruns_printing(&crawl_print(factor_pct, crawl_feed));
+fn assert_starts_without_overrun(factor_pct: f64, crawl_feed: f64, before_crawl: &[&str]) {
+    let overruns: Vec<(f64, f64)> =
+        overruns_printing(&crawl_print(factor_pct, crawl_feed, before_crawl))
+            .iter()
+            .map(|overrun| (overrun.seg_t_start, overrun.margin_s))
+            .collect();
     assert!(
         overruns.is_empty(),
-        "a {CRAWL_S} s crawl at {} mm/s after a 2.3 s lead-in left segments within the \
-         {LOW_MARGIN_WARN_SECS} s transport floor of the playhead: {overruns:?}",
+        "a {CRAWL_S} s crawl at {} mm/s after a 2.3 s lead-in and {before_crawl:?} left \
+         segments (stream start, margin s) within the {LOW_MARGIN_WARN_SECS} s transport \
+         floor of the playhead: {overruns:?}",
         crawl_feed / 60.0 * factor_pct / 100.0
     );
 }
 
 #[test]
 fn a_crawl_at_one_mm_s_after_a_short_lead_in_starts_ahead_of_its_playhead() {
-    assert_starts_without_overrun(1.0, 6000.0);
+    assert_starts_without_overrun(1.0, 6000.0, &[]);
 }
 
 #[test]
 fn a_crawl_at_two_and_a_half_mm_s_after_a_short_lead_in_starts_ahead_of_its_playhead() {
-    assert_starts_without_overrun(5.0, 3000.0);
-}
-
-#[test]
-fn a_crawl_at_five_mm_s_after_a_short_lead_in_starts_ahead_of_its_playhead() {
-    assert_starts_without_overrun(5.0, 6000.0);
+    assert_starts_without_overrun(5.0, 3000.0, &[]);
 }
 
 #[test]
 fn a_crawl_at_ten_mm_s_after_a_short_lead_in_starts_ahead_of_its_playhead() {
-    assert_starts_without_overrun(10.0, 6000.0);
+    assert_starts_without_overrun(10.0, 6000.0, &[]);
+}
+
+/// The stream comes to rest inside the print and sets off again.
+#[test]
+fn a_crawl_after_a_rest_inside_the_print_sets_off_ahead_of_its_playhead() {
+    assert_starts_without_overrun(5.0, 3000.0, &[REST_BEFORE_THE_CRAWL]);
 }

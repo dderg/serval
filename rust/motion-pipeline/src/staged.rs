@@ -17,6 +17,9 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 use crate::leader_prefit::{LeaderGroupFits, LeaderPrefitter};
 use crate::shaper::{Shaper, SourceMaterializer};
 use crate::{BaseItem, Control, Pipeline, PlanningFront, StreamInput, TrajectoryItem};
+use compute_charge::{ChargeAccount, pay};
+
+mod compute_charge;
 
 /// Items each stage's inbox holds. Bounded so a slow shaper backpressures
 /// planning instead of buffering without limit: the pacer reads how far
@@ -37,58 +40,6 @@ pub const SHAPER_INBOX_CAP: usize = 2 * STAGE_INBOX_CAP + 1;
 /// How long dropping the pipeline waits for the shaper to finish the items
 /// already queued for it before detaching it with an error.
 const SHAPER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// A host `scale` times slower than this one, for the simulator, whose clock
-/// stands still while host threads compute: each pipeline thread waits out
-/// `scale` times the CPU time it spent before every item it hands on, so the
-/// item leaves when the slower host would have produced it.
-#[derive(Debug, Clone, Copy)]
-pub struct ComputeCharge {
-    pub scale: f64,
-    pub thread_cpu: fn() -> Duration,
-}
-
-/// One thread's charge: the CPU time it had spent when it last paid. Opened
-/// on the thread it charges, as the CPU clock is that thread's own.
-struct ChargeAccount {
-    charge: ComputeCharge,
-    paid_through: Option<Duration>,
-}
-
-impl ChargeAccount {
-    fn closed(charge: ComputeCharge) -> Self {
-        Self {
-            charge,
-            paid_through: None,
-        }
-    }
-
-    fn opened(charge: ComputeCharge) -> Self {
-        let mut account = Self::closed(charge);
-        account.open();
-        account
-    }
-
-    fn open(&mut self) {
-        self.paid_through
-            .get_or_insert_with(|| (self.charge.thread_cpu)());
-    }
-
-    fn pay(&mut self) {
-        let spent = (self.charge.thread_cpu)();
-        let paid_through = self
-            .paid_through
-            .expect("a compute charge is paid on the thread that opened it");
-        std::thread::sleep(spent.saturating_sub(paid_through).mul_f64(self.charge.scale));
-        self.paid_through = Some((self.charge.thread_cpu)());
-    }
-}
-
-fn pay(account: Option<&mut ChargeAccount>) {
-    if let Some(account) = account {
-        account.pay();
-    }
-}
 
 enum ShaperInput {
     Item(BaseItem),
@@ -121,23 +72,7 @@ impl Pipeline {
         self,
         sink: impl FnMut(TrajectoryItem) -> bool + Send + 'static,
     ) -> StagedPipeline {
-        self.stage(sink, None)
-    }
-
-    /// The staged pipeline on a host `charge` slows down.
-    pub fn into_staged_charging(
-        self,
-        sink: impl FnMut(TrajectoryItem) -> bool + Send + 'static,
-        charge: ComputeCharge,
-    ) -> StagedPipeline {
-        self.stage(sink, Some(charge))
-    }
-
-    fn stage(
-        self,
-        sink: impl FnMut(TrajectoryItem) -> bool + Send + 'static,
-        charge: Option<ComputeCharge>,
-    ) -> StagedPipeline {
+        let charge_scale = compute_charge::scale_from_env();
         let Self { front, shaper } = self;
         let materializer = SourceMaterializer::of(&shaper);
         let prefitter = LeaderPrefitter::of(&shaper);
@@ -146,12 +81,12 @@ impl Pipeline {
         let prefit_thread = std::thread::Builder::new()
             .name("kalico-prefit".into())
             .stack_size(crate::worker_pool::FAN_OUT_THREAD_STACK)
-            .spawn(move || run_prefit(prefitter, &prefit_rx, &shaper_tx, charge))
+            .spawn(move || run_prefit(prefitter, &prefit_rx, &shaper_tx, charge_scale))
             .expect("spawn prefit thread");
         let shaper_thread = std::thread::Builder::new()
             .name("kalico-shaper".into())
             .stack_size(crate::worker_pool::FAN_OUT_THREAD_STACK)
-            .spawn(move || run_shaper(shaper, &shaper_rx, sink, charge))
+            .spawn(move || run_shaper(shaper, &shaper_rx, sink, charge_scale))
             .expect("spawn shaper thread");
         StagedPipeline {
             front,
@@ -164,7 +99,7 @@ impl Pipeline {
             }),
             prefit_thread: Some(prefit_thread),
             shaper_thread: Some(shaper_thread),
-            charge: charge.map(ChargeAccount::closed),
+            charge: charge_scale.map(ChargeAccount::closed),
         }
     }
 }
@@ -176,9 +111,9 @@ fn run_prefit(
     mut prefitter: LeaderPrefitter,
     rx: &Receiver<ShaperInput>,
     shaper: &Sender<ShaperInput>,
-    charge: Option<ComputeCharge>,
+    charge_scale: Option<f64>,
 ) {
-    let mut account = charge.map(ChargeAccount::opened);
+    let mut account = charge_scale.map(ChargeAccount::opened);
     while let Ok(input) = rx.recv() {
         if let ShaperInput::Item(item) = &input {
             let fits = prefitter.prefit(item);
@@ -198,9 +133,9 @@ fn run_shaper(
     mut shaper: Shaper,
     rx: &Receiver<ShaperInput>,
     mut sink: impl FnMut(TrajectoryItem) -> bool,
-    charge: Option<ComputeCharge>,
+    charge_scale: Option<f64>,
 ) -> ShaperExit {
-    let mut account = charge.map(ChargeAccount::opened);
+    let mut account = charge_scale.map(ChargeAccount::opened);
     let mut sink = |item| {
         pay(account.as_mut());
         sink(item)
