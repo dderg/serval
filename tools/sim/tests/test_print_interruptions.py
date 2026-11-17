@@ -45,6 +45,7 @@ ESTOP_DEADLINE_S = 0.1
 ESTOP_REASON = "Shutdown due to webhooks request"
 DWELL_WAITING = ('"event":"engine_wait_slow"', '"what":"dwell"')
 DWELL_ABORTED_BY_SHUTDOWN = "dwell: shutdown while waiting on the motion engine"
+SLOW_LAST_STROKE = "G1 X140.0 Y43.60 E0.3 F120"
 REPORTER_CANCEL_ORDER = "  SDCARD_RESET_FILE\n  BASE_CANCEL_PRINT\n"
 STOCK_CANCEL_ORDER = "  BASE_CANCEL_PRINT\n"
 CANCEL_MACRO_ORDERS = {
@@ -396,14 +397,14 @@ def _dwell_waiting(world):
 
 @pytest.mark.parametrize("topology", sorted(TOPOLOGIES))
 def test_emergency_stop_while_dwell_drains(sim_world, topology):
-    """A smoothed extruder's G4 resolves within a second: behind the intake
-    gate the pump is never full. Kernel-free pressure advance lets the
-    turning guard hold the whole zigzag until the G4 drains it (#860), so
-    the dwell waits on the pump long enough for the e-stop to land in it."""
+    """The print ends on a stroke slow enough (80 mm at 2 mm/s, 40 s) that
+    the G4 behind it drains more motion than the pump takes in (its 4096
+    spans held about 25 s of strokes on the bench): the dwell waits on the
+    pump for seconds, and the e-stop lands in that wait."""
     world = _boot(
         sim_world, topology, heater_targets=(), extruder=Extruder.KERNEL_FREE
     )
-    _start_print(world, "estop.gcode", tail=["G4 P1"])
+    _start_print(world, "estop.gcode", tail=[SLOW_LAST_STROKE, "G4 P1"])
     world.wait_until(
         lambda: _dwell_waiting(world),
         timeout=PRINT_TIMEOUT_S,
