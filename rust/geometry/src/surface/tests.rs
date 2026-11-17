@@ -138,7 +138,7 @@ fn fade_factor_ramps_and_disables() {
     assert_eq!(fade.factor(10.0), 0.0);
     assert_eq!(fade.factor(50.0), 0.0);
     assert_eq!(fade.dfactor(0.5), 0.0);
-    assert!((fade.dfactor(5.5) + 1.0 / 9.0).abs() < 1e-12);
+    assert!((fade.dfactor(5.5) + SMOOTHSTEP_STEEPEST_SLOPE / 9.0).abs() < 1e-12);
     assert_eq!(fade.dfactor(10.0), 0.0);
 
     let off = Fade::disabled();
@@ -179,6 +179,7 @@ fn warp_partials_match_finite_differences() {
         assert!((w.wxy - fd(&|e| t.warp(x, y + e, z).wx)).abs() < 1e-6);
         assert!((w.wxz - fd(&|e| t.warp(x, y, z + e).wx)).abs() < 1e-6);
         assert!((w.wyz - fd(&|e| t.warp(x, y, z + e).wy)).abs() < 1e-6);
+        assert!((w.wzz - fd(&|e| t.warp(x, y, z + e).wz)).abs() < 1e-6);
     }
 }
 
@@ -457,7 +458,7 @@ fn clothoid_transition_distance_is_solved_against_the_curve() {
 }
 
 #[test]
-fn fade_boundaries_are_c0_transitions() {
+fn fade_boundaries_are_c1_transitions() {
     let surface = SurfaceTransform::new(
         MeshGrid::new(
             MeshGridSpec {
@@ -479,15 +480,15 @@ fn fade_boundaries_are_c0_transitions() {
     );
     assert_transition_s(
         &surface.path_transition_distances(&segment).unwrap(),
-        &[(1.0, SurfaceContinuity::C0), (3.0, SurfaceContinuity::C0)],
+        &[(1.0, SurfaceContinuity::C1), (3.0, SurfaceContinuity::C1)],
     );
 }
 
 #[test]
 fn coincident_crossings_are_sorted_deduplicated_and_keep_lowest_continuity() {
-    let surface = transition_transform(Fade::new(10.0, 30.0, 0.0).unwrap());
+    let surface = transition_transform(Fade::new(20.0, 40.0, 0.0).unwrap());
     let segment = crate::path::Segment::Line(
-        crate::path::Line::try_new([5.0, 5.0, 5.0], [15.0, 15.0, 15.0]).unwrap(),
+        crate::path::Line::try_new([15.0, 15.0, 15.0], [25.0, 25.0, 25.0]).unwrap(),
     );
     let transitions = surface.path_transition_distances(&segment).unwrap();
     assert_eq!(transitions.len(), 1);
@@ -554,4 +555,107 @@ fn a_fade_band_no_wider_than_the_mesh_is_refused() {
         matches!(error, MeshActivationError::FadeBandTooNarrow { band, mesh_span } if band <= mesh_span),
         "{error}"
     );
+}
+
+/// The cubic smoothstep's steepest slope over the linear fade's.
+const SMOOTHSTEP_STEEPEST_SLOPE: f64 = 1.5;
+
+#[test]
+fn the_fade_compensates_fully_below_its_start_and_not_past_its_end() {
+    let fade = Fade::new(1.0, 10.0, 0.15).unwrap();
+    for z in [-3.0, 0.0, 1.0] {
+        assert_eq!(fade.factor(z), 1.0, "z {z}");
+    }
+    for z in [10.0, 10.5, 200.0] {
+        assert_eq!(fade.factor(z), 0.0, "z {z}");
+    }
+    assert!((fade.factor(5.5) - 0.5).abs() < 1e-12);
+}
+
+#[test]
+fn the_fade_leaves_and_reaches_its_band_edges_flat() {
+    let fade = Fade::new(1.0, 10.0, 0.15).unwrap();
+    let inside = 1e-9;
+    for z in [1.0 + inside, 10.0 - inside] {
+        assert!(
+            fade.dfactor(z).abs() < 1e-9,
+            "dfactor({z}) = {}",
+            fade.dfactor(z)
+        );
+    }
+    let steepest = fade.dfactor(5.5);
+    assert!(
+        (steepest + SMOOTHSTEP_STEEPEST_SLOPE / 9.0).abs() < 1e-12,
+        "dfactor(5.5) = {steepest}"
+    );
+}
+
+fn deviation_of(probed: ProbedMesh) -> f64 {
+    let bounds = SurfaceTransform::activate(probed).unwrap().bounds();
+    bounds.z_max.abs().max(bounds.z_min.abs())
+}
+
+#[test]
+fn a_fade_band_its_steepest_slope_keeps_invertible_is_accepted() {
+    let deviation = deviation_of(three_by_three(None, (110.0, 110.0)));
+    let band = SMOOTHSTEP_STEEPEST_SLOPE * deviation * (1.0 + 1e-6);
+    let fade = Some((1.0, 1.0 + band, 0.0));
+    assert!(SurfaceTransform::activate(three_by_three(fade, (110.0, 110.0))).is_ok());
+}
+
+#[test]
+fn a_fade_band_its_steepest_slope_would_fold_is_refused() {
+    let deviation = deviation_of(three_by_three(None, (110.0, 110.0)));
+    let band = SMOOTHSTEP_STEEPEST_SLOPE * deviation * (1.0 - 1e-6);
+    let fade = Some((1.0, 1.0 + band, 0.0));
+    let error = SurfaceTransform::activate(three_by_three(fade, (110.0, 110.0))).unwrap_err();
+    assert!(
+        matches!(error, MeshActivationError::FadeBandTooNarrow { .. }),
+        "{error}"
+    );
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: 2048,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(
+                "proptest-regressions/fade_edge_velocity.txt",
+            ),
+        )),
+        ..proptest::prelude::ProptestConfig::default()
+    })]
+
+    /// A move crossing either fade edge at any heading and climb keeps the
+    /// machine Z velocity: the chain rule `ż_g·(1 + w_z) + w_x·ẋ + w_y·ẏ`
+    /// reads the same a nanometre either side of the edge.
+    #[test]
+    fn machine_z_velocity_is_continuous_across_the_fade_edges(
+        at_end in proptest::prelude::any::<bool>(),
+        x in 0.0f64..150.0,
+        y in 0.0f64..150.0,
+        azimuth in 0.0f64..std::f64::consts::TAU,
+        climb in 0.05f64..1.0,
+        descending in proptest::prelude::any::<bool>(),
+        speed in 1.0f64..300.0,
+    ) {
+        let t = transform(Fade::new(1.0, 10.0, 0.15).unwrap());
+        let edge = if at_end { 10.0 } else { 1.0 };
+        let horizontal = libm::sqrt(1.0 - climb * climb);
+        let vertical = if descending { -climb } else { climb };
+        let velocity = [
+            speed * horizontal * libm::cos(azimuth),
+            speed * horizontal * libm::sin(azimuth),
+            speed * vertical,
+        ];
+        let machine_vz = |z: f64| {
+            let w = t.warp(x, y, z);
+            velocity[2] * (1.0 + w.wz) + w.wx * velocity[0] + w.wy * velocity[1]
+        };
+        let (below, above) = (machine_vz(edge - 1e-9), machine_vz(edge + 1e-9));
+        proptest::prop_assert!(
+            (above - below).abs() <= 1e-6 * speed,
+            "machine z velocity steps {below} -> {above} across the fade edge at z {edge}"
+        );
+    }
 }

@@ -1,0 +1,56 @@
+{
+ "seed": 1746,
+ "printer": {
+  "base": "neptune",
+  "topology": "one_mcu",
+  "max_velocity": 300.0,
+  "max_accel": 23958.0,
+  "corner": "corner_deviation",
+  "corner_value": 0.434,
+  "max_z_velocity": 15.0,
+  "max_z_accel": 100.0,
+  "shaper_x": null,
+  "shaper_y": {
+   "kernel": "smooth_triangle",
+   "value": 0.0327
+  },
+  "pa_k": 0.0613,
+  "extruder_kernel": null,
+  "mesh": "none",
+  "mesh_points": [],
+  "mesh_fade": false,
+  "mesh_at_start": false,
+  "heaters": false,
+  "pause_macro": "base",
+  "cancel_macro": "base",
+  "end_steps": [],
+  "idle_timeout_s": null
+ },
+ "programs": [
+  {
+   "name": "A",
+   "segments": [
+    {
+     "kind": "relative",
+     "lines": [
+      "G90",
+      "G1 Z0.2 F600",
+      "G1 X208.942 Y118.935 F15360",
+      "G91",
+      "G1 X1.058 Y7.587 E0.2865 F16140",
+      "G1 X0 Y-8.246 E0.3084 F16140",
+      "G1 X0 Y2.445 E0.09144 F16140",
+      "G1 X0 Y-7.27 E0.2719 F16140",
+      "G1 X0 Y7.575 E0.28331 F16140",
+      "G1 X0 Y-2.772 E0.10367 F16140",
+      "G90"
+     ]
+    }
+   ],
+   "end_print": false
+  }
+ ],
+ "prints": [
+  "A"
+ ]
+}
