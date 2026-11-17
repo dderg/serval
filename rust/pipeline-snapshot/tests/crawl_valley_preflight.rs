@@ -771,3 +771,80 @@ fn a_follower_without_an_advance_widens_crawl_valleys_over_taken_path() {
     let config = corpus::repo().join("snapshots/cases/straight_line/printer.cfg");
     corpus::plan("prime_after_a_hop", PRIME_AFTER_A_HOP, &config).expect("the print plans");
 }
+
+/// #936: a corexy with a kernel-free advance and a 0.32 mm corner budget,
+/// drawn by the print-like planner fuzz.
+const BLEND_INTO_TRAVEL_PRINTER: &str = "[printer]
+max_velocity: 340.52936014829606
+max_accel: 59251.052612795094
+corner_deviation: 0.32044791936796385
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 8713.664834637058
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.024137113777108306
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 43.42076982567384
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 101.40184248844695
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #936: the blend from the 0.24 mm extrusion into the travel after it
+/// ramped the ratio to −6.9e-18, a rounding retract: the segment reaching
+/// it read the advance table and the next one the laid table, smoothed
+/// apart around that fake step, and the advance stepped the extruder by
+/// −0.00057 mm at their join.
+const BLEND_INTO_TRAVEL: &str = "G90
+M83
+G1 Z0.600 F600
+G1 X138.977 Y148.155 F30000
+G1 Z0.200 F600
+G1 E0.5 F2400
+G1 X138.675 Y156.557 E0.32563 F11737
+G1 X138.590 Y157.984 E0.08804 F6400
+G1 X138.908 Y158.559 E0.02579 F8274
+G1 X138.947 Y158.613 E0.00308 F6024
+G1 X138.958 Y158.373 E0.01434 F11348
+G1 X138.998 Y159.555 F11337
+G1 X139.064 Y160.022 E0.02354 F10643
+G1 X139.170 Y161.580 E0.04421 F4369
+G1 X137.339 Y176.872 E1.02258 F4212
+";
+
+#[test]
+fn the_advance_reads_one_ratio_where_a_blend_ramps_into_a_travel() {
+    let config = printer_from("blend_into_travel_printer", BLEND_INTO_TRAVEL_PRINTER);
+    plans_within_the_extruder_limits("blend_into_travel", BLEND_INTO_TRAVEL, &config);
+}
