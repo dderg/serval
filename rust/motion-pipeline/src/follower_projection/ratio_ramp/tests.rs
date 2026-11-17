@@ -573,6 +573,33 @@ fn the_width_is_c2_lipschitz_and_closes_on_every_rest() {
     }
 }
 
+/// #941: a leg minutes long at a millimetre a second lays a sample every
+/// node spacing with no rest among them, and the width field assigns them
+/// in time linear in their count: four times the samples take no more
+/// than eight times as long, where looking for the next rest from every
+/// sample took sixteen.
+#[test]
+fn a_long_restless_leg_assigns_its_samples_in_linear_time() {
+    const SPEED_MM_S: f64 = 1.0;
+    let assign = |samples: usize| {
+        let mut field = WidthField::default();
+        field.place_rest(0.0);
+        for tick in 1..=samples {
+            let t = tick as f64 * NODE_SPACING_S;
+            field.place_sample(SPEED_MM_S * t, t);
+        }
+        let started = std::time::Instant::now();
+        field.assign(f64::INFINITY);
+        started.elapsed().as_secs_f64()
+    };
+    let short = assign(20_000).max(0.05);
+    let long = assign(80_000);
+    assert!(
+        long <= 8.0 * short,
+        "assigning 4x the samples took {long} s against {short} s"
+    );
+}
+
 #[test]
 fn a_final_width_node_never_moves_again() {
     let mut field = WidthField::default();
