@@ -216,11 +216,7 @@ impl Lowerer {
         self.emit_hold(self.t + settle, 0, output)
     }
 
-    fn emit_parked_hold(
-        &mut self,
-        t_end: f64,
-        output: &mut impl FnMut(BaseItem) -> bool,
-    ) -> bool {
+    fn emit_parked_hold(&mut self, t_end: f64, output: &mut impl FnMut(BaseItem) -> bool) -> bool {
         self.emit_hold(t_end, 0, output) && output(BaseItem::Drain)
     }
 

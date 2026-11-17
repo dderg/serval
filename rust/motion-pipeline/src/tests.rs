@@ -1551,9 +1551,18 @@ fn describe(items: &[TrajectoryItem]) -> Vec<String> {
 fn every_control_token_at_rest_leaves_the_stream_parked() {
     let (barrier, _ack) = crossbeam_channel::bounded(1);
     let tokens = [
-        ("advance change", Control::SetAxisChains(pa_with_kernel(0.04, 0.005))),
-        ("wider kernel", Control::SetAxisChains(pa_with_kernel(0.05, 0.02))),
-        ("narrower kernel", Control::SetAxisChains(pa_with_kernel(0.05, 0.002))),
+        (
+            "advance change",
+            Control::SetAxisChains(pa_with_kernel(0.04, 0.005)),
+        ),
+        (
+            "wider kernel",
+            Control::SetAxisChains(pa_with_kernel(0.05, 0.02)),
+        ),
+        (
+            "narrower kernel",
+            Control::SetAxisChains(pa_with_kernel(0.05, 0.002)),
+        ),
         (
             "mesh on",
             Control::SetMesh {
@@ -1569,7 +1578,10 @@ fn every_control_token_at_rest_leaves_the_stream_parked() {
             },
         ),
         ("dwell", Control::Dwell { secs: 1.0 }),
-        ("barrier", Control::Dispatch(DispatchCommand::Barrier(barrier))),
+        (
+            "barrier",
+            Control::Dispatch(DispatchCommand::Barrier(barrier)),
+        ),
         (
             "reset",
             Control::Reset {
