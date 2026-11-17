@@ -1,10 +1,11 @@
-//! The stream time the turning guard holds back on the Pi bench printer's
-//! chain (`tools/bench/printer.cfg`: a kernel-free linear advance behind
-//! smooth shapers, corners blended). Whatever it holds, a pause
-//! plays out before it stops (#860).
+//! The stream time the turning guard, and the planning front around it,
+//! hold back on the Pi bench printer's chain (`tools/bench/printer.cfg`: a
+//! kernel-free linear advance behind smooth shapers, corners blended).
+//! Whatever they hold, a pause plays out before it stops (#860).
 
 use std::sync::Arc;
 
+use geometry::segment::SourceRange;
 use geometry::{MoveVelocity, VALLEY_LEAD_BUDGET_S};
 use planner_config::RuntimeLimits;
 use planner_config::from_doc::planner_config_from_text;
@@ -19,6 +20,8 @@ use crate::types::{PlannedItem, StreamConfig, StreamInput};
 const BENCH_PRINTER: &str = "tools/bench/printer.cfg";
 const FIRST_LAYERS: &str = "tools/sim/gcode/voron_first_layers.gcode";
 const FIRST_LAYERS_LINES: usize = 1500;
+const SPEED_LADDER: &str = "tools/bench/gcode/speed_ladder.gcode";
+const WHOLE_FILE: usize = usize::MAX;
 const MM_PER_MIN_PER_MM_S: f64 = 60.0;
 /// Where every stream here starts, as the live path homes the toolhead.
 const HOME: [f64; 3] = [0.0; 3];
@@ -49,6 +52,11 @@ const WINDOWS: usize = 3;
 /// in; the one the frozen seam starts, at a move's start; and the one the
 /// last window ends in.
 const WHOLE_MOVES: usize = 4;
+
+/// What the planning front may hold besides the fitted move the next line
+/// may still merge into, and the half of the move before it a run that
+/// move may start can still ease over.
+const FRONT_REST_S: f64 = 1.5;
 
 pub(super) struct BenchChain {
     base: GcodeMoveBase,
@@ -133,6 +141,33 @@ impl BenchChain {
         );
         most
     }
+
+    /// The most stream time the planning front (fit stage, planner and
+    /// guard) held back past the moves it must hold, as the lines arrived
+    /// one at a time, timed on the plan it emitted.
+    fn front_held(&self, lines: &[GcodeLine]) -> FrontHeld {
+        let runtime = RuntimeLimits::default();
+        let mut fit = FitStage::new(self.config.corner).into_driver();
+        let mut planner = Planner::new(self.config.clone(), Arc::default());
+        let mut guard = TurningGuard::new(self.config.clone(), &self.chains, &HOME);
+        let mut stream = FrontStream::default();
+        for line in lines {
+            let Some(m) = self
+                .base
+                .line_move(&runtime, *line)
+                .expect("the line moves")
+            else {
+                continue;
+            };
+            assert!(fit.feed(StreamInput::Move(m), &mut |item| {
+                stream.fit(item, &mut planner, &mut guard)
+            }));
+            stream.arrived(line.seq);
+        }
+        assert!(fit.finish(&mut |item| stream.fit(item, &mut planner, &mut guard)));
+        assert!(planner.finish(&mut |item| guard.feed(item, &mut |item| stream.emit(&item))));
+        stream.held()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -151,6 +186,105 @@ impl Held {
             self.held_s,
             self.at_s,
             self.bound_s
+        );
+    }
+}
+
+/// The front's input and output on one timeline: the fitted moves' source
+/// lines, the end of every move the guard emitted, and how much it had
+/// emitted when each line arrived.
+#[derive(Default)]
+struct FrontStream {
+    fitted: Vec<SourceRange>,
+    emitted: Vec<(u32, f64)>,
+    emitted_s: f64,
+    arrivals: Vec<(u32, f64)>,
+}
+
+impl FrontStream {
+    fn fit(&mut self, item: StreamInput, planner: &mut Planner, guard: &mut TurningGuard) -> bool {
+        if let StreamInput::Move(m) = &item {
+            self.fitted.push(m.source);
+        }
+        planner.feed(item, &mut |item| guard.feed(item, &mut |item| self.emit(&item)))
+    }
+
+    fn emit(&mut self, item: &PlannedItem) -> bool {
+        if let PlannedItem::Move(planned) = item {
+            self.emitted_s += duration_s(&planned.velocity);
+            self.emitted
+                .push((planned.geometry.source.start_line, self.emitted_s));
+        }
+        true
+    }
+
+    fn arrived(&mut self, line: u32) {
+        self.arrivals.push((line, self.emitted_s));
+    }
+
+    /// The first line of the fitted move `line` ended up in.
+    fn chain_start(&self, line: u32) -> u32 {
+        self.fitted
+            .iter()
+            .filter(|source| (source.start_line..=source.end_line).contains(&line))
+            .map(|source| source.start_line)
+            .min()
+            .unwrap_or(line)
+    }
+
+    /// Where the plan stands when every line before `line` has played.
+    fn played_before(&self, line: u32) -> f64 {
+        self.emitted
+            .iter()
+            .filter(|(start_line, _)| *start_line < line)
+            .map(|(_, end_s)| *end_s)
+            .fold(0.0, f64::max)
+    }
+
+    fn held(&self) -> FrontHeld {
+        let mut most = FrontHeld::default();
+        let mut previous_line = None;
+        for &(line, emitted_s) in &self.arrivals {
+            let newest = self.chain_start(line);
+            let newest_from_s = self.played_before(newest);
+            let previous_s = previous_line
+                .map(|previous| self.chain_start(previous))
+                .filter(|&previous| previous < newest)
+                .map_or(0.0, |previous| newest_from_s - self.played_before(previous));
+            let past_newest_s = (newest_from_s - emitted_s).max(0.0);
+            let excess_s = past_newest_s - 0.5 * previous_s;
+            if excess_s > most.excess_s {
+                most = FrontHeld {
+                    excess_s,
+                    past_newest_s,
+                    previous_s,
+                    line,
+                };
+            }
+            previous_line = Some(line);
+        }
+        most
+    }
+}
+
+#[derive(Debug, Default)]
+struct FrontHeld {
+    excess_s: f64,
+    past_newest_s: f64,
+    previous_s: f64,
+    line: u32,
+}
+
+impl FrontHeld {
+    fn assert_within_bound(&self, what: &str) {
+        assert!(
+            self.excess_s <= FRONT_REST_S,
+            "the front held {:.3} s of {what} back past the newest fitted move at line {}, \
+             {:.3} s past half the {:.3} s move before it and {FRONT_REST_S} s",
+            self.past_newest_s,
+            self.line,
+            self.excess_s - FRONT_REST_S,
+            self.previous_s,
         );
     }
 }
@@ -232,15 +366,15 @@ fn extrude_ladder() -> Vec<GcodeLine> {
         .collect()
 }
 
-/// The first lines of `voron_first_layers.gcode`, which moves by `G1`
-/// alone in absolute coordinates with relative extrusion (`G90`, `M83`).
-fn first_layers() -> Vec<GcodeLine> {
-    let text = std::fs::read_to_string(source_tree::repo_file(FIRST_LAYERS))
-        .expect("read voron_first_layers.gcode");
+/// The first lines of a slicer file that moves by `G1` alone in absolute
+/// coordinates with relative extrusion (`G90`, `M83`).
+fn gcode_file(path: &str, limit: usize) -> Vec<GcodeLine> {
+    let text = std::fs::read_to_string(source_tree::repo_file(path))
+        .unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut at = HOME;
     let mut feed = 0.0;
     let mut lines = Vec::new();
-    for (index, raw) in text.lines().take(FIRST_LAYERS_LINES).enumerate() {
+    for (index, raw) in text.lines().take(limit).enumerate() {
         let code = raw.split(';').next().unwrap_or_default();
         let mut words = code.split_whitespace();
         if words.next() != Some("G1") {
@@ -266,6 +400,10 @@ fn first_layers() -> Vec<GcodeLine> {
     lines
 }
 
+fn first_layers() -> Vec<GcodeLine> {
+    gcode_file(FIRST_LAYERS, FIRST_LAYERS_LINES)
+}
+
 #[test]
 fn the_guard_holds_a_zigzag_of_reversal_blends_within_its_windows() {
     let chain = BenchChain::new();
@@ -287,5 +425,35 @@ fn the_guard_holds_extrusion_with_the_leaders_at_rest_within_its_windows() {
     let chain = BenchChain::new();
     chain
         .held(chain.plan(&extrude_ladder()))
+        .assert_within_bound("the extrude ladder");
+}
+
+#[test]
+fn the_front_holds_a_zigzag_within_its_windows() {
+    let chain = BenchChain::new();
+    chain.front_held(&zigzag()).assert_within_bound("the zigzag");
+}
+
+#[test]
+fn the_front_holds_the_speed_ladder_within_its_windows() {
+    let chain = BenchChain::new();
+    chain
+        .front_held(&gcode_file(SPEED_LADDER, WHOLE_FILE))
+        .assert_within_bound("the speed ladder");
+}
+
+#[test]
+fn the_front_holds_the_first_layers_within_its_windows() {
+    let chain = BenchChain::new();
+    chain
+        .front_held(&first_layers())
+        .assert_within_bound("the first layers");
+}
+
+#[test]
+fn the_front_holds_extrusion_with_the_leaders_at_rest_within_its_windows() {
+    let chain = BenchChain::new();
+    chain
+        .front_held(&extrude_ladder())
         .assert_within_bound("the extrude ladder");
 }
