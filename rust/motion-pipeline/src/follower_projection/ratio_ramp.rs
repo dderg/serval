@@ -3003,10 +3003,12 @@ impl RatioSmoothing {
             return 0.0;
         }
         let width = self.width.width(s.min(last.s));
-        match self.width.pending_rest_before(s) {
-            Some(rest) if s > last.s => width.min(WIDTH_SLOPE_BOUND * (s - rest).max(0.0)),
-            _ => width,
+        if s <= last.s {
+            return width;
         }
+        self.width
+            .pending_rest_before(s)
+            .map_or(width, |rest| width.min(WIDTH_SLOPE_BOUND * (s - rest).max(0.0)))
     }
 
     /// Drops what no window from `s` on reaches: the seams behind the
