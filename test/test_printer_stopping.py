@@ -32,5 +32,8 @@ def test_outputs_stop_before_the_host_disconnects(result):
     assert _run_until_exit(result) == ["klippy:stopping", "klippy:disconnect"]
 
 
-def test_outputs_stop_before_the_firmware_restart_resets_the_mcus():
-    assert _run_until_exit("firmware_restart") == list(STOP_EVENTS)
+def test_a_firmware_restart_leaves_the_outputs_to_the_mcu_reset():
+    assert _run_until_exit("firmware_restart") == [
+        "klippy:firmware_restart",
+        "klippy:disconnect",
+    ]
