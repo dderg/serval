@@ -598,3 +598,21 @@ fn a_claim_on_a_primed_stream_never_follows_its_start_once_released() {
     let (t0, _) = a.anchor_segment(0.0, 0.01, 100.0);
     assert_eq!(a.start_verdict(t0), Ok(()), "claimed {claimed}, start {t0}");
 }
+
+#[test]
+fn a_dwell_behind_motion_ahead_of_the_playhead_rests_nothing_more() {
+    let mut a = primed(true);
+
+    assert_eq!(a.rest_before_dwell(100.5, 1.5), Ok(0.0));
+}
+
+#[test]
+fn a_dwell_long_after_the_end_rests_until_a_fresh_start() {
+    let mut a = primed(true);
+    let end_host = a.committed_end_host().unwrap();
+    let host_now = end_host + 10.0;
+
+    let rest = a.rest_before_dwell(host_now, 1.5).unwrap();
+
+    assert!((end_host + rest - (host_now + DEFAULT_LEAD_SECS)).abs() < 1e-9);
+}

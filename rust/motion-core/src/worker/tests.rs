@@ -623,12 +623,27 @@ impl MockedWorker {
     }
 
     fn start_after_dwell(&self, start: [f64; 3]) -> f64 {
-        self.h.dwell_try_start(DWELL_S).unwrap().recv().unwrap();
+        self.start_after_dwells(&[DWELL_S], start)
+    }
+
+    fn start_after_dwells(&self, dwells: &[f64], start: [f64; 3]) -> f64 {
+        for &dwell_s in dwells {
+            self.h.dwell_try_start(dwell_s).unwrap().recv().unwrap();
+        }
         let before = self.sink.starts_host.lock_ok().len();
         let end = [start[0] + 30.0, start[1], start[2]];
         self.h.submit_move(line(2, start, end)).unwrap();
         self.h.flush().unwrap();
         self.sink.starts_host.lock_ok()[before]
+    }
+
+    fn rested_after_a_move(&self) -> f64 {
+        self.h
+            .submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+            .unwrap();
+        self.h.flush().unwrap();
+        self.clock.advance(Duration::from_secs(10));
+        self.host_now()
     }
 }
 
@@ -681,6 +696,61 @@ fn a_dwell_after_a_start_hold_counts_from_the_hold() {
         "the move starts at {move_start}, before the hold {held} plus the dwell"
     );
     w.h.shutdown();
+}
+
+#[test]
+fn a_dwell_behind_motion_still_playing_adds_exactly_its_duration() {
+    let mut w = MockedWorker::spawn();
+    w.h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    w.h.flush().unwrap();
+    let motion_end = w
+        .sink
+        .anchor
+        .lock_ok()
+        .committed_end_host()
+        .expect("the move was anchored");
+
+    let move_start = w.start_after_dwell([30.0, 0.0, 0.0]);
+
+    assert!(
+        (move_start - (motion_end + DWELL_S)).abs() < 1e-9,
+        "the move starts at {move_start}, not the dwell after the motion's end {motion_end}"
+    );
+    w.h.shutdown();
+}
+
+#[test]
+fn consecutive_dwells_at_rest_wait_out_one_lead() {
+    let mut w = MockedWorker::spawn();
+    let ordered = w.rested_after_a_move();
+
+    let move_start = w.start_after_dwells(&[1.0, 0.5], [30.0, 0.0, 0.0]);
+
+    let expected = ordered + crate::anchor::DEFAULT_LEAD_SECS + 1.5;
+    assert!(
+        (move_start - expected).abs() < 1e-9,
+        "two dwells at rest start the move at {move_start}, not {expected}"
+    );
+    w.h.shutdown();
+}
+
+#[test]
+fn a_zero_dwell_at_rest_costs_nothing() {
+    let mut dwelt = MockedWorker::spawn();
+    let mut plain = MockedWorker::spawn();
+    let dwelt_ordered = dwelt.rested_after_a_move();
+    let plain_ordered = plain.rested_after_a_move();
+
+    let after_zero = dwelt.start_after_dwells(&[0.0], [30.0, 0.0, 0.0]) - dwelt_ordered;
+    let after_none = plain.start_after_dwells(&[], [30.0, 0.0, 0.0]) - plain_ordered;
+
+    assert!(
+        (after_zero - after_none).abs() < 1e-9,
+        "a G4 P0 at rest delayed the move: {after_zero} s against {after_none} s"
+    );
+    dwelt.h.shutdown();
+    plain.h.shutdown();
 }
 
 #[test]
