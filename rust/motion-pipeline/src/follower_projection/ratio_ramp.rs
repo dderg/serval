@@ -2385,8 +2385,16 @@ impl RatioSmoothing {
             }
             return;
         }
-        if let Err(Unlaid::Waits) = self.lay_valley(tables, rule, crawl, reach, table_end) {
-            self.waiting_crawls.push(crawl);
+        match self.lay_valley(tables, rule, crawl, reach, table_end) {
+            Ok(()) => {}
+            Err(Unlaid::Waits) => self.waiting_crawls.push(crawl),
+            Err(Unlaid::WaitsOnSteps) => {
+                let taken = self.floor.max(self.taken_through);
+                self.waiting_crawls.push(Crawl {
+                    held_from: Some(crawl.held_from.unwrap_or(taken)),
+                    ..crawl
+                });
+            }
         }
     }
 
@@ -2851,7 +2859,12 @@ impl RatioSmoothing {
         });
         let lead = table_end - budget_back_from(table_end);
         let waiting = self.waiting_crawls.first().map_or(0.0, |crawl| {
-            table_end - budget_back_from(crawl.turn).min(crawl.turn - crawl.crossing.valley_reach())
+            let lead_from =
+                budget_back_from(crawl.turn).min(crawl.turn - crawl.crossing.valley_reach());
+            table_end
+                - crawl
+                    .held_from
+                    .map_or(lead_from, |held| held.min(lead_from))
         });
         let unlaid = opening.max(lead).max(waiting);
         let widened_from = self
@@ -3986,14 +3999,18 @@ struct Crossing {
 }
 
 /// A crawl a valley is laid at: where on the path, how the leaders cross
-/// it, and, where they came to rest past it while its valley waited, what
-/// was laid then, which its valley reads as at the rest
+/// it; where they came to rest past it while its valley waited, what was
+/// laid then, which its valley reads as at the rest; and, once it waits on
+/// a ratio step whose width is not final, the path the projection had
+/// taken then, which it takes no further until the valley is laid: its
+/// before side gets the room it would have had laid at once
 /// ([`RatioSmoothing::lay_crawl_valley`]).
 #[derive(Debug, Clone, Copy)]
 struct Crawl {
     turn: f64,
     crossing: Crossing,
     rests_past: Option<RestedPast>,
+    held_from: Option<f64>,
 }
 
 /// What was laid where the leaders came to rest past a crawl still
@@ -4024,6 +4041,7 @@ impl From<(f64, Crossing)> for Crawl {
             turn,
             crossing,
             rests_past: None,
+            held_from: None,
         }
     }
 }

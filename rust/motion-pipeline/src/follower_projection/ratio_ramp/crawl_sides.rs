@@ -287,6 +287,8 @@ pub(super) enum Side {
 pub(super) enum Unlaid {
     /// The side may reach past the path probed or the table laid.
     Waits,
+    /// A ratio step that may ramp into the side has no final width yet.
+    WaitsOnSteps,
 }
 
 /// Where a crawl valley's side leaves its zero stretch: the path `s` of
@@ -401,7 +403,7 @@ pub(super) fn crawl_side(
         crossing,
         floor,
     } = edge;
-    let mut waits = false;
+    let (mut waits, mut waits_on_steps) = (false, false);
     let width = crawl_side_width(reach, |width| {
         if width > limit {
             return true;
@@ -424,7 +426,7 @@ pub(super) fn crawl_side(
             .iter()
             .any(|&s| s >= window.0 - ramp_reach && s <= window.1 + ramp_reach)
         {
-            waits = true;
+            waits_on_steps = true;
             return true;
         }
         let motion = trail.over(window, side);
@@ -557,6 +559,9 @@ pub(super) fn crawl_side(
     });
     if waits {
         return Err(Unlaid::Waits);
+    }
+    if waits_on_steps {
+        return Err(Unlaid::WaitsOnSteps);
     }
     Ok(width.filter(|&width| width <= limit))
 }
