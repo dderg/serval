@@ -30,6 +30,19 @@ def test_no_gates_skips_everything():
     assert ship.gate_commands(["klippy/a.py"], True) == []
 
 
+def test_python_is_formatted_by_the_gates_pinned_ruff(tmp_path, monkeypatch):
+    ran = []
+    monkeypatch.setattr(
+        ship, "run", lambda command, cwd=None: ran.append(command)
+    )
+    monkeypatch.setattr(ship, "git", lambda *args, **kw: "")
+    ship.format_tree(tmp_path)
+    assert ran == [
+        ["cargo", "fmt", "--all"],
+        ["./scripts/ci.sh", "ruff-format"],
+    ]
+
+
 def test_exactly_one_body_source_is_required(tmp_path: Path):
     with pytest.raises(ship.ShipError):
         ship.body_text(None, None)
