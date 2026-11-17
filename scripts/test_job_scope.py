@@ -1,5 +1,6 @@
 import os
 import resource
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,8 @@ OVER_TINY = "x = b'\\x01' * (2 * 1024**3)"
 
 
 def user_manager() -> bool:
+    if shutil.which("systemctl") is None:
+        return False
     probe = subprocess.run(
         ["systemctl", "--user", "is-system-running"],
         capture_output=True,
