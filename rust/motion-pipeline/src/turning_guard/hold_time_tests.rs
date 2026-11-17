@@ -50,14 +50,14 @@ const WINDOWS: usize = 3;
 /// last window ends in.
 const WHOLE_MOVES: usize = 4;
 
-struct BenchChain {
+pub(super) struct BenchChain {
     base: GcodeMoveBase,
-    config: StreamConfig,
-    chains: AxisChainSet,
+    pub config: StreamConfig,
+    pub chains: AxisChainSet,
 }
 
 impl BenchChain {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let text = std::fs::read_to_string(source_tree::repo_file(BENCH_PRINTER))
             .expect("read the bench printer.cfg");
         let cfg = planner_config_from_text(&text).expect("the bench printer.cfg parses");
@@ -75,7 +75,7 @@ impl BenchChain {
 
     /// The planner's output for `lines`, fitted and planned as the live
     /// path does, the stream closed at the end.
-    fn plan(&self, lines: &[GcodeLine]) -> Vec<PlannedItem> {
+    pub fn plan(&self, lines: &[GcodeLine]) -> Vec<PlannedItem> {
         let runtime = RuntimeLimits::default();
         let mut fit = FitStage::new(self.config.corner).into_driver();
         let mut planner = Planner::new(self.config.clone(), Arc::default());
@@ -187,7 +187,7 @@ fn duration_s(velocity: &MoveVelocity) -> f64 {
     velocity.phases.iter().map(|phase| phase.dt).sum()
 }
 
-fn line(seq: usize, start: [f64; 3], end: [f64; 3], de: f64, feed: f64) -> GcodeLine {
+pub(super) fn line(seq: usize, start: [f64; 3], end: [f64; 3], de: f64, feed: f64) -> GcodeLine {
     GcodeLine {
         start,
         delta: std::array::from_fn(|axis| end[axis] - start[axis]),
