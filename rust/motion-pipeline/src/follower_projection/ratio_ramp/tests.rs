@@ -7,8 +7,7 @@ use proptest::test_runner::FileFailurePersistence;
 use trajectory::{ContinuousAxis, ContinuousSegment};
 
 use super::super::{
-    FollowerState, OdometerLeaves, RatioSpan, SpanSide, Table as SpanTable,
-    shaped_leader_odometer,
+    FollowerState, OdometerLeaves, RatioSpan, SpanSide, Table as SpanTable, shaped_leader_odometer,
 };
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, CrawlRatios, Crossing, ENVELOPE_SLOPE,
