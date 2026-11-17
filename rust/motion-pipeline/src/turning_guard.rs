@@ -807,7 +807,7 @@ impl TurningGuard {
     fn close_run(&mut self, start: i64, end: i64) -> Option<Binding> {
         let h = self.h();
         let fit = self.valleys.fit;
-        let (from, to) = (start as f64 * h, (end + 1) as f64 * h);
+        let from = start as f64 * h;
         let timing = &self.entries.timing;
         let first = timing.partition_point(|timing| timing.t1() <= from);
         let line = self.entries.moves[first.min(timing.len() - 1)]
