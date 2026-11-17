@@ -972,18 +972,18 @@ proptest! {
 
     /// An advance the turning guard holds, along outlines of short lines at
     /// their own ratios into a turnaround, whose crawl valley owns the
-    /// steps inside its sides.
+    /// steps inside its sides. Unlimited: no planner holds these tracks to
+    /// a limit, and `limits_above` covers their strokes, not a ramp read in
+    /// a valley's side.
     #[test]
     fn an_advance_streams_dense_ratio_steps_like_it_projects_all_at_once(
         heading in 0.0..std::f64::consts::TAU,
         steps in prop::collection::vec(dense_stroke_strategy(), 4..24),
         batch_sizes in prop::collection::vec(1..4_usize, 1..4),
         advance_k in 0.005..0.08_f64,
-        limits in follower_limits_strategy(),
     ) {
         let track = build_profiled_track(heading, &steps, Profile::Quintic);
-        let limits = limits.map(|limits| track.extruder_peaks.limits_above(advance_k, limits));
-        let chains = chains(limited(follower_chain(Some(advance_k), None), limits));
+        let chains = chains(follower_chain(Some(advance_k), None));
         let one_shot = project_all_at_once(&track, &chains);
         let streamed = project_streamed(&track, &chains, &batch_sizes);
         assert_streams_like_one_shot(&streamed, &one_shot)?;
