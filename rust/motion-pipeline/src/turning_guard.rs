@@ -9,7 +9,9 @@ use geometry::{
 };
 use trajectory::AxisChainSet;
 
-use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig};
+use crate::types::{
+    CONTIGUITY_EPS_MM, Control, PlannedItem, PlannedMove, StreamConfig, StreamError,
+};
 
 mod kernel_cells;
 mod screen;
@@ -515,12 +517,34 @@ impl TurningGuard {
         grid_step(&self.followers)
     }
 
+    /// The moves start where the toolhead stands, as the lowerer checks
+    /// again behind the guard: a gap would read as a step in the planned
+    /// motion the kernels fold into an absurd extruder demand.
+    fn assert_starts_where_the_toolhead_is(&self, m: &Move) {
+        let (Some(spatial), Some(toolhead)) = (&m.segment.spatial, self.carried_position) else {
+            return;
+        };
+        let start = spatial.point_at(0.0);
+        let gap_mm = geometry::vec3::dist(toolhead, start);
+        assert!(
+            gap_mm <= CONTIGUITY_EPS_MM,
+            "turning guard: {}",
+            StreamError::Discontinuity {
+                line_no: m.source.start_line,
+                expected: toolhead,
+                got: start,
+                gap_mm,
+            }
+        );
+    }
+
     fn admit(&mut self, planned: PlannedMove) {
         let PlannedMove {
             geometry,
             velocity,
             budget,
         } = planned;
+        self.assert_starts_where_the_toolhead_is(&geometry);
         let held = &self.entries;
         let stop = held
             .moves
