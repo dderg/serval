@@ -2177,10 +2177,12 @@ impl RatioSmoothing {
         if reach > SPAN_MIN_LEN_MM && self.open_rest.is_none() && !closes_a_rest {
             self.lay_crawl_valley((spans, advance_spans), rule, (seam, crossing), table_end);
         }
-        let slowest = (!leg.rests && self.open_rest.is_none())
-            .then(|| slowest_crawl(leaders, leg, table_end))
-            .flatten();
-        if let Some(crawl) = slowest {
+        let crawls = if leg.rests || self.open_rest.is_some() {
+            [None; 3]
+        } else {
+            leg_crawls(leaders, leg, table_end)
+        };
+        for crawl in crawls.into_iter().flatten() {
             self.lay_crawl_valley((spans, advance_spans), rule, crawl, table_end);
         }
         let mut crossings = LegCrossings::of(leaders);
@@ -3613,8 +3615,8 @@ fn ratio_steps_within(spans: &[RatioSpan], from: f64, to: f64) -> Option<(f64, f
     Some((first, steps.last().unwrap_or(first)))
 }
 
-/// Where inside `leg`, off its seams, the shaped leaders are slowest, if
-/// they crawl there ([`Crossing::crawls`]): the path there and how a valley
+/// Where inside `leg`, off its seams, the shaped leaders crawl
+/// ([`Crossing::crawls`]), in path order: the path there and how a valley
 /// there reads them. Shaping spreads a raw reversal over the kernels'
 /// support, so where the move into it brakes unlike the move out of it
 /// launches, the shaped velocity passes through zero off the raw seam,
@@ -3625,17 +3627,19 @@ fn ratio_steps_within(spans: &[RatioSpan], from: f64, to: f64) -> Option<(f64, f
 /// when they brake for longer than a probe interval, so the foot of that
 /// descent is searched as well as the slowest probe, however the leg's two
 /// seam speeds compare: mirrored seams tie to rounding, which the clock
-/// offset decides. A leg whose every knot interval, or every searched
-/// probe, provably stays faster has none, and one slowest at an end leaves
-/// it to that seam's crossing.
-fn slowest_crawl(
+/// offset decides. A leg between two reversals closer than the shaping
+/// spreads them holds a turnaround off each of its seams, so every search
+/// that finds a crawl lays one. A leg whose every knot interval, or every
+/// searched probe, provably stays faster has none, and one slowest at an
+/// end leaves it to that seam's crossing.
+fn leg_crawls(
     leaders: &ShapedLeaders,
     leg: &RampLeg,
     table_end: f64,
-) -> Option<(f64, Crossing)> {
+) -> [Option<(f64, Crossing)>; 3] {
     let path = LegPath::of(leaders, leg);
     if path.outruns(ADVANCE_VALLEY_SPEED_MM_S) {
-        return None;
+        return [None; 3];
     }
     let speed = LegSpeed::over(path, table_end);
     let probe_speed = |index: usize| speed.at(speed.probes[index]);
@@ -3647,27 +3651,33 @@ fn slowest_crawl(
         .min_by(|left, right| left.1.total_cmp(&right.1))
         .expect("a leg has probes");
     let last_probe = speed.probes.len() - 1;
-    let next_to_a_fast_seam = [0, last_probe]
-        .into_iter()
-        .filter(|&end| end != slowest_probe && probe_speed(end) >= ADVANCE_VALLEY_SPEED_MM_S)
-        .map(|end| speed.descent_foot(end));
-    let (turn, _) = std::iter::once(slowest_probe)
-        .chain(next_to_a_fast_seam)
-        .filter_map(|index| {
-            let searched_speed = probe_speed(index);
-            if searched_speed >= ADVANCE_VALLEY_SPEED_MM_S
-                && speed.outruns_rest_near(index, ADVANCE_VALLEY_SPEED_MM_S)
-            {
-                return None;
-            }
-            let turn = speed.slowest_near(index);
-            let turn_speed = speed.at(turn);
-            let at_an_end = (index == 0 || index == last_probe) && turn_speed >= searched_speed;
-            (!at_an_end).then_some((turn, turn_speed))
-        })
-        .min_by(|left, right| left.1.total_cmp(&right.1))?;
-    let crossing = Crossing::valley_at(leaders, turn);
-    crossing.crawls().then(|| (speed.path_at(turn), crossing))
+    let foot_from = |end: usize| {
+        (end != slowest_probe && probe_speed(end) >= ADVANCE_VALLEY_SPEED_MM_S)
+            .then(|| speed.descent_foot(end))
+            .filter(|&foot| foot != slowest_probe)
+    };
+    let first_foot = foot_from(0);
+    let searched = [
+        Some(slowest_probe),
+        first_foot,
+        foot_from(last_probe).filter(|&foot| Some(foot) != first_foot),
+    ];
+    let mut crawls = searched.map(|index| {
+        let index = index?;
+        let searched_speed = probe_speed(index);
+        if searched_speed >= ADVANCE_VALLEY_SPEED_MM_S
+            && speed.outruns_rest_near(index, ADVANCE_VALLEY_SPEED_MM_S)
+        {
+            return None;
+        }
+        let turn = speed.slowest_near(index);
+        let at_an_end = (index == 0 || index == last_probe) && speed.at(turn) >= searched_speed;
+        let crossing = Crossing::valley_at(leaders, turn);
+        (!at_an_end && crossing.crawls()).then(|| (speed.path_at(turn), crossing))
+    });
+    let along = |crawl: &Option<(f64, Crossing)>| crawl.map_or(f64::INFINITY, |(s, _)| s);
+    crawls.sort_by(|left, right| along(left).total_cmp(&along(right)));
+    crawls
 }
 
 /// The largest extrusion ratio `spans` lay within `reach` of `s`.
