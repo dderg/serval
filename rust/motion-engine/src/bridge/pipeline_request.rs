@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, TryRecvError};
 use motion_core::lock_ext::LockExt;
+use motion_core::pump::{BuzzParams, BuzzToken};
 use motion_core::worker::{NudgeParams, StreamWorkerError, StreamWorkerHandle};
 
 pub(crate) enum PipelineRequest {
@@ -14,6 +15,7 @@ pub(crate) enum PipelineRequest {
     HoldStartUntil(f64),
     SwapMesh(MeshSwap),
     Nudge(NudgeParams),
+    Buzz(BuzzParams),
 }
 
 pub(crate) struct MeshSwap {
@@ -21,10 +23,19 @@ pub(crate) struct MeshSwap {
     pub(crate) gcode_z: f64,
 }
 
+/// What a served request leaves for the engine to adopt.
+pub(crate) enum Served {
+    Done,
+    Mesh(MeshSwap),
+    Buzz(BuzzToken),
+}
+
 enum Resolution {
     Served,
     Unit(Receiver<()>),
     Checked(Receiver<Result<(), String>>),
+    Arming(Receiver<Result<BuzzToken, String>>),
+    Armed(BuzzToken),
 }
 
 pub(crate) struct PendingRequest {
@@ -47,8 +58,13 @@ impl PendingRequest {
         }
     }
 
-    pub(crate) fn into_request(self) -> PipelineRequest {
-        self.request
+    pub(crate) fn into_served(self) -> Served {
+        match (self.request, self.resolution) {
+            (PipelineRequest::SwapMesh(swap), _) => Served::Mesh(swap),
+            (PipelineRequest::Buzz(_), Some(Resolution::Armed(token))) => Served::Buzz(token),
+            (PipelineRequest::Buzz(_), _) => unreachable!("a served buzz holds its token"),
+            _ => Served::Done,
+        }
     }
 
     pub(crate) fn advance(
@@ -67,9 +83,9 @@ impl PendingRequest {
             }
         }
         self.resolution
-            .as_ref()
+            .as_mut()
             .expect("a sent request has a resolution")
-            .is_served()
+            .poll()
     }
 
     fn send(&self, planner: &StreamWorkerHandle) -> Result<Resolution, StreamWorkerError> {
@@ -82,16 +98,26 @@ impl PendingRequest {
                 Resolution::Unit(planner.update_mesh_try_start(swap.mesh.clone(), swap.gcode_z)?)
             }
             PipelineRequest::Nudge(params) => Resolution::Checked(planner.submit_nudge(*params)?),
+            PipelineRequest::Buzz(params) => {
+                Resolution::Arming(planner.submit_buzz(params.clone())?)
+            }
         })
     }
 }
 
 impl Resolution {
-    fn is_served(&self) -> Result<bool, String> {
+    fn poll(&mut self) -> Result<bool, String> {
         let received = match self {
-            Self::Served => return Ok(true),
+            Self::Served | Self::Armed(_) => return Ok(true),
             Self::Unit(done) => done.try_recv().map(Ok),
             Self::Checked(done) => done.try_recv(),
+            Self::Arming(verdict) => match verdict.try_recv() {
+                Ok(armed) => {
+                    *self = Self::Armed(armed?);
+                    return Ok(true);
+                }
+                Err(error) => Err(error),
+            },
         };
         match received {
             Ok(result) => result.map(|()| true),
