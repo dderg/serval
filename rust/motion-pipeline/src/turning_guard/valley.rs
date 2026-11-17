@@ -167,6 +167,11 @@ impl CellTrack {
         self.base
     }
 
+    #[cfg(test)]
+    pub fn stored_cells(&self) -> i64 {
+        self.cells.len() as i64
+    }
+
     fn index(&self, n: i64) -> usize {
         usize::try_from(n - self.base)
             .ok()

@@ -52,11 +52,39 @@ fn a_move_off_the_toolhead_after_a_prime_fails_as_a_discontinuity() {
 /// re-opens. Strokes of 40 s at 1 mm/s must not grid whole held moves.
 #[test]
 fn the_guard_grids_slow_strokes_within_its_windows() {
+    let most = most_held_over_slow_strokes(|guard| guard.grid.end() - guard.grid.base());
+    let bound = window_cells_bound();
+    assert!(
+        most <= bound,
+        "the guard gridded {most} cells of slow strokes, past the {bound} its windows read"
+    );
+}
+
+/// The crawl scan keeps the cells it tracks within the same windows: one
+/// crawl at 1 mm/s spans every stroke, and its run is not held cell by cell.
+#[test]
+fn the_guard_tracks_slow_strokes_within_its_windows() {
+    let most = most_held_over_slow_strokes(|guard| guard.valleys.track.stored_cells());
+    let bound = window_cells_bound();
+    assert!(
+        most <= bound,
+        "the guard tracked {most} cells of slow strokes, past the {bound} its windows read"
+    );
+}
+
+fn window_cells_bound() -> i64 {
     let chain = BenchChain::new();
-    let mut guard = TurningGuard::new(chain.config.clone(), &chain.chains, &HOME);
+    let guard = TurningGuard::new(chain.config.clone(), &chain.chains, &HOME);
     let (back, ahead) = guard.span;
     let budget_cells = (VALLEY_LEAD_BUDGET_S / guard.h()).ceil() as i64;
-    let bound = 2 * (back + ahead + 4 + 2 * budget_cells);
+    2 * (back + ahead + 4 + 2 * budget_cells)
+}
+
+/// The most `held` reads of a guard fed [`SLOW_STROKES`] at
+/// [`CRAWL_FEED_MM_S`], after each planned item.
+fn most_held_over_slow_strokes(held: impl Fn(&TurningGuard) -> i64) -> i64 {
+    let chain = BenchChain::new();
+    let mut guard = TurningGuard::new(chain.config.clone(), &chain.chains, &HOME);
     let mut lines = vec![line(1, HOME, SLOW_STROKES[0], 0.0, CRAWL_FEED_MM_S)];
     for (seq, ends) in SLOW_STROKES.windows(2).enumerate() {
         lines.push(line(seq + 2, ends[0], ends[1], STROKE_E_MM, CRAWL_FEED_MM_S));
@@ -64,12 +92,9 @@ fn the_guard_grids_slow_strokes_within_its_windows() {
     let mut most = 0;
     for item in chain.plan(&lines) {
         assert!(guard.feed(item, &mut |_| true));
-        most = most.max(guard.grid.end() - guard.grid.base());
+        most = most.max(held(&guard));
     }
-    assert!(
-        most <= bound,
-        "the guard gridded {most} cells of slow strokes, past the {bound} its windows read"
-    );
+    most
 }
 
 #[test]
