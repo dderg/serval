@@ -537,6 +537,17 @@ fn valid_topology_builds_planner_config_at_read_time() {
 }
 
 #[test]
+fn a_zero_corner_deviation_is_refused_at_read_time() {
+    let cfg = corexy_with_x_axis_body(
+        "post_processors: is\n",
+        "[post_processor is]\ntype: smooth_bell\nsmooth_time: 0.016\n",
+    )
+    .replacen(MINIMAL, &format!("{MINIMAL}corner_deviation: 0\n"), 1);
+    let err = planner_config_err(&cfg);
+    assert!(err.contains("corner_deviation must be above 0"), "{err}");
+}
+
+#[test]
 fn two_kernels_on_one_axis_rejected_at_read_time() {
     let err = planner_config_err(&corexy_with_x_axis_body(
         "post_processors: bell, shaper_x\n",
