@@ -277,9 +277,12 @@ case "$MODE" in
         [[ -n "${SIM_FUZZ_JOBS:-}" ]] && DOCKER_ARGS+=(-e SIM_FUZZ_JOBS)
         # A planner allocation blow-up (#901) ends its own scenario under the
         # container cap above; a world past its share is reported `memory`
-        # (tools/sim/fuzzing/memory.py).
+        # (tools/sim/fuzzing/memory.py). --init: the SIGTERM slots.py sends at
+        # a batch's hold cap reaches docker, which passes it to the
+        # container's PID 1, and a bare python3 there ignores it; the
+        # container would outlive its slot.
         rc=0
-        docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} -v "$FUZZ_ROOT:$FUZZ_ROOT" \
+        docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} --init -v "$FUZZ_ROOT:$FUZZ_ROOT" \
             --entrypoint python3 "$IMAGE_TAG" tools/sim/fuzz.py --out-root "$FUZZ_ROOT" \
             ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || rc=$?
         if [[ "$(id -u)" != 0 ]]; then

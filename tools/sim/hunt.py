@@ -5,21 +5,25 @@ released between batches so other agents' jobs interleave.
 
     python3 tools/sim/hunt.py --seeds 1000..2999 --run-name hunt-1000
 
-Each batch is `slots.py run -- tools/sim/run.sh fuzz --seed ... --run-name`,
-whose ledger (.sim-fuzz/<run-name>/ledger.jsonl) records every seed as it
-finishes; a rerun of this command resumes after the recorded ones. The next
-batch's size comes from the last batch's seeds per minute of slot time.
+Each batch is `slots.py run --kind sim -- tools/sim/run.sh fuzz --seed ...
+--run-name`, whose ledger (.sim-fuzz/<run-name>/ledger.jsonl) records every
+seed as it finishes; a rerun of this command resumes after the recorded ones.
+The next batch's size comes from the last batch's seeds per minute of slot
+time. A batch that slots.py ends from outside (its hold cap, its memory cap)
+stops the hunt under that name; its unfinished seeds stay pending.
 """
 
 from __future__ import annotations
 
 import argparse
+import enum
 import json
 import pathlib
 import subprocess
 import sys
 import tempfile
 import time
+from typing import Optional
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SLOTS = REPO_ROOT / "scripts" / "slots.py"
@@ -30,6 +34,25 @@ FIRST_BATCH = 40
 MIN_BATCH = 8
 MAX_BATCH = 400
 SECONDS_PER_MINUTE = 60
+SLOT_KIND = "sim"
+
+
+class SlotEnd(enum.Enum):
+    """slots.py exits that end a batch from outside (scripts/slots.py
+    HOLD_EXPIRED_EXIT, MEMORY_CAP_EXIT)."""
+
+    HOLD_CAP = 98
+    MEMORY_CAP = 99
+
+
+class BatchEnded(RuntimeError):
+    def __init__(self, end: SlotEnd, message: str):
+        super().__init__(message)
+        self.end = end
+
+
+def slot_end(returncode: int) -> Optional[SlotEnd]:
+    return next((end for end in SlotEnd if end.value == returncode), None)
 
 
 def _seed_range(text: str) -> range:
@@ -52,18 +75,23 @@ def next_size(done: int, slot_s: float, target_s: float) -> int:
     return max(MIN_BATCH, min(MAX_BATCH, round(done * target_s / slot_s)))
 
 
-def _run_batch(seeds: list[int], run_name: str, extra: list[str]) -> float:
-    """Seconds the batch held its slot (from acquisition to release)."""
+def _run_batch(
+    seeds: list[int], run_name: str, extra: list[str]
+) -> tuple[int, float]:
+    """slots.py's exit status, and the seconds the batch held its slot
+    (from acquisition to release)."""
     fuzz = [str(RUN_SH), "fuzz", "--seed", ",".join(map(str, seeds))]
     fuzz += ["--run-name", run_name, *extra]
     with tempfile.NamedTemporaryFile("r", prefix="hunt-slot-") as stamp:
         inner = f'date +%s.%N > "{stamp.name}"; exec "$@"'
-        command = [sys.executable, str(SLOTS), "run", "--"]
-        command += ["bash", "-c", inner, "_", *fuzz]
-        subprocess.run(command, cwd=REPO_ROOT, check=False)
+        command = [sys.executable, str(SLOTS), "run", "--kind", SLOT_KIND]
+        command += ["--", "bash", "-c", inner, "_", *fuzz]
+        returncode = subprocess.run(
+            command, cwd=REPO_ROOT, check=False
+        ).returncode
         acquired = stamp.read().strip()
     started = float(acquired) if acquired else time.time()
-    return time.time() - started
+    return returncode, time.time() - started
 
 
 def hunt(
@@ -84,8 +112,17 @@ def hunt(
             f"{len(pending)} pending)",
             flush=True,
         )
-        slot_s = _run_batch(batch, run_name, extra)
+        returncode, slot_s = _run_batch(batch, run_name, extra)
         finished = len(recorded_seeds(run_name) & set(batch))
+        end = slot_end(returncode)
+        if end:
+            raise BatchEnded(
+                end,
+                f"hunt {run_name}: batch {batch[0]}..{batch[-1]} ended by "
+                f"slots.py {end.name} (exit {returncode}) after {slot_s:.0f} s; "
+                f"{finished} of its {len(batch)} seeds recorded, the rest "
+                f"stay pending",
+            )
         if finished == 0:
             print(
                 f"hunt {run_name}: batch recorded nothing; stopping", flush=True
@@ -105,12 +142,16 @@ def main(argv=None) -> int:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--batch-minutes", type=float, default=10.0)
     args, extra = parser.parse_known_args(argv)
-    hunt(
-        args.seeds,
-        args.run_name,
-        args.batch_minutes * SECONDS_PER_MINUTE,
-        extra,
-    )
+    try:
+        hunt(
+            args.seeds,
+            args.run_name,
+            args.batch_minutes * SECONDS_PER_MINUTE,
+            extra,
+        )
+    except BatchEnded as ended:
+        print(ended, file=sys.stderr, flush=True)
+        return ended.end.value
     return 0
 
 
