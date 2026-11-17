@@ -11,6 +11,7 @@ Pin conventions (MACH_LINUX + libsim_intercept):
 
 from __future__ import annotations
 
+import enum
 from typing import Optional
 
 COMMON_TAIL = """
@@ -2602,6 +2603,7 @@ def _bench_corexy_config(
     printer: str,
     e_chain: str,
     post_processors: str,
+    xy_chains: tuple[str, str] = ("shaper_x", "shaper_y"),
 ) -> str:
     return f"""\
 [mcu]
@@ -2625,7 +2627,7 @@ position_endstop: 0
 position_max: 300
 endstop_pin: ^gpiochip0/gpio10
 homing_speed: 10
-post_processors: shaper_x
+post_processors: {xy_chains[0]}
 
 [axis y]
 position_min: 0
@@ -2633,7 +2635,7 @@ position_endstop: 0
 position_max: 300
 endstop_pin: ^gpiochip0/gpio11
 homing_speed: 10
-post_processors: shaper_y
+post_processors: {xy_chains[1]}
 
 [axis z]
 position_min: -5
@@ -2709,8 +2711,87 @@ enable_force_move: True
 """
 
 
-def bench_print_config(h7_pty: str, gcode_dir: str) -> str:
-    """The Pi bench's tools/bench/printer.cfg on sim pins."""
+BENCH_KERNELS = """\
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 50
+
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 44"""
+
+
+class BenchXy(enum.Enum):
+    """The X/Y chains of `bench_print_config`: the bench's own kernels,
+    bell kernels in their place (#885), or its kernels followed by
+    mode_inverse (#890)."""
+
+    KERNELS = (("shaper_x", "shaper_y"), BENCH_KERNELS)
+    BELL = (
+        ("shaper_x", "shaper_y"),
+        """\
+[post_processor shaper_x]
+type: smooth_bell
+smooth_time: 0.02
+
+[post_processor shaper_y]
+type: smooth_bell
+smooth_time: 0.025""",
+    )
+    MODE_INVERSE = (
+        ("shaper_x, inv_x", "shaper_y, inv_y"),
+        BENCH_KERNELS
+        + """
+
+[post_processor inv_x]
+type: mode_inverse
+frequency_hz: 50
+damping_ratio: 0.1
+
+[post_processor inv_y]
+type: mode_inverse
+frequency_hz: 44
+damping_ratio: 0.1""",
+    )
+
+
+class BenchAdvance(enum.Enum):
+    """The extruder chain of `bench_print_config`: the bench's linear
+    advance, or snapshots/cases/nonlinear_pa/recipr.cfg's reciprocal
+    advance and triangle kernel (#885)."""
+
+    LINEAR = (
+        "pa",
+        """\
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.03""",
+    )
+    RECIPR = (
+        "pa, e_smoothing",
+        """\
+[post_processor pa]
+type: recipr_pressure_advance
+linear_advance: 0.0
+nonlinear_offset: 0.06
+linearization_velocity: 2.0
+
+[post_processor e_smoothing]
+type: smooth_triangle
+smooth_time: 0.005""",
+    )
+
+
+def bench_print_config(
+    h7_pty: str,
+    gcode_dir: str,
+    xy: BenchXy = BenchXy.KERNELS,
+    advance: BenchAdvance = BenchAdvance.LINEAR,
+) -> str:
+    """The Pi bench's tools/bench/printer.cfg on sim pins, its X/Y and
+    extruder chains as `xy` and `advance` name."""
+    xy_chains, xy_sections = xy.value
+    e_chain, e_sections = advance.value
     return _bench_corexy_config(
         h7_pty,
         gcode_dir,
@@ -2721,19 +2802,9 @@ max_jerk: 0
 corner_deviation: 0.21
 max_z_velocity: 25
 max_z_accel: 100""",
-        e_chain="pa",
-        post_processors="""\
-[post_processor pa]
-type: linear_pressure_advance
-k: 0.03
-
-[post_processor shaper_x]
-type: smooth_mzv
-frequency_hz: 50
-
-[post_processor shaper_y]
-type: smooth_zv
-frequency_hz: 44""",
+        e_chain=e_chain,
+        post_processors=f"{e_sections}\n\n{xy_sections}",
+        xy_chains=xy_chains,
     )
 
 
