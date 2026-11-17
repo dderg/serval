@@ -171,7 +171,7 @@ SOAK_MATRIX = [
         analyze_timeout_s=SOAK_ANALYZE_TIMEOUT_S,
     ),
 ]
-CRAWL_FAILS_UNTIL = {"crawl_s20": "#1003"}
+CRAWL_FAILS_UNTIL = {"crawl_s20": "#1003", "mid_crawl_s5_300s": "#1007"}
 CRAWL_MATRIX = [
     Row(
         spec.name,
