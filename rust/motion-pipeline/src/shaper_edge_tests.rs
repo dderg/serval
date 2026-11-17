@@ -8,10 +8,10 @@ use geometry::{LawSegment, Move, ScalarLaw, SourceRange, VelocityLimits};
 use trajectory::{AnalyticMoveSpan, SurfaceMode};
 
 use super::{
-    AxisFit, CrowdedVelocityBreaks, EdgeSlivers, Enclosure, FitTol, PostProcessError,
-    TrackSignal, VelocityBreak, cap_contact_seeds, coalesce_degenerate_seeds, edge_inset,
-    edge_velocity_and_acceleration, fit_axis_from_signal, plan_over_seeds, seed_floors,
-    test_signals, velocity_breaks_among,
+    AxisFit, CrowdedVelocityBreaks, EdgeSlivers, Enclosure, FitTol, LadderFloors,
+    PostProcessError, SignalBreak, TrackSignal, breaks_among, cap_contact_seeds,
+    coalesce_degenerate_seeds, edge_inset, edge_velocity_and_acceleration, fit_axis_from_signal,
+    plan_over_seeds, seed_floors, test_signals,
 };
 use crate::lowering::SeamContinuity;
 
@@ -195,9 +195,9 @@ fn a_chain_of_sub_floor_seeds_never_rolls_past_a_velocity_break() {
     let mut seeds = vec![0.0, 1.0, ratio_step];
     seeds.extend((1..16).map(|k| ratio_step + f64::from(k) * 7.0 * FLOOR / 16.0));
     seeds.push(end);
-    let breaks = [VelocityBreak {
+    let breaks = [SignalBreak {
         t: ratio_step,
-        step: -3.4,
+        velocity_step: -3.4,
     }];
     let slivers = coalesce_degenerate_seeds(&mut seeds, &breaks, FLOOR, POSITION_TOL)
         .expect("the ratio step is a floor clear of the end");
@@ -217,14 +217,17 @@ fn velocity_breaks_within_the_floor_of_an_anchor_move_onto_it() {
     let (crowding, near_end) = (1.0 + 0.5 * FLOOR, 2.0 - 0.5 * FLOOR);
     let mut seeds = vec![0.0, 1.0, crowding, near_end, 2.0];
     let breaks = [
-        VelocityBreak { t: 1.0, step: 3.4 },
-        VelocityBreak {
-            t: crowding,
-            step: -1.0,
+        SignalBreak {
+            t: 1.0,
+            velocity_step: 3.4,
         },
-        VelocityBreak {
+        SignalBreak {
+            t: crowding,
+            velocity_step: -1.0,
+        },
+        SignalBreak {
             t: near_end,
-            step: 2.0,
+            velocity_step: 2.0,
         },
     ];
     let slivers = coalesce_degenerate_seeds(&mut seeds, &breaks, FLOOR, POSITION_TOL)
@@ -241,8 +244,14 @@ fn moving_a_velocity_break_past_the_position_tolerance_fails_loudly() {
     let mut seeds = vec![0.0, 1.0, crowding, 2.0];
     let step = 1e6;
     let breaks = [
-        VelocityBreak { t: 1.0, step: 1.0 },
-        VelocityBreak { t: crowding, step },
+        SignalBreak {
+            t: 1.0,
+            velocity_step: 1.0,
+        },
+        SignalBreak {
+            t: crowding,
+            velocity_step: step,
+        },
     ];
     assert_eq!(
         coalesce_degenerate_seeds(&mut seeds, &breaks, FLOOR, POSITION_TOL),
@@ -414,11 +423,16 @@ fn a_velocity_break_that_reads_its_left_value_on_the_seed_is_found() {
         before: 7.2673,
         after: 4.5839,
     };
+    let floors = LadderFloors {
+        jerk_noise_cubed: 0.0,
+        high_degree: FLOOR,
+        cubic: FLOOR,
+    };
     assert_eq!(
-        velocity_breaks_among(&sig, &[0.0, sig.at, 0.02], 1e-6),
-        vec![VelocityBreak {
+        breaks_among(&sig, &[0.0, sig.at, 0.02], TOL, floors),
+        vec![SignalBreak {
             t: sig.at,
-            step: sig.after - sig.before,
+            velocity_step: sig.after - sig.before,
         }]
     );
 }
