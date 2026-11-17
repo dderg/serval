@@ -18,8 +18,7 @@ fn bench_printer_with(name: &str, corner: &str) -> PathBuf {
         "{BENCH_PRINTER} no longer sets {BENCH_CORNER_DEVIATION}"
     );
     let config = std::env::temp_dir().join(format!("{name}_{}.cfg", std::process::id()));
-    std::fs::write(&config, text.replacen(BENCH_CORNER_DEVIATION, corner, 1))
-        .expect("temp config");
+    std::fs::write(&config, text.replacen(BENCH_CORNER_DEVIATION, corner, 1)).expect("temp config");
     config
 }
 

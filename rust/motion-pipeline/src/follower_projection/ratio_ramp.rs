@@ -2312,8 +2312,15 @@ impl RatioSmoothing {
             } else if widens_the_last {
                 (zero.0, reach)
             } else {
-                crawl_side(Side::Before, edges.0, reach, laid, rule, zero.0 - rested.max(held))?
-                    .map_or((rested, 0.0), |before| (zero.0, before))
+                crawl_side(
+                    Side::Before,
+                    edges.0,
+                    reach,
+                    laid,
+                    rule,
+                    zero.0 - rested.max(held),
+                )?
+                .map_or((rested, 0.0), |before| (zero.0, before))
             };
             let side_from = if widens_the_last {
                 zero.0
