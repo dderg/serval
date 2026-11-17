@@ -529,6 +529,7 @@ pub fn geometry::ratio_ramp::coupled_bend(f64, f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::crawl_floor(f64, f64) -> f64
 pub fn geometry::ratio_ramp::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
 pub fn geometry::ratio_ramp::crawl_step_window(f64) -> f64
+pub fn geometry::ratio_ramp::fit_speed_miss(f64, f64) -> f64
 pub fn geometry::ratio_ramp::kept_floor(f64, f64) -> f64
 pub fn geometry::ratio_ramp::leader_reach(f64, f64, f64) -> f64
 pub fn geometry::ratio_ramp::longest_ramp_time(f64, f64) -> f64
@@ -537,6 +538,7 @@ pub fn geometry::ratio_ramp::rest_room_reach_mm(f64) -> f64
 pub fn geometry::ratio_ramp::side_weight(f64, f64, f64) -> (f64, f64, f64)
 pub fn geometry::ratio_ramp::turns_around(f64, f64) -> bool
 pub fn geometry::ratio_ramp::valley_reach(f64, f64) -> f64
+pub fn geometry::ratio_ramp::valley_speed_crawl_rebuild(f64, f64) -> f64
 pub fn geometry::ratio_ramp::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>
 pub mod geometry::segment
 pub struct geometry::segment::CubicSegment
@@ -753,6 +755,8 @@ pub geometry::surface::WarpSample::wy: f64
 pub geometry::surface::WarpSample::wyy: f64
 pub geometry::surface::WarpSample::wyz: f64
 pub geometry::surface::WarpSample::wz: f64
+pub geometry::surface::WarpSample::wzz: f64
+pub const geometry::surface::FADE_FACTOR_IN_BAND: [f64; 4]
 pub mod geometry::vec3
 pub fn geometry::vec3::dist([f64; 3], [f64; 3]) -> f64
 pub mod geometry::velocity
@@ -945,12 +949,14 @@ pub fn geometry::velocity::law::RailPair::acceleration_at(&self, f64) -> f64
 pub fn geometry::velocity::law::RailPair::acceleration_bound(&self) -> f64
 pub fn geometry::velocity::law::RailPair::acceleration_variation(&self, f64, f64) -> f64
 pub struct geometry::velocity::ReachableSpeed
+pub geometry::velocity::ReachableSpeed::ahead_mm: f64
+pub geometry::velocity::ReachableSpeed::behind_mm: f64
 pub geometry::velocity::ReachableSpeed::entry: geometry::SeamLimit
 pub geometry::velocity::ReachableSpeed::exit: geometry::SeamLimit
 pub geometry::velocity::ReachableSpeed::peak_mm_s: f64
 pub geometry::velocity::ReachableSpeed::run_mm: f64
 impl geometry::ReachableSpeed
-pub fn geometry::ReachableSpeed::run_peak(&self, f64) -> f64
+pub fn geometry::ReachableSpeed::peak_under(&self, f64) -> f64
 pub struct geometry::velocity::SeamLimit
 pub geometry::velocity::SeamLimit::ceiling_mm_s: f64
 pub geometry::velocity::SeamLimit::kappa: f64
@@ -1402,12 +1408,14 @@ pub geometry::RatioStep::peak_ratio: f64
 pub geometry::RatioStep::ratio_step: f64
 pub geometry::RatioStep::speed_mm_s: f64
 pub struct geometry::ReachableSpeed
+pub geometry::ReachableSpeed::ahead_mm: f64
+pub geometry::ReachableSpeed::behind_mm: f64
 pub geometry::ReachableSpeed::entry: geometry::SeamLimit
 pub geometry::ReachableSpeed::exit: geometry::SeamLimit
 pub geometry::ReachableSpeed::peak_mm_s: f64
 pub geometry::ReachableSpeed::run_mm: f64
 impl geometry::ReachableSpeed
-pub fn geometry::ReachableSpeed::run_peak(&self, f64) -> f64
+pub fn geometry::ReachableSpeed::peak_under(&self, f64) -> f64
 pub struct geometry::RebuildsWithin
 impl geometry::RebuildsWithin
 pub fn geometry::RebuildsWithin::at(&self, (f64, f64), f64, f64) -> f64
@@ -1548,6 +1556,7 @@ pub const geometry::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::CORNER_DEVIATION_SCV_FACTOR: f64
 pub const geometry::CRAWL_SIDE_WIDEST_MM: f64
 pub const geometry::DEFAULT_CORNER_ALLOWANCE_MM: f64
+pub const geometry::FADE_FACTOR_IN_BAND: [f64; 4]
 pub const geometry::MIN_DEVICE_INTERVAL_S: f64
 pub const geometry::RATIO_RAMP_ENVELOPE_SLOPE: f64
 pub const geometry::RATIO_RAMP_MAX_TIME_S: f64
@@ -1570,6 +1579,7 @@ pub fn geometry::crawl_floor(f64, f64) -> f64
 pub fn geometry::crawl_side_width(f64, impl core::ops::function::FnMut(f64) -> bool) -> core::option::Option<f64>
 pub fn geometry::crawl_step_window(f64) -> f64
 pub fn geometry::extrusion_budgets(&[geometry::frontend::Move], f64, f64, f64) -> alloc::vec::Vec<geometry::ExtrusionBudget>
+pub fn geometry::fit_speed_miss(f64, f64) -> f64
 pub fn geometry::kept_floor(f64, f64) -> f64
 pub fn geometry::leader_reach(f64, f64, f64) -> f64
 pub fn geometry::line_move([f64; 3], [f64; 3], f64, geometry::frontend::MoveContext) -> core::result::Result<geometry::frontend::Move, geometry::frontend::FrontendError>
@@ -1582,4 +1592,5 @@ pub fn geometry::seam_requires_stop(&geometry::frontend::Move, &geometry::fronte
 pub fn geometry::side_weight(f64, f64, f64) -> (f64, f64, f64)
 pub fn geometry::turns_around(f64, f64) -> bool
 pub fn geometry::valley_reach(f64, f64) -> f64
+pub fn geometry::valley_speed_crawl_rebuild(f64, f64) -> f64
 pub fn geometry::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>

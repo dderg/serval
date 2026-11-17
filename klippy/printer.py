@@ -486,16 +486,9 @@ class Printer:
         run_result = self.run_result
         try:
             if run_result == "firmware_restart":
-                handlers = list(
-                    self.event_handlers.get("klippy:firmware_restart", [])
-                )
-                for cb in handlers:
-                    try:
-                        cb()
-                    except BaseException:
-                        logging.exception(
-                            "klippy:firmware_restart handler %r raised", cb
-                        )
+                self._dispatch_stop_event("klippy:firmware_restart")
+            else:
+                self._dispatch_stop_event("klippy:stopping")
             self._dispatch_disconnect()
         except:
             logging.exception("Unhandled exception during post run")
@@ -542,6 +535,13 @@ class Printer:
                 cb()
             except BaseException:
                 logging.exception("klippy:disconnect handler raised")
+
+    def _dispatch_stop_event(self, event):
+        for cb in list(self.event_handlers.get(event, [])):
+            try:
+                cb()
+            except BaseException:
+                logging.exception("%s handler %r raised", event, cb)
 
     def request_exit(self, result):
         if self.run_result is None:
