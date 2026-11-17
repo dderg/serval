@@ -1457,6 +1457,15 @@ impl WidthField {
             .reduce(f64::max)
     }
 
+    /// The first rest at or past `s` among the candidates still to become
+    /// nodes.
+    fn pending_rest_after(&self, s: f64) -> Option<f64> {
+        self.candidates
+            .iter()
+            .filter_map(Candidate::rest)
+            .find(|&rest| rest >= s)
+    }
+
     /// Turns every candidate at or before `through` whose base is known
     /// into a node or drops it, in order, then every seam no candidate
     /// still to come takes a ramp time or a width from. Where the leaders
@@ -2812,7 +2821,7 @@ impl RatioSmoothing {
     /// The path the moving windows over `[lo, hi]` average, `s ± h(s)`
     /// growing along the path.
     fn moving_reach(&self, lo: f64, hi: f64) -> (f64, f64) {
-        (lo - self.reach_back(lo), hi + self.reach_back(hi))
+        (lo - self.reach_back(lo), hi + self.reach_ahead(hi))
     }
 
     /// Which spans the smoothed table reads anywhere on `[lo, hi]`: those
@@ -3056,6 +3065,17 @@ impl RatioSmoothing {
         self.width.pending_rest_before(s).map_or(width, |rest| {
             width.min(WIDTH_SLOPE_BOUND * (s - rest).max(0.0))
         })
+    }
+
+    /// How far ahead of `s` its window averages the table: as far as back
+    /// ([`Self::reach_back`]), but no further than `|h'| ≤ λ` lets the width
+    /// fall to a rest still to become a node: no window reads across a
+    /// rest.
+    fn reach_ahead(&self, s: f64) -> f64 {
+        let reach = self.reach_back(s);
+        self.width
+            .pending_rest_after(s)
+            .map_or(reach, |rest| reach.min(WIDTH_SLOPE_BOUND * (rest - s)))
     }
 
     /// Drops what no window from `s` on reaches: the seams behind the
