@@ -14,11 +14,12 @@ from tools.sim.fuzzing.printer import (
     PrinterSpec,
     Topology,
 )
-from tools.sim.fuzzing.program import Kind
-from tools.sim.fuzzing.scenario import Scenario, with_parts
+from tools.sim.fuzzing.program import Kind, Program, Segment
+from tools.sim.fuzzing.scenario import Lead, Scenario, with_parts
 from tools.sim.fuzzing.timeline import Act
 
 Reproduces = Callable[[list[Scenario]], list[bool]]
+LABEL = "EXCLUDE_OBJECT_"
 
 PLAIN_KNOBS = {
     "shaper_x": None,
@@ -64,12 +65,39 @@ def _knob_changes(scenario: Scenario) -> Iterator[dict]:
         yield {"topology": Topology.ONE_MCU}
     if spec.mesh is not MeshKind.NONE and not _uses_mesh(scenario):
         yield NO_MESH
+    if spec.runout_sensor and not _targets(scenario, Act.RUNOUT, "hold_s"):
+        yield {"runout_sensor": False}
+    if spec.hotend_model and Kind.HEAT_WAIT not in _kinds(scenario):
+        yield {"hotend_model": False}
+
+
+def _kinds(scenario: Scenario) -> set:
+    return {kind for p in scenario.programs for kind in p.kinds()}
 
 
 def _uses_mesh(scenario: Scenario) -> bool:
     acts = {a.act for a in scenario.timeline}
-    kinds = {kind for p in scenario.programs for kind in p.kinds()}
+    kinds = _kinds(scenario)
     return bool(acts & {Act.MESH_LOAD, Act.MESH_CLEAR}) or Kind.MESH in kinds
+
+
+def _unlabelled(prog: Program) -> Program:
+    segments = tuple(
+        Segment(
+            s.kind,
+            tuple(line for line in s.lines if not line.startswith(LABEL)),
+        )
+        for s in prog.segments
+        if s.kind is not Kind.OBJECTS
+    )
+    return dataclasses.replace(prog, segments=segments)
+
+
+def _without_objects(scenario: Scenario) -> Scenario:
+    """[exclude_object] off and the object labels it needs gone."""
+    programs = tuple(_unlabelled(p) for p in scenario.programs)
+    plainer = dataclasses.replace(scenario.printer, exclude_object=False)
+    return dataclasses.replace(scenario, printer=plainer, programs=programs)
 
 
 def _plainer_printers(scenario: Scenario) -> Iterator[Scenario]:
@@ -78,6 +106,10 @@ def _plainer_printers(scenario: Scenario) -> Iterator[Scenario]:
         plainer: PrinterSpec = dataclasses.replace(spec, **change)
         if plainer != spec:
             yield dataclasses.replace(scenario, printer=plainer)
+    if spec.exclude_object and not _targets(
+        scenario, Act.EXCLUDE_OBJECT, "name"
+    ):
+        yield _without_objects(scenario)
 
 
 def _without_action(scenario: Scenario, index: int) -> Scenario:
@@ -111,7 +143,11 @@ def _without_last_print(scenario: Scenario) -> Scenario:
     actions = tuple(a for a in scenario.timeline if a.print_index != last)
     programs = tuple(p for p in scenario.programs if p.name in prints)
     return dataclasses.replace(
-        scenario, prints=prints, timeline=actions, programs=programs
+        scenario,
+        prints=prints,
+        timeline=actions,
+        programs=programs,
+        leads=scenario.leads[:last],
     )
 
 
@@ -120,6 +156,8 @@ def candidates(scenario: Scenario) -> Iterator[Scenario]:
     biggest cuts first."""
     if len(scenario.prints) > 1:
         yield _without_last_print(scenario)
+    if any(lead != Lead() for lead in scenario.leads):
+        yield dataclasses.replace(scenario, leads=())
     for index in reversed(range(len(scenario.timeline))):
         yield _without_action(scenario, index)
     for prog in scenario.programs:
