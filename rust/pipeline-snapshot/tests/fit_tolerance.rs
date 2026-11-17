@@ -23,6 +23,7 @@ mod corpus;
 const DENSE_PRINT: &str = "voron_dense_top_layers";
 const BOWDEN_TEST_CONFIG: &str = "rust/motion-core/tests/configs/p1_bowden_ramp.cfg";
 const HYBRID_TEST_CONFIG: &str = "rust/motion-core/tests/configs/bench_ramp_hybrid.cfg";
+const NO_ADVANCE_CONFIG: &str = "rust/motion-core/tests/configs/bench_no_advance.cfg";
 
 fn dense_cases(configs: &[&str]) -> Vec<(String, String, PathBuf)> {
     corpus::print_cases(DENSE_PRINT, configs)
@@ -201,6 +202,14 @@ fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_the_neptune_co
     assert_every_accepted_fit_piece_holds(first_layers_cases(corpus::NEPTUNE_CONFIG));
 }
 
+/// The first layers on the bench printer with no advance on its extruder:
+/// e lays its ratio ramps alone, its source fitted to the absolute budget,
+/// where a split lands a tenth of a microsecond short of a segment's end.
+#[test]
+fn every_fit_piece_of_the_first_layers_holds_the_fit_tolerance_on_a_follower_without_advance() {
+    assert_every_accepted_fit_piece_holds(first_layers_cases(NO_ADVANCE_CONFIG));
+}
+
 /// The Trident print that first broke the follower cache, on `config`'s
 /// kernel-free extruder chain.
 fn follower_cache_cases(config: &str) -> Vec<(String, String, PathBuf)> {
@@ -366,6 +375,7 @@ fn audited_case_names() -> BTreeSet<String> {
     cases.extend(dense_cases(&[
         "tools/bench/configs/p1_bowden_bedslinger_kernel_cd0.04.cfg",
     ]));
+    cases.extend(first_layers_cases(NO_ADVANCE_CONFIG));
     cases.extend(corpus::print_slice_cases(
         &corpus::FIRST_LAYERS_FROM_74_S,
         &["tools/bench/configs/trident_kernel.cfg"],
