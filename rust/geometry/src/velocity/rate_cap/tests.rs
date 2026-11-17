@@ -50,7 +50,10 @@ fn blend_entry() -> ReachableSpeed {
 #[test]
 fn the_trade_spends_no_budget_on_speed_the_move_cannot_reach() {
     for (move_name, reachable) in [("blend exit", blend_exit()), ("blend entry", blend_entry())] {
-        assert!(RATE.at(reachable.peak_mm_s, ACCEL) > MAX_RATE, "{move_name}");
+        assert!(
+            RATE.at(reachable.peak_mm_s, ACCEL) > MAX_RATE,
+            "{move_name}"
+        );
 
         let (ceiling, budget) = RATE.capped(MAX_RATE, &reachable, (380.0, ACCEL));
 
