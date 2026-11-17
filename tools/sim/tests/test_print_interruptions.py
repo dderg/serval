@@ -437,7 +437,9 @@ def test_emergency_stop_while_dwell_drains(sim_world, topology):
 
 def _peak_rss_kb(world):
     status = pathlib.Path(f"/proc/{world.klippy_proc.pid}/status").read_text()
-    peak = next(line for line in status.splitlines() if line.startswith("VmHWM:"))
+    peak = next(
+        line for line in status.splitlines() if line.startswith("VmHWM:")
+    )
     return int(peak.split()[1])
 
 
@@ -449,6 +451,7 @@ def _crawl_section():
     return lines + ["G90", FULL_SPEED_OVERRIDE]
 
 
+@pytest.mark.expected_seconds(60)
 def test_crawl_speed_override_mid_print(sim_world):
     """`M220 S1` mid-print crawls 24 mm of strokes at 1 mm/s (#901): klippy
     stays up, its peak RSS does not grow with the crawl, and the print
