@@ -2295,8 +2295,8 @@ impl RatioSmoothing {
         let rested = self.rested_through(turn);
         let held = turn - self.back_reach_limit(turn);
         let window = steps.window;
-        let leaves_a_side_untaken = |s: f64| rested >= held || s - window - reach >= held;
-        let ownable = |s: f64| untaken(s) && leaves_a_side_untaken(s);
+        let leaves_a_side = |opens_at: f64| rested >= held || opens_at - reach >= held;
+        let ownable = |s: f64| untaken(s) && leaves_a_side(s - window);
         let laid = (&*self, tables.1, table_end);
         let (zero, sides, floors) = loop {
             let zero = steps.zero_stretch();
@@ -2323,7 +2323,8 @@ impl RatioSmoothing {
             } else {
                 start - before
             };
-            if !steps.own_within(tables, (side_from, zero.1 + after), &ownable) {
+            let owns_more = steps.own_within(tables, (side_from, zero.1 + after), &ownable);
+            if !owns_more && !steps.widen_far_steps(self, (tables.0, rule), &leaves_a_side) {
                 break (
                     (start, zero.1),
                     (before, after),
@@ -2344,7 +2345,7 @@ impl RatioSmoothing {
                     Table::Laid => &mut self.laid,
                     Table::Advance => &mut self.advance,
                 };
-                seams.cap_step(s, steps.window);
+                seams.cap_step(s, owned.half_width);
             }
         }
         self.place_valley(turn, (zero, sides), floors);
