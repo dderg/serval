@@ -537,7 +537,6 @@ pub fn geometry::ratio_ramp::rest_room_reach_mm(f64) -> f64
 pub fn geometry::ratio_ramp::side_weight(f64, f64, f64) -> (f64, f64, f64)
 pub fn geometry::ratio_ramp::turns_around(f64, f64) -> bool
 pub fn geometry::ratio_ramp::valley_reach(f64, f64) -> f64
-pub fn geometry::ratio_ramp::widest_crawl_reach(f64) -> f64
 pub fn geometry::ratio_ramp::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>
 pub mod geometry::segment
 pub struct geometry::segment::CubicSegment
@@ -797,7 +796,6 @@ pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometr
 pub fn geometry::velocity::law::LawSegment::interpolated_acceleration_bound(&self, f64, f64) -> f64
 pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
-pub fn geometry::velocity::law::LawSegment::rail_defects(&self) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::PairDefect> + '_
 pub fn geometry::velocity::law::LawSegment::rail_pairs(&self, f64, f64) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::RailPair> + '_
 pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
@@ -912,7 +910,6 @@ pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometr
 pub fn geometry::velocity::law::LawSegment::interpolated_acceleration_bound(&self, f64, f64) -> f64
 pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
-pub fn geometry::velocity::law::LawSegment::rail_defects(&self) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::PairDefect> + '_
 pub fn geometry::velocity::law::LawSegment::rail_pairs(&self, f64, f64) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::RailPair> + '_
 pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
@@ -1262,9 +1259,6 @@ pub fn geometry::segment::FollowerDemand::span(&self, f64, f64, f64) -> Self
 pub struct geometry::FollowerStepLoad
 pub geometry::FollowerStepLoad::axis_index: usize
 pub geometry::FollowerStepLoad::s_per_mm: f64
-pub struct geometry::FollowerWord
-pub geometry::FollowerWord::axis_index: usize
-pub geometry::FollowerWord::letter: u8
 pub struct geometry::GcodePos(pub [f64; 3])
 impl geometry::space::GcodePos
 pub fn geometry::space::GcodePos::to_machine(self, core::option::Option<&geometry::surface::SurfaceTransform>) -> geometry::space::MachinePos
@@ -1289,7 +1283,6 @@ pub fn geometry::velocity::law::LawSegment::flipped_cut(&self, f64, f64, geometr
 pub fn geometry::velocity::law::LawSegment::interpolated_acceleration_bound(&self, f64, f64) -> f64
 pub fn geometry::velocity::law::LawSegment::min_velocity(&self) -> f64
 pub fn geometry::velocity::law::LawSegment::new(f64, f64, f64, f64, geometry::velocity::law::ScalarLaw) -> Self
-pub fn geometry::velocity::law::LawSegment::rail_defects(&self) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::PairDefect> + '_
 pub fn geometry::velocity::law::LawSegment::rail_pairs(&self, f64, f64) -> impl core::iter::traits::iterator::Iterator<Item = geometry::velocity::law::RailPair> + '_
 pub fn geometry::velocity::law::LawSegment::reach_over(geometry::velocity::law::ScalarLaw, f64, f64) -> core::option::Option<f64>
 pub fn geometry::velocity::law::LawSegment::state_at(&self, f64) -> (f64, f64, f64)
@@ -1589,5 +1582,4 @@ pub fn geometry::seam_requires_stop(&geometry::frontend::Move, &geometry::fronte
 pub fn geometry::side_weight(f64, f64, f64) -> (f64, f64, f64)
 pub fn geometry::turns_around(f64, f64) -> bool
 pub fn geometry::valley_reach(f64, f64) -> f64
-pub fn geometry::widest_crawl_reach(f64) -> f64
 pub fn geometry::widest_crawl_side_within(f64, f64) -> core::option::Option<f64>
