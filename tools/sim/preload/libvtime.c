@@ -871,6 +871,13 @@ claim_link_slot(void)
 }
 
 static void
+ignore_faults_posted_before_this_process(uint32_t slot)
+{
+    fault.seen_generation = atomic_load_explicit(
+        &vshm->link_faults[slot].generation, memory_order_acquire);
+}
+
+static void
 register_device_link(int master_fd)
 {
     if (device_link_fd >= 0) {
@@ -898,6 +905,7 @@ register_device_link(int master_fd)
     atomic_store_explicit(&link->pts_plus_one, pts + 1, memory_order_release);
     device_link_fd = master_fd;
     device_link_slot = (int)slot;
+    ignore_faults_posted_before_this_process(slot);
     VLOG("device link: master fd %d is pts%u, slot %u", master_fd, pts, slot);
 }
 
