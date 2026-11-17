@@ -34,7 +34,7 @@ fn line(start: [f64; 3], end: [f64; 3], ratio: f64, deviation: f64) -> Move {
 }
 
 fn heading(angle: f64) -> [f64; 3] {
-    [angle.cos(), angle.sin(), 0.0]
+    [libm::cos(angle), libm::sin(angle), 0.0]
 }
 
 fn step(from: [f64; 3], angle: f64, length: f64) -> [f64; 3] {
@@ -52,9 +52,9 @@ fn continuations(
     lengths: &[f64],
 ) -> Vec<[f64; 3]> {
     let out = crate::vec3::sub(p2, p1);
-    let out_angle = out[1].atan2(out[0]);
+    let out_angle = libm::atan2(out[1], out[0]);
     let in_vec = crate::vec3::sub(p1, p0);
-    let turn = out_angle - in_vec[1].atan2(in_vec[0]);
+    let turn = out_angle - libm::atan2(in_vec[1], in_vec[0]);
     let mut ends = vec![step(p2, out_angle + turn, crate::vec3::norm(out))];
     for (&turn, &length) in turns.iter().zip(lengths) {
         ends.push(step(p2, out_angle + turn, length));
@@ -130,9 +130,9 @@ proptest! {
     ) {
         let sagitta = 0.5 * sag_share * deviation;
         prop_assume!(sagitta < radius);
-        let sweep = 2.0 * (1.0 - sagitta / radius).acos();
-        let chord = 2.0 * radius * (0.5 * sweep).sin();
-        let at = |k: f64| [radius * (k * sweep).sin(), radius * (1.0 - (k * sweep).cos()), 0.0];
+        let sweep = 2.0 * libm::acos(1.0 - sagitta / radius);
+        let chord = 2.0 * radius * libm::sin(0.5 * sweep);
+        let at = |k: f64| [radius * libm::sin(k * sweep), radius * (1.0 - libm::cos(k * sweep)), 0.0];
         let (p0, p1, p2, p3) = (at(0.0), at(1.0), at(2.0), at(3.0));
         prop_assume!(chord > 0.01);
         let facets = [

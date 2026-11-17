@@ -106,8 +106,8 @@ impl Layout {
         let mut end = self.at;
         for _ in 0..4 {
             end = [
-                self.at[0] + length * self.heading.cos(),
-                self.at[1] + length * self.heading.sin(),
+                self.at[0] + length * libm::cos(self.heading),
+                self.at[1] + length * libm::sin(self.heading),
                 self.at[2],
             ];
             let inside = (BED_LO_MM..=BED_HI_MM).contains(&end[0])
@@ -162,7 +162,7 @@ impl Layout {
                 radius,
                 sweep,
             } => {
-                let chord = 2.0 * radius * (0.5 * sweep / facets as f64).sin();
+                let chord = 2.0 * radius * libm::sin(0.5 * sweep / facets as f64);
                 for _ in 0..facets {
                     self.heading += sweep / facets as f64;
                     self.go(chord, EXTRUDE_PER_MM * chord);

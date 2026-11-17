@@ -123,7 +123,7 @@ impl BenchChain {
     pub(super) fn plan_with(&self, steps: &[Step], lookahead: Lookahead) -> Vec<PlannedItem> {
         let mut runtime = RuntimeLimits::default();
         let mut fit = FitStage::with_lookahead(self.config.corner, lookahead).into_driver();
-        let mut planner = Planner::with_lookahead(self.config.clone(), Arc::default(), lookahead);
+        let mut planner = Planner::new(self.config.clone(), Arc::default());
         let mut planned = Vec::new();
         let mut collect = |item| {
             planned.push(item);

@@ -12,8 +12,7 @@
 //! capped at the speed that keeps the shaper's pull on it within its
 //! budget's room, where its budget holds curves
 //! ([`ShapedCorners::holds_curves`]). A move leaves here final: the window
-//! plans it as it will commit. It leaves as soon as no later corner can
-//! change it, not only once later moves push it out (#860).
+//! plans it as it will commit.
 
 use std::collections::VecDeque;
 
@@ -22,20 +21,10 @@ use geometry::path::{CurvatureProfile, Line, PathSegment, Segment};
 use geometry::shaped_corner::{blend_apex, stop_turn};
 use geometry::{CornerFitConfig, Move, ShapedCorners, seam_requires_stop};
 
-use crate::fit_stage::Lookahead;
-
 /// The moves the stage holds back: a blend's verdict reaches the move
 /// before its first half, which waits for the second, and its curve cap
 /// reaches the blend before it across a consumed line.
 const HELD_MOVES: usize = 4;
-
-/// What the stage holds before it looks for final moves to release ahead
-/// of [`HELD_MOVES`]: dense moves leave by count within it anyway.
-pub(crate) const EARLY_RELEASE_S: f64 = 0.05;
-
-/// The shortest piece a split leaves, as a share of the approach it slows
-/// ([`splits`]).
-const SLIVER_SHARE: f64 = 0.25;
 
 pub(super) struct Approaches {
     corners: Option<&'static ShapedCorners>,
@@ -53,12 +42,6 @@ pub(super) struct Approaches {
     /// The move leaving the last stop. A corner's approach ends there: the
     /// toolhead starts afresh past it.
     stop_departure: Option<u64>,
-    /// The path behind the newest held move a later corner may still slow
-    /// and split: its approach at the stream's acceleration, and the sliver
-    /// the split leaves.
-    settle_mm: f64,
-    max_accel_mm_s2: f64,
-    lookahead: Lookahead,
 }
 
 /// A blend still held, as its curve cap needs it once the next corner
@@ -71,7 +54,7 @@ struct HeldApex {
 }
 
 impl Approaches {
-    pub(super) fn new(config: CornerFitConfig, max_accel_mm_s2: f64, lookahead: Lookahead) -> Self {
+    pub(super) fn new(config: CornerFitConfig) -> Self {
         Self {
             corners: config.shaped_corners,
             config,
@@ -82,11 +65,6 @@ impl Approaches {
             last_apex: None,
             unsettled_clothoid: None,
             stop_departure: None,
-            settle_mm: config.shaped_corners.map_or(0.0, |corners| {
-                (1.0 + SLIVER_SHARE) * corners.approach_mm(max_accel_mm_s2)
-            }),
-            max_accel_mm_s2,
-            lookahead,
         }
     }
 
@@ -96,14 +74,6 @@ impl Approaches {
             release(m);
             return;
         };
-        assert!(
-            m.segment.spatial.is_none() || m.limits.accel_mm_s2 <= self.max_accel_mm_s2,
-            "approaches: line {} accelerates at {} mm/s², past the {} mm/s² of the \
-             stream's limits its corners' reach is held to",
-            m.source.start_line,
-            m.limits.accel_mm_s2,
-            self.max_accel_mm_s2
-        );
         let mut pieces = vec![m];
         let carried = self.slowing_ahead.take();
         let leg_mm = self.since_corner_mm;
@@ -186,81 +156,6 @@ impl Approaches {
                 release(piece);
             }
         }
-        let held_s: f64 = self
-            .held
-            .iter()
-            .flat_map(|(_, pieces)| pieces)
-            .map(Move::shortest_secs)
-            .sum();
-        if self.lookahead == Lookahead::Settled && held_s > EARLY_RELEASE_S {
-            self.release_settled(corners, release);
-        }
-    }
-
-    /// Releases what no later move can change: the held moves more than
-    /// `settle_mm` of path before the newest one ends, or starts where it
-    /// may be a blend's first half, up to a blend whose curve cap the next
-    /// corner may still lower or a clothoid still unsettled.
-    fn release_settled(&mut self, corners: &ShapedCorners, release: &mut impl FnMut(Move)) {
-        let pending = self.pending(corners);
-        let newest_mm = self.held.back().map_or(0.0, |(_, pieces)| {
-            let opens_blend = pieces
-                .last()
-                .is_some_and(|piece| matches!(piece.segment.spatial, Some(Segment::Clothoid(_))));
-            if opens_blend {
-                pieces.iter().map(path_length).sum()
-            } else {
-                0.0
-            }
-        });
-        let held_mm: f64 = self
-            .held
-            .iter()
-            .flat_map(|(_, pieces)| pieces)
-            .map(path_length)
-            .sum();
-        let mut settled_mm = held_mm - newest_mm - self.settle_mm;
-        for (id, pieces) in self.held.iter_mut() {
-            if pending.contains(&*id) {
-                return;
-            }
-            while let Some(piece) = pieces.first() {
-                let length = path_length(piece);
-                if length > settled_mm {
-                    return;
-                }
-                settled_mm -= length;
-                release(pieces.remove(0));
-            }
-        }
-    }
-
-    /// The held moves a later corner may still cap: the newest blend's
-    /// halves while the next corner may lie close enough to lower their
-    /// speed, and an unsettled clothoid.
-    fn pending(&self, corners: &ShapedCorners) -> Vec<u64> {
-        let mut pending: Vec<u64> = self.unsettled_clothoid.into_iter().collect();
-        let Some(apex) = &self.last_apex else {
-            return pending;
-        };
-        if self.since_corner_mm >= apex.leg_in_mm {
-            return pending;
-        }
-        let fastest = self
-            .held
-            .iter()
-            .filter(|(id, _)| apex.halves.contains(id))
-            .flat_map(|(_, pieces)| pieces)
-            .map(|piece| piece.feedrate_mm_s)
-            .fold(0.0, f64::max);
-        let radii = (
-            self.since_corner_mm / apex.theta,
-            apex.leg_in_mm / apex.theta,
-        );
-        if fastest > corners.arc_speed_floor(radii, apex.room_mm) {
-            pending.extend(apex.halves);
-        }
-        pending
     }
 
     /// Slows `approach_mm` of path back from the end of the held moves
@@ -488,7 +383,7 @@ fn bake(m: &mut Move, accel: f64) {
 /// Whether `m` is a line cut `at` mm along leaves no piece shorter than a
 /// quarter of `approach_mm`.
 fn splits(m: &Move, at: f64, approach_mm: f64) -> bool {
-    let sliver = SLIVER_SHARE * approach_mm;
+    let sliver = 0.25 * approach_mm;
     line_length(m).is_some_and(|length| at >= sliver && length - at >= sliver)
 }
 

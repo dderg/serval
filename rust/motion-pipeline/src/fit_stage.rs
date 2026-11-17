@@ -6,7 +6,6 @@ use geometry::fitter::{
 use geometry::path::{CurvatureProfile, Line, PathSegment, Segment};
 use geometry::{CornerFitConfig, Move};
 
-use crate::planner::EARLY_RELEASE_S;
 use crate::{CONTIGUITY_EPS_MM, Control, StreamInput};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
@@ -18,8 +17,12 @@ const MAX_CONSUMED_FACETS: usize = 8;
 /// The most of a line any junction after it claims: a corner blend's
 /// budget, a run's easing and its boundary blend each take at most half.
 const CLAIMED_SHARE: f64 = 0.5;
+/// The least time a next piece lasts at its feedrate for the stage to plan
+/// a junction before what follows it is known: dense facets wait, as they
+/// cost a plan per arrival and hold little.
+const CLAIM_CHECK_S: f64 = 0.05;
 
-/// How a stage decides what it may emit.
+/// How the stage decides what it may emit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lookahead {
     /// Every element waits for the moves its decisions read, as counted:
@@ -737,7 +740,7 @@ impl FitStage {
     /// may take from that piece's tail changes their junction: it plans
     /// the same with none of the piece claimed and with half of it, the
     /// most any element claims, and the clamps between are monotone. Only
-    /// a piece lasting [`EARLY_RELEASE_S`] is read this way; shorter ones
+    /// a piece lasting [`CLAIM_CHECK_S`] is read this way; shorter ones
     /// wait for what follows.
     fn claims_out_of_reach(&self) -> Option<(f64, f64)> {
         if self.lookahead == Lookahead::Counted {
@@ -749,7 +752,7 @@ impl FitStage {
         let Some(Segment::Line(line)) = &next.segment.spatial else {
             return None;
         };
-        if next.shortest_secs() < EARLY_RELEASE_S {
+        if next.shortest_secs() < CLAIM_CHECK_S {
             return None;
         }
         let seam = (self.seam_in_reduction, self.seam_head_trim);

@@ -255,16 +255,14 @@ pub fn may_open_run(first: &Move, second: &Move, config: CornerFitConfig) -> boo
     }
     let merge_budget = fit_tolerance(second.limits, config);
     let cone = if merge_budget.is_finite() && merge_budget > 0.0 {
-        (merge_budget / b).min(1.0).asin()
+        libm::asin((merge_budget / b).min(1.0))
     } else {
         0.0
     };
     let lean = |chord: f64| {
         let sagging = 2.0 * (t / rho).sqrt();
         let tilting = 2.0 * t / chord * rho / (rho - t) + longest / (2.0 * (rho - t));
-        (sagging.max(tilting) * (1.0 + RUN_BOUND_SLACK))
-            .min(1.0)
-            .asin()
+        libm::asin((sagging.max(tilting) * (1.0 + RUN_BOUND_SLACK)).min(1.0))
     };
     let (lean_a, lean_b) = (lean(a), lean(b));
     let theta =
@@ -273,7 +271,7 @@ pub fn may_open_run(first: &Move, second: &Move, config: CornerFitConfig) -> boo
     let psi_lo = PI - theta - cone;
     let psi_hi = PI - theta + cone;
     let alpha = lean_a.min(lean_b) + 0.5 * psi_hi;
-    let stray = a.min(b) * alpha.cos() * (0.5 * psi_lo.max(0.0)).sin();
+    let stray = a.min(b) * libm::cos(alpha) * libm::sin(0.5 * psi_lo.max(0.0));
     let doubles_back =
         alpha >= FRAC_PI_2 || stray <= t * (rho + t) / (rho - t) * (1.0 + RUN_BOUND_SLACK);
     heads_alike || doubles_back

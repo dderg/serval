@@ -10,10 +10,8 @@ use crate::step_capacity_log::{StepCapacityLog, StepCapacityReport};
 use approach::Approaches;
 
 mod approach;
-use crate::fit_stage::Lookahead;
 use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig, StreamInput};
 use crate::worker_pool::WorkerPool;
-pub(crate) use approach::EARLY_RELEASE_S;
 
 /// Cost governor, not a lookahead bound: velocity planning is ~linear in the
 /// window, so re-planning on every arriving move would be quadratic. The window
@@ -38,7 +36,7 @@ const QUIET_PLAN_MIN_MOVES: usize = 32;
 /// pacer cannot count it as runway and a pause cannot stop short of it. It
 /// adds at most one plan per this much stream, and none to dense moves,
 /// whose batches fill by count first (64 top-layer moves are under 0.1 s).
-const REPLAN_BATCH_S: f64 = 0.25;
+const REPLAN_BATCH_S: f64 = 0.5;
 
 /// Moves enter the window once their ratio in reach has settled (see
 /// [`ExtrusionReach`]): a move's budget never changes after it is planned,
@@ -58,16 +56,8 @@ pub struct Planner {
 
 impl Planner {
     pub fn new(config: StreamConfig, workers: Arc<WorkerPool>) -> Self {
-        Self::with_lookahead(config, workers, Lookahead::Settled)
-    }
-
-    pub(crate) fn with_lookahead(
-        config: StreamConfig,
-        workers: Arc<WorkerPool>,
-        lookahead: Lookahead,
-    ) -> Self {
         Self {
-            approaches: Approaches::new(config.corner, config.limits.accel_mm_s2, lookahead),
+            approaches: Approaches::new(config.corner),
             reach: ExtrusionReach::new(
                 config.max_extrude_only_velocity_mm_s,
                 config.max_extrude_only_accel_mm_s2,
