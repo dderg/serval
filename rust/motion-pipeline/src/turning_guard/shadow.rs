@@ -151,6 +151,19 @@ impl PlannedGrid {
         self.samples.push_back(sample);
     }
 
+    /// Samples index `k`, the one before the grid's first.
+    pub fn push_front(&mut self, k: i64, sample: GridSample) {
+        assert_eq!(k + 1, self.base, "the planned grid grows back in order");
+        let after = self
+            .samples
+            .front()
+            .expect("the planned grid grows back from a sample");
+        self.cells
+            .push_front(CellTerms::between(&sample, after, self.h));
+        self.samples.push_front(sample);
+        self.base = k;
+    }
+
     /// Forgets the samples from index `k` on, which a re-plan changed.
     pub fn truncate_from(&mut self, k: i64) {
         let keep = usize::try_from(k - self.base).unwrap_or(0);
@@ -174,24 +187,37 @@ impl PlannedGrid {
 }
 
 /// Values computed at most once per grid index, kept from index `base` on
-/// until the planned motion they read changes.
+/// until the planned motion they read changes, and for at most `span`
+/// indices around the last one read: a value forgotten is computed again.
 #[derive(Debug)]
 pub(super) struct GridMemo<T> {
     base: i64,
     slots: VecDeque<Option<T>>,
+    span: i64,
 }
 
 impl<T> Default for GridMemo<T> {
     fn default() -> Self {
+        Self::within(i64::MAX)
+    }
+}
+
+impl<T> GridMemo<T> {
+    pub fn within(span: i64) -> Self {
         Self {
             base: 0,
             slots: VecDeque::new(),
+            span,
         }
     }
 }
 
 impl<T: Copy> GridMemo<T> {
     pub fn get_or_insert_with(&mut self, n: i64, compute: impl FnOnce() -> T) -> T {
+        let end = self.base + self.slots.len() as i64;
+        if n < self.base.saturating_sub(self.span) || n >= end.saturating_add(self.span) {
+            self.slots.clear();
+        }
         if self.slots.is_empty() {
             self.base = n;
         }
@@ -203,7 +229,16 @@ impl<T: Copy> GridMemo<T> {
         if index >= self.slots.len() {
             self.slots.resize(index + 1, None);
         }
-        *self.slots[index].get_or_insert_with(compute)
+        let value = *self.slots[index].get_or_insert_with(compute);
+        while self.slots.len() as i64 > self.span {
+            if 2 * (n - self.base) < self.slots.len() as i64 {
+                self.slots.pop_back();
+            } else {
+                self.slots.pop_front();
+                self.base += 1;
+            }
+        }
+        value
     }
 
     pub fn forget_from(&mut self, n: i64) {
