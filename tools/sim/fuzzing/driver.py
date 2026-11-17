@@ -707,9 +707,9 @@ class Session:
             )
         self._post_check("CANCEL_PRINT")
 
-    def _await_restart(self, what: str) -> None:
+    def _await_restart(self, what: str, deadline_s: float) -> None:
         try:
-            self.world.expect_log(RESTARTING, timeout=RESTART_DEADLINE_S)
+            self.world.expect_log(RESTARTING, timeout=deadline_s)
         except SimError as error:
             raise Violation(Check.RECOVERY, f"{what}: {error}") from error
         if not self.world._wait_ready(READY_TIMEOUT_S):
@@ -738,13 +738,16 @@ class Session:
             self.world.firmware_restart(timeout=READY_TIMEOUT_S)
         except SimError as error:
             raise Violation(Check.RECOVERY, f"{what}: {error}") from error
-        self._await_restart(what)
+        self._await_restart(what, RESTART_DEADLINE_S)
 
     def _host_restart(self, action: Action) -> None:
+        """RESTART completes queued moves first (docs/G-Codes.md), so it
+        restarts once the buffered runway has played out, not within the
+        FIRMWARE_RESTART deadline."""
         start_ns = self._now_ns()
         self.world.mark_log()
         self.world.gcode("RESTART", timeout=RESTART_DEADLINE_S)
-        self._await_restart("RESTART")
+        self._await_restart("RESTART", COMMAND_TIMEOUT_S)
         self._after_restart(start_ns, "RESTART")
 
     def _estop_restart(self, action: Action) -> None:
