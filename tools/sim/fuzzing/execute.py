@@ -12,6 +12,7 @@ from typing import Optional
 
 from tools.sim.fuzzing import checks, printer, scenario
 from tools.sim.fuzzing.checks import Check, Violation
+from tools.sim.fuzzing.memory import MemoryWatch
 from tools.sim.fuzzing.scenario import Scenario
 
 PASS, FAIL = "PASS", "FAIL"
@@ -92,14 +93,17 @@ def run_scenario(
     notes: list[str] = []
     world = SimWorld(scratch, dual_mcu=chosen.printer.dual_mcu)
     try:
-        session, step = _run_session(chosen, world, notes)
+        with MemoryWatch(lambda: world.klippy_proc) as watch:
+            session, step = _run_session(chosen, world, notes)
         virtual_s = world.vclock.now_ns() / 1e9 if world.vclock else 0.0
         alive = (
             world.klippy_proc is not None and world.klippy_proc.poll() is None
         )
         commanded = session.commanded_shutdowns if session else []
         logged = checks.scan(checks.Logs.read(world.log_dir), commanded, alive)
-        violations = checks.ordered(step, logged)
+        memory = watch.violation(world.klippy_proc)
+        violations = ([memory] if memory else []) + checks.ordered(step, logged)
+        notes.append(f"klippy peak RSS {watch.peak_mb:.0f} MB")
         if violations and keep is not None:
             _save_world(world, keep)
     finally:

@@ -40,6 +40,11 @@ DOCKER_ARGS=(--rm --ulimit memlock=-1:-1)
 # reproducing starvation-class failures (transport wedge, clocksync skew)
 # deterministically instead of waiting for ambient host load.
 [[ -n "${SIM_DOCKER_CPUS:-}" ]] && DOCKER_ARGS+=(--cpus "$SIM_DOCKER_CPUS")
+# SIM_DOCKER_MEMORY=SIZE caps the container's memory (no swap). Containers
+# live outside the caller's systemd unit, so a unit MemoryMax does not
+# reach them; fuzz mode defaults it to 16g.
+[[ "${1:-}" == fuzz ]] && : "${SIM_DOCKER_MEMORY:=16g}"
+[[ -n "${SIM_DOCKER_MEMORY:-}" ]] && DOCKER_ARGS+=(--memory "$SIM_DOCKER_MEMORY" --memory-swap "$SIM_DOCKER_MEMORY")
 # SIM_JITTER=N pins the container and N bursty burner containers (50 ms
 # spin, 20 ms sleep) to one cpuset (SIM_JITTER_CPUS, default 0,1): the
 # uneven preemption of a loaded CI runner, which a flat --cpus quota does
@@ -270,6 +275,9 @@ case "$MODE" in
         FUZZ_ROOT="$REPO_ROOT/.sim-fuzz"
         mkdir -p "$FUZZ_ROOT"
         [[ -n "${SIM_FUZZ_JOBS:-}" ]] && DOCKER_ARGS+=(-e SIM_FUZZ_JOBS)
+        # A planner allocation blow-up (#901) ends its own scenario under the
+        # container cap above; a world past its share is reported `memory`
+        # (tools/sim/fuzzing/memory.py).
         rc=0
         docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} -v "$FUZZ_ROOT:$FUZZ_ROOT" \
             --entrypoint python3 "$IMAGE_TAG" tools/sim/fuzz.py --out-root "$FUZZ_ROOT" \
