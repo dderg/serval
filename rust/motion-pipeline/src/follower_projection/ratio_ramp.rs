@@ -2247,10 +2247,9 @@ impl RatioSmoothing {
             .map_or(self.floor, |rest| rest.end.max(self.floor))
     }
 
-    /// The valley at the crawl `turn`, unless the last one laid already
-    /// holds the weight flat at zero there ([`AdvanceValley::holds_zero_at`]):
-    /// a crawl at a seam is the slowest point of the leg before or after it
-    /// too, read a hair inside that leg. Each side is as wide as its rebuild
+    /// The valley at the crawl `turn`, unless one laid already holds the
+    /// weight flat at zero there ([`Self::holds_zero_at`]). Each side is as
+    /// wide as its rebuild
     /// needs ([`crawl_side`]), past the leaders' `reach`; the before side
     /// only where the valley does not widen the last one over it
     /// ([`Self::place_valley`]). Where no before side reaching no further
@@ -2282,11 +2281,7 @@ impl RatioSmoothing {
         table_end: f64,
     ) -> Result<(), Unlaid> {
         let turn = crawl.0;
-        if self
-            .valleys
-            .last()
-            .is_some_and(|valley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM))
-        {
+        if self.holds_zero_at(turn) {
             return Ok(());
         }
         self.refresh_clusters();
@@ -2365,6 +2360,21 @@ impl RatioSmoothing {
         self.taken_through <= read_from
     }
 
+    /// Whether a valley laid holds the weight flat at zero at the crawl
+    /// `turn` ([`AdvanceValley::holds_zero_at`]): the last one, or any one
+    /// where `turn` lies no further back than the last one's zero stretch.
+    /// A crawl at a seam is the slowest point of the leg before or after it
+    /// too, read a hair inside that leg, and a crawl valley's flat floor
+    /// runs on past a rest valley laid at its end, a retract after a
+    /// reversal.
+    fn holds_zero_at(&self, turn: f64) -> bool {
+        let Some(last) = self.valleys.last() else {
+            return false;
+        };
+        let held = |valley: &AdvanceValley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM);
+        held(last) || (turn >= last.start && self.valleys.iter().any(held))
+    }
+
     fn last_crawl_reach_end(&self) -> f64 {
         self.valleys
             .iter()
@@ -2389,11 +2399,7 @@ impl RatioSmoothing {
         ((start, end), (before, after)): ((f64, f64), (f64, f64)),
         (floor_before, floor_after): (f64, f64),
     ) {
-        if self
-            .valleys
-            .last()
-            .is_some_and(|valley| valley.holds_zero_at(turn, SPAN_LOOKUP_SLACK_MM))
-        {
+        if self.holds_zero_at(turn) {
             return;
         }
         if let Some(laid) = self

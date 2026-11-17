@@ -125,3 +125,75 @@ fn a_crawl_valley_reaching_back_to_a_rest_finds_that_path_untaken() {
         &config,
     );
 }
+
+/// A corexy with fast shapers and a kernel-free advance, drawn by the
+/// print-like planner fuzz.
+const FAST_SHAPED_ADVANCE: &str = "[printer]
+max_velocity: 736
+max_accel: 52700
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 18600
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.047
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 101.57
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 114.82
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// A reversal, a retract and a hop: the crawl valley at the reversal
+/// keeps its floor flat past the rest valley the retract lays at its end,
+/// and the hop's slowest point, 3e-5 mm on, lies on that floor. It was
+/// taken for a crawl laid behind the rest valley (the hop on
+/// `voron_dense_top_layers_zhop.gcode` and `p4_trident_ramp_slow.cfg` once
+/// #887 no longer stopped it earlier).
+const REVERSAL_RETRACT_HOP: &str = "G90
+M83
+G1 X150.629 Y150.542 E0.03447 F5342
+G1 X161.535 Y155.766 E0.60584 F14064
+G1 X161.486 Y155.755 E0.00140 F15840
+G1 E-0.5 F2400
+G1 Z0.600 F600
+G1 X168.016 Y149.008 F30000
+";
+
+#[test]
+fn a_crawl_on_a_valleys_floor_past_a_rest_needs_no_valley_of_its_own() {
+    let config =
+        std::env::temp_dir().join(format!("fast_shaped_advance_{}.cfg", std::process::id()));
+    std::fs::write(&config, FAST_SHAPED_ADVANCE).expect("temp config");
+    plans_within_the_extruder_limits("reversal_retract_hop", REVERSAL_RETRACT_HOP, &config);
+}
