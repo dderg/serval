@@ -9,7 +9,9 @@ use geometry::{
 };
 use trajectory::AxisChainSet;
 
-use crate::types::{Control, PlannedItem, PlannedMove, StreamConfig};
+use crate::types::{
+    CONTIGUITY_EPS_MM, Control, PlannedItem, PlannedMove, StreamConfig, StreamError,
+};
 
 mod kernel_cells;
 mod screen;
@@ -51,6 +53,7 @@ const BACKOFF_AIM: f64 = 0.98;
 /// to drop under it fails loudly ([`Stuck`]), and the guard emits only what
 /// stands even with every held move at it ([`TurningGuard::emittable`]).
 const SCALE_FLOOR: f64 = 1.0 / 32.0;
+const Z_AXIS: usize = 2;
 
 /// Holds the advance's turning demand within the extruder's acceleration
 /// limit on kernel-free followers, slowing only where it binds.
@@ -394,7 +397,7 @@ enum Resettle {
 }
 
 impl TurningGuard {
-    pub fn new(config: StreamConfig, chains: &AxisChainSet) -> Self {
+    pub fn new(config: StreamConfig, chains: &AxisChainSet, home: &[f64]) -> Self {
         let followers = guarded_followers(chains);
         let span = followers
             .iter()
@@ -419,7 +422,7 @@ impl TurningGuard {
             fine_grids: std::array::from_fn(|level| {
                 RefCell::new(PlannedGrid::new(h / zoom_scale(level) as f64))
             }),
-            carried_position: None,
+            carried_position: toolhead_at(home),
             frozen: 0,
             standing: None,
         }
@@ -454,28 +457,38 @@ impl TurningGuard {
             }
             PlannedItem::Control(control) => {
                 match &control {
-                    Control::Reset { .. } => {
+                    Control::Reset { pos } => {
                         self.entries = Entries::default();
                         self.end_segment();
-                        self.carried_position = None;
+                        self.carried_position = toolhead_at(pos);
                     }
                     Control::SetAxisChains(chains) => {
                         assert!(
                             self.entries.moves.is_empty(),
                             "turning guard: chains changed under held moves"
                         );
-                        *self = Self::new(self.config.clone(), chains);
+                        let carried = self.carried_position;
+                        *self = Self::new(self.config.clone(), chains, &[]);
+                        self.carried_position = carried;
                     }
-                    Control::Dwell { .. } | Control::SetMesh { .. } | Control::Dispatch(_) => {
-                        assert!(
-                            self.entries.moves.is_empty(),
-                            "turning guard: a control token arrived with held moves"
-                        );
+                    Control::SetMesh { gcode_z_rebase, .. } => {
+                        self.assert_nothing_held();
+                        if let Some(position) = &mut self.carried_position {
+                            position[Z_AXIS] = *gcode_z_rebase;
+                        }
                     }
+                    Control::Dwell { .. } | Control::Dispatch(_) => self.assert_nothing_held(),
                 }
                 output(PlannedItem::Control(control))
             }
         }
+    }
+
+    fn assert_nothing_held(&self) {
+        assert!(
+            self.entries.moves.is_empty(),
+            "turning guard: a control token arrived with held moves"
+        );
     }
 
     fn end_segment(&mut self) {
@@ -504,12 +517,34 @@ impl TurningGuard {
         grid_step(&self.followers)
     }
 
+    /// The moves start where the toolhead stands, as the lowerer checks
+    /// again behind the guard: a gap would read as a step in the planned
+    /// motion the kernels fold into an absurd extruder demand.
+    fn assert_starts_where_the_toolhead_is(&self, m: &Move) {
+        let (Some(spatial), Some(toolhead)) = (&m.segment.spatial, self.carried_position) else {
+            return;
+        };
+        let start = spatial.point_at(0.0);
+        let gap_mm = geometry::vec3::dist(toolhead, start);
+        assert!(
+            gap_mm <= CONTIGUITY_EPS_MM,
+            "turning guard: {}",
+            StreamError::Discontinuity {
+                line_no: m.source.start_line,
+                expected: toolhead,
+                got: start,
+                gap_mm,
+            }
+        );
+    }
+
     fn admit(&mut self, planned: PlannedMove) {
         let PlannedMove {
             geometry,
             velocity,
             budget,
         } = planned;
+        self.assert_starts_where_the_toolhead_is(&geometry);
         let held = &self.entries;
         let stop = held
             .moves
@@ -1677,6 +1712,11 @@ fn grid_step(followers: &[(usize, Follower)]) -> f64 {
         .map_or(GRID_S, |(_, follower)| follower.coarse.h)
 }
 
+/// The toolhead's X, Y and Z at `pos`, `None` where it carries fewer axes.
+fn toolhead_at(pos: &[f64]) -> Option<[f64; 3]> {
+    pos.get(..3).map(|xyz| [xyz[0], xyz[1], xyz[2]])
+}
+
 /// Where a move lies along its segment after `previous`, and how hard it
 /// accelerates on each axis.
 fn timing_of(
@@ -1788,6 +1828,8 @@ fn summary_of(
 
 #[cfg(test)]
 mod backoff_stream_tests;
+#[cfg(test)]
+mod hold_time_tests;
 #[cfg(test)]
 mod test_motion;
 #[cfg(test)]

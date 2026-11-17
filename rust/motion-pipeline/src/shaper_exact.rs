@@ -496,6 +496,16 @@ impl LocalPolynomial {
             .fold(0.0, |acc, &c| nurbs::fmadd(acc, x, c))
     }
 
+    /// A bound on [`Self::eval`]'s own rounding at `x`: Horner's fused
+    /// steps each round once, so at most `2·len·u` of the terms' magnitude.
+    fn evaluation_bound(&self, x: f64) -> f64 {
+        let magnitude = self.coefficients[..self.len]
+            .iter()
+            .rev()
+            .fold(0.0, |acc: f64, &c| acc * x.abs() + c.abs());
+        2.0 * self.len as f64 * f64::EPSILON * magnitude
+    }
+
     /// The same polynomial less a constant.
     pub(crate) fn offset_by(mut self, base: f64) -> Self {
         assert!(self.len > 0, "an empty position polynomial has no offset");
@@ -558,6 +568,27 @@ impl ExactPiece {
         )
     }
 
+    /// Whether `self` and `other` disagree at `t` in position or velocity
+    /// beyond both their roundings and their evaluations' own: the signal's
+    /// velocity steps between them there, which no velocity-continuous fit
+    /// carries across a span, rather than two polynomials reading one value.
+    fn steps_velocity_from(&self, other: &Self, t: f64) -> bool {
+        let (x_self, x_other) = (
+            (t - self.center) / self.radius,
+            (t - other.center) / other.radius,
+        );
+        self.pva[..2]
+            .iter()
+            .zip(&other.pva[..2])
+            .any(|(mine, theirs)| {
+                let gap = (mine.eval(x_self) - theirs.eval(x_other)).abs();
+                gap > mine.rounding
+                    + theirs.rounding
+                    + mine.evaluation_bound(x_self)
+                    + theirs.evaluation_bound(x_other)
+            })
+    }
+
     pub(crate) fn offset_by(mut self, base: f64) -> Self {
         self.pva[0] = self.pva[0].offset_by(base);
         self
@@ -586,31 +617,58 @@ impl ExactSpan {
     /// polynomials reach `t`, and each is the signal's limit from its own
     /// side. Where breaks crowd within ulps of `t`, the sub-intervals
     /// between them hold no float and no polynomial; the nearest polynomial
-    /// facing `toward` is read, as the hull bounds it.
+    /// facing `toward` is read, as the hull bounds it. A break between two
+    /// floats lies up to two floats short of the seed the evaluator puts
+    /// there (`ShapedSignal::output_cut_transitions`), where the far
+    /// polynomial holds `t`; where the velocity steps across that break
+    /// ([`ExactPiece::steps_velocity_from`]) the read takes the polynomial
+    /// on its side of it, the one reaching the float beside `t`.
     pub(crate) fn pva(&self, t: f64, toward: f64) -> (f64, f64, f64) {
         self.facing(t, toward).eval_pva(t)
     }
 
     fn facing(&self, t: f64, toward: f64) -> &ExactPiece {
+        let side = ordered(t, toward);
+        assert!(
+            side != Ordering::Equal,
+            "an exact read at {t} faces no side"
+        );
         let next = next_toward(t, toward);
         let within_span = self
             .pieces
             .first()
             .zip(self.pieces.last())
             .is_some_and(|(first, last)| first.lo <= next && next <= last.hi);
-        match ordered(t, toward) {
-            Ordering::Less => self
-                .pieces
-                .get(self.pieces.partition_point(|piece| piece.hi <= t)),
-            Ordering::Greater => self
+        let holder = match side {
+            Ordering::Less => Some(self.pieces.partition_point(|piece| piece.hi <= t)),
+            _ => self
                 .pieces
                 .partition_point(|piece| piece.lo < t)
-                .checked_sub(1)
-                .and_then(|index| self.pieces.get(index)),
-            Ordering::Equal => panic!("an exact read at {t} faces no side"),
-        }
-        .filter(|_| within_span)
-        .unwrap_or_else(|| panic!("an exact read at {t} lies outside its span"))
+                .checked_sub(1),
+        };
+        holder
+            .and_then(|index| self.across_velocity_step(index, t, toward).or(Some(index)))
+            .and_then(|index| self.pieces.get(index))
+            .filter(|_| within_span)
+            .unwrap_or_else(|| panic!("an exact read at {t} lies outside its span"))
+    }
+
+    /// The piece beside `holder` toward `toward` that reaches the float
+    /// beside `t` that way, where the velocity steps between the two at `t`.
+    fn across_velocity_step(&self, holder: usize, t: f64, toward: f64) -> Option<usize> {
+        let next = next_toward(t, toward);
+        let (beside, reaches) = match ordered(t, toward) {
+            Ordering::Greater => {
+                let beside = holder.checked_sub(1)?;
+                (beside, self.pieces[beside].hi >= next)
+            }
+            _ => {
+                let beside = holder + 1;
+                (beside, self.pieces.get(beside)?.lo <= next)
+            }
+        };
+        let holding = self.pieces.get(holder)?;
+        (reaches && self.pieces[beside].steps_velocity_from(holding, t)).then_some(beside)
     }
 
     /// The signal's jerk at `t`, read as [`Self::pva`] reads the rest.
@@ -645,10 +703,17 @@ impl ExactSpan {
         if low <= high { high - low } else { 0.0 }
     }
 
-    /// The polynomials whose sub-intervals reach into `(lo, hi)`.
+    /// The polynomials whose sub-intervals reach into `(lo, hi)`, but for
+    /// one an end reads past across a velocity step ([`Self::pva`]).
     pub(crate) fn over(&self, lo: f64, hi: f64) -> &[ExactPiece] {
-        let first = self.pieces.partition_point(|piece| piece.hi <= lo);
-        let past = self.pieces.partition_point(|piece| piece.lo < hi);
+        let mut first = self.pieces.partition_point(|piece| piece.hi <= lo);
+        let mut past = self.pieces.partition_point(|piece| piece.lo < hi);
+        if past > first + 1 && self.across_velocity_step(past - 1, hi, lo).is_some() {
+            past -= 1;
+        }
+        if past > first + 1 && self.across_velocity_step(first, lo, hi).is_some() {
+            first += 1;
+        }
         &self.pieces[first..past.max(first)]
     }
 }

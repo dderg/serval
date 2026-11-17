@@ -57,9 +57,8 @@ fn recipr_advance_rides_unshaped_leaders_through_epochs() {
     );
 }
 
-#[test]
-fn mode_inverse_after_the_kernels_turns_a_corner() {
-    let config = bench_config_with(
+fn mode_inverse_bench_config() -> String {
+    bench_config_with(
         &[
             (
                 "post_processors: shaper_x\n",
@@ -72,6 +71,28 @@ fn mode_inverse_after_the_kernels_turns_a_corner() {
         ],
         "\n[post_processor inv_x]\ntype: mode_inverse\nfrequency_hz: 50\ndamping_ratio: 0.1\n\
          \n[post_processor inv_y]\ntype: mode_inverse\nfrequency_hz: 44\ndamping_ratio: 0.1\n",
+    )
+}
+
+#[test]
+fn mode_inverse_after_the_kernels_turns_a_corner() {
+    plan(
+        &mode_inverse_bench_config(),
+        "G1 X0 Y0\nG1 X10 Y0\nG1 X10.872 Y0.038\n",
     );
-    plan(&config, "G1 X0 Y0\nG1 X10 Y0\nG1 X10.872 Y0.038\n");
+}
+
+/// Through line 1159 the print passes an unblended junction at 14.6207 s
+/// whose x velocity step mode_inverse turns into a motor-command velocity
+/// step at the kernel's lower edge, between two floats.
+const UNBLENDED_JUNCTION_LINES: usize = 1159;
+
+#[test]
+fn mode_inverse_after_the_kernels_rides_an_unblended_junction() {
+    let gcode = corpus::sim_print("trident_follower_cache_regression")
+        .lines()
+        .take(UNBLENDED_JUNCTION_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    plan(&mode_inverse_bench_config(), &gcode);
 }

@@ -10,8 +10,46 @@ import pi
 
 DROPIN_DIR = "/etc/systemd/system/klipper.service.d"
 DROPIN = f"{DROPIN_DIR}/bench-throttle.conf"
+BENCH_DROPINS = f"{DROPIN_DIR}/bench-*.conf"
 CPUFREQ = "/sys/devices/system/cpu/cpufreq"
 KHZ_PER_MHZ = 1000
+REMOVED_DROPIN = "removed drop-in"
+ORPHANED_JOBS = (
+    "-x cargo",
+    "-x rustc",
+    "-f 'build-nativ[e].sh'",
+    "-f 'examples/gcode_replay_benc[h]'",
+    "-f '^bin[s]/[^ ]+ trees/'",
+)
+SETTLE_HOST = "\n".join(
+    [
+        f"for f in {BENCH_DROPINS}; do",
+        f'  [ -e "$f" ] && sudo rm -f "$f" && echo "{REMOVED_DROPIN} $f"',
+        "done",
+        f"for p in {CPUFREQ}/policy*; do",
+        '  max=$(cat "$p/cpuinfo_max_freq"); now=$(cat "$p/scaling_max_freq")',
+        '  [ "$now" != "$max" ] && echo "$max" | sudo tee'
+        ' "$p/scaling_max_freq" >/dev/null'
+        ' && echo "uncapped $p from $now to $max kHz"',
+        "done",
+        *(
+            f"pkill -e {job} | sed 's/^/orphaned job /'"
+            for job in ORPHANED_JOBS
+        ),
+        "true",
+    ]
+)
+
+
+def settle_host() -> list[str]:
+    """Undo what a run killed mid-print leaves on the Pi: bench drop-ins
+    (throttle, recordings), cpufreq caps, orphaned builds and replays."""
+    actions = pi.ssh(SETTLE_HOST).splitlines()
+    if any(action.startswith(REMOVED_DROPIN) for action in actions):
+        pi.ssh("sudo systemctl daemon-reload")
+        pi.restart_klipper()
+        actions.append("klipper restarted without the bench drop-ins")
+    return actions
 
 
 @dataclass(frozen=True)

@@ -143,38 +143,38 @@ fn arb_stream() -> impl Strategy<Value = Stream> {
                     };
                     raw.push(m.ok()?);
                 }
-                let moves = fit_corners(&raw, CornerFitConfig::default()).ok()?.moves;
-                let stop_before: Vec<bool> = (0..moves.len())
-                    .map(|k| {
-                        k > 0
-                            && seam_requires_stop(
-                                &moves[k - 1],
-                                &moves[k],
-                                CornerFitConfig::default(),
-                            )
-                    })
-                    .collect();
-                let budgets = extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY_V, EXTRUDE_ONLY_A);
-                let window = plan_velocity_stops_select_prefix(
-                    &moves,
-                    &stop_before,
-                    &budgets,
-                    params(0.0),
-                    &Serial,
-                    |_| moves.len(),
-                )
-                .ok()?;
-                Some(Stream {
-                    moves,
-                    stop_before,
-                    budgets,
-                    window,
-                })
+                Stream::fitted(&raw)
             },
         )
 }
 
 impl Stream {
+    /// `raw` fitted, its stops and budgets, and the window planned over it.
+    fn fitted(raw: &[Move]) -> Option<Self> {
+        let moves = fit_corners(raw, CornerFitConfig::default()).ok()?.moves;
+        let stop_before: Vec<bool> = (0..moves.len())
+            .map(|k| {
+                k > 0 && seam_requires_stop(&moves[k - 1], &moves[k], CornerFitConfig::default())
+            })
+            .collect();
+        let budgets = extrusion_budgets(&moves, 0.0, EXTRUDE_ONLY_V, EXTRUDE_ONLY_A);
+        let window = plan_velocity_stops_select_prefix(
+            &moves,
+            &stop_before,
+            &budgets,
+            params(0.0),
+            &Serial,
+            |_| moves.len(),
+        )
+        .ok()?;
+        Some(Self {
+            moves,
+            stop_before,
+            budgets,
+            window,
+        })
+    }
+
     fn span(&self, (from, to): (f64, f64)) -> (usize, usize) {
         let n = self.moves.len();
         let lo = ((from * n as f64) as usize).min(n - 1);
@@ -315,6 +315,64 @@ fn floor_brakes(stream: &Stream, scales: &[f64]) -> Vec<BrakeMove> {
         brakes.push(brake);
     }
     brakes
+}
+
+/// The turning guard's least share of a budget a back-off may leave.
+const GUARD_SCALE_FLOOR: f64 = 1.0 / 32.0;
+
+/// A re-plan from a seam keeps the move before it whole, so a seam leaving
+/// a blend stands once the line after it brakes from the seam's speed to
+/// rest at the floor, however low the blend's ceilings: the planner holds
+/// a blend's halves at its apex speed ([`MoveVelocity::corner_held`]),
+/// under the speed it leaves them at. The strokes are `pause_sparse`'s
+/// zigzag's (#860).
+#[test]
+fn a_seam_leaving_a_reversal_blend_stands_on_the_line_after_it() {
+    let limits = limits(10_000.0, (25.0, 100.0), extruder(50.0, 20_000.0, 0.03));
+    let context = |line: u32| MoveContext {
+        extruder_axis: EXTRUDER_AXIS,
+        feedrate_mm_s: 100.0,
+        limits,
+        source: SourceRange {
+            start_line: line,
+            end_line: line,
+        },
+    };
+    let (start, turn, end) = ([60.0, 20.0, 0.3], [140.0, 20.0, 0.3], [60.0, 20.4, 0.3]);
+    let mut stream = Stream::fitted(&[
+        line_move(start, turn, 0.3, context(1)).expect("a line"),
+        line_move(turn, end, 0.3, context(2)).expect("a line"),
+    ])
+    .expect("the reversal fits and plans");
+    let n = stream.moves.len();
+    let (halves, after_blend) = (n - 3..n - 1, n - 1);
+    let apex_speed = stream.window.boundary_speeds[n - 2];
+    for half in &mut stream.moves[halves] {
+        assert!(
+            !matches!(half.segment.spatial, Some(crate::path::Segment::Line(_))),
+            "the reversal is blended"
+        );
+        half.feedrate_mm_s = apex_speed;
+    }
+    let scales = vec![GUARD_SCALE_FLOOR; n];
+    let seams = &stream.window.boundary_speeds;
+    let brakes = floor_brakes(&stream, &scales);
+    assert!(seams[after_blend] > apex_speed);
+
+    assert_eq!(
+        brake_horizon(&brakes, seams[..n].iter().copied()),
+        Some(after_blend)
+    );
+    replan_span(
+        &stream.moves[after_blend..],
+        &stream.stop_before[after_blend..],
+        &stream.budgets[after_blend..],
+        &scales[after_blend..],
+        &seams[after_blend..],
+        params(seams[after_blend]),
+        0.0,
+    )
+    .expect("the line brakes from the seam's speed to rest at the floor");
 }
 
 proptest! {
