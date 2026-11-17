@@ -2779,8 +2779,8 @@ fn steep_mesh() -> Arc<SurfaceTransform> {
     ))
 }
 
-fn span_leaving_the_mesh(distance_origin: f64) -> AnalyticMoveSpan {
-    let line = Segment::Line(Line::try_new([150.0, 150.0, 0.2], [300.0, 150.0, 0.2]).unwrap());
+fn span_leaving_the_mesh(end_x: f64, distance_origin: f64) -> AnalyticMoveSpan {
+    let line = Segment::Line(Line::try_new([150.0, 150.0, 0.2], [end_x, 150.0, 0.2]).unwrap());
     let phase = |t0, dt, s0: f64, v0, a0| {
         LawSegment::new(
             t0,
@@ -2814,7 +2814,7 @@ fn assert_one_seam_where_the_warped_z_steps(span: &AnalyticMoveSpan) {
         .expect("the edge crossing is located");
 
     let [seam] = seams[..] else {
-        panic!("one crossing of x = 290, got seams {seams:?}");
+        panic!("one crossing of a mesh edge, got seams {seams:?}");
     };
     let across = z_velocity(next_toward(seam, f64::INFINITY)) - z_velocity(next_toward(seam, 0.0));
     let around = z_velocity(seam + 1e-6) - z_velocity(seam - 1e-6);
@@ -2827,12 +2827,17 @@ fn assert_one_seam_where_the_warped_z_steps(span: &AnalyticMoveSpan) {
 
 #[test]
 fn a_surface_seam_lies_where_the_warped_z_leaves_the_mesh() {
-    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(0.0));
+    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(300.0, 0.0));
 }
 
 #[test]
 fn a_surface_seam_reads_the_phases_past_the_span_distance_origin() {
-    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(150.0));
+    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(300.0, 150.0));
+}
+
+#[test]
+fn a_patch_change_at_the_span_start_is_not_a_surface_seam() {
+    assert_one_seam_where_the_warped_z_steps(&span_leaving_the_mesh(0.0, 0.0));
 }
 
 #[test]
