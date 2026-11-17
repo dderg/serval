@@ -18,6 +18,18 @@ PINNED = re.search(
 ).group(1)
 
 
+def link_path_without(hidden: set[str], into: Path) -> None:
+    into.mkdir()
+    for directory in os.environ["PATH"].split(os.pathsep):
+        if not os.path.isdir(directory):
+            continue
+        for entry in os.scandir(directory):
+            link = into / entry.name
+            if entry.name in hidden or os.path.lexists(link):
+                continue
+            link.symlink_to(entry.path)
+
+
 def run_ci(tmp_path: Path, job: str, *, uvx: bool) -> tuple[int, list[str]]:
     root = tmp_path.resolve()
     (root / "scripts").mkdir(parents=True)
@@ -29,15 +41,12 @@ def run_ci(tmp_path: Path, job: str, *, uvx: bool) -> tuple[int, list[str]]:
         fake = fakes / tool
         fake.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{calls}"\n')
         fake.chmod(0o755)
-    path = [str(fakes)] + [
-        d
-        for d in os.environ["PATH"].split(os.pathsep)
-        if not (Path(d) / "uvx").exists()
-    ]
+    system = root / "system"
+    link_path_without({"ruff", "uv", "uvx"}, system)
     result = subprocess.run(
-        ["bash", str(root / "scripts" / "ci.sh"), job],
+        [shutil.which("bash"), str(root / "scripts" / "ci.sh"), job],
         env={
-            "PATH": os.pathsep.join(path),
+            "PATH": f"{fakes}{os.pathsep}{system}",
             "HOME": str(root),
             "CI_NO_SLOT": "1",
         },
