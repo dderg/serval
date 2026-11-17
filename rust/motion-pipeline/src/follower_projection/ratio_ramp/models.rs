@@ -444,6 +444,41 @@ pub(in crate::follower_projection) fn narrow_floats((lo, hi): (f64, f64)) -> Opt
     Some(floats)
 }
 
+/// `reach` cut into the stretches that read one value of `key` at both
+/// ends, each with it, where `key` moves one way along the path: such a
+/// stretch reads its value throughout, and halving one whose ends differ
+/// isolates each change within as many halvings as a float has bits. The
+/// work is bounded by how often `key` changes over the reach, not by how
+/// many floats it spans: an odometer standing still at a turnaround
+/// reaches as wide as its model's rounding, whatever that is, and halving
+/// its time window narrows it no further. A cut is a float the stretches
+/// on both sides read; `None` where `key` has no value somewhere.
+fn stretches_reading<K: PartialEq + Clone>(
+    reach: PathReach,
+    key: impl Fn(f64) -> Option<K>,
+) -> Option<Vec<(PathReach, K)>> {
+    let (lo, hi) = reach.span();
+    let mut found = Vec::new();
+    let mut pending = vec![(lo, key(lo)?, hi, key(hi)?)];
+    while let Some((lo, low, hi, high)) = pending.pop() {
+        let mid = 0.5 * lo + 0.5 * hi;
+        if low != high && mid > lo && mid < hi {
+            let middle = key(mid)?;
+            pending.push((mid, middle.clone(), hi, high));
+            pending.push((lo, low, mid, middle));
+            continue;
+        }
+        if low == high {
+            let exact = (lo != reach.lo || reach.exact.0, hi != reach.hi || reach.exact.1);
+            found.push((PathReach { lo, hi, exact }, low));
+        } else {
+            found.push((PathReach::point(lo), low));
+            found.push((PathReach::point(hi), high));
+        }
+    }
+    Some(found)
+}
+
 /// A model of a path function and of its first three path derivatives.
 #[derive(Clone, Copy)]
 pub(in crate::follower_projection) struct ModelJet {
@@ -555,6 +590,9 @@ enum ValleySide {
 /// ([`AdvanceValley::weight`]).
 trait ValleyModel {
     fn side(&self, s: f64) -> ValleySide;
+    /// [`Self::side`] in path order, which tells the outside before the
+    /// valley from the one past it.
+    fn order(&self, s: f64) -> u8;
     fn weight_model(&self, side: ValleySide, s: &TaylorModel) -> [TaylorModel; 3];
 }
 
@@ -577,6 +615,16 @@ impl ValleyModel for AdvanceValley {
             }
         } else {
             ValleySide::Inside
+        }
+    }
+
+    fn order(&self, s: f64) -> u8 {
+        match self.side(s) {
+            ValleySide::Outside if s < self.start => 0,
+            ValleySide::Before => 1,
+            ValleySide::Inside => 2,
+            ValleySide::After => 3,
+            ValleySide::Outside => 4,
         }
     }
 
@@ -710,16 +758,28 @@ impl RatioSmoothing {
         Some(base)
     }
 
-    /// Every formula a reach too narrow to place its bends in reads, one per
-    /// float.
+    /// Every formula a reach reads where its ends read different ones
+    /// ([`stretches_reading`]): the window's bounds `s ± h(s)`, the seams
+    /// behind `s` and the width's node interval all move one way along the
+    /// path (`|h'| < 1`).
     fn narrow_formulas(
         &self,
         seams: &SeamView,
         reach: PathReach,
     ) -> Option<Vec<CorrectionFormula>> {
+        let stretches = stretches_reading(reach, |s| {
+            let h = self.width.jet(s).value.max(0.0);
+            let count = |past: &dyn Fn(f64) -> bool| seams.seams.partition_point(|seam| past(seam.s));
+            let window = (
+                count(&|seam| seam <= s - h),
+                count(&|seam| seam < s + h),
+                count(&|seam| seam <= s),
+            );
+            self.correction_formula(seams, PathReach::point(s))
+                .map(|formula| (formula, self.width.formula_at(s), window))
+        })?;
         let mut formulas: Vec<CorrectionFormula> = Vec::new();
-        for at in narrow_floats(reach.span())? {
-            let formula = self.correction_formula(seams, PathReach::point(at))?;
+        for (_, (formula, _, _)) in stretches {
             if !formulas.contains(&formula) {
                 formulas.push(formula);
             }
@@ -991,10 +1051,16 @@ impl RatioSmoothing {
                 .all(|&part| self.valley_weight_on(s, part).is_some())
         }) {
             Some(parts) => parts.to_vec(),
-            None => narrow_floats(reach.span())?
+            None => {
+                let (lo, hi) = reach.span();
+                let valleys: Vec<&AdvanceValley> = self.valleys_over(lo, hi).collect();
+                stretches_reading(reach, |at| {
+                    Some(valleys.iter().map(|valley| valley.order(at)).collect::<Vec<_>>())
+                })?
                 .into_iter()
-                .map(PathReach::point)
-                .collect(),
+                .map(|(part, _)| part)
+                .collect()
+            }
         };
         let mut base: Option<[TaylorModel; 3]> = None;
         for part in parts {
