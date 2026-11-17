@@ -768,14 +768,17 @@ class Session:
         if self.spec.idle_timeout_s is None:
             return
         self._hold(self.spec.idle_timeout_s + IDLE_SLACK_S, "the idle timeout")
-        status = self._status("idle_timeout", "extruder")
+        status = self._status("idle_timeout", "extruder", "toolhead")
         state = status["idle_timeout"]["state"]
         target = status["extruder"]["target"]
         if state != "Idle" or target != 0.0:
+            toolhead = status["toolhead"]
             raise Violation(
                 Check.IDLE_TIMEOUT,
                 f"{self.spec.idle_timeout_s + IDLE_SLACK_S} s idle: state {state!r}, "
-                f"extruder target {target}",
+                f"extruder target {target}\ntoolhead print_time "
+                f"{toolhead['print_time']}, estimated_print_time "
+                f"{toolhead['estimated_print_time']}",
             )
 
     # ----------------------------------------------------------- brakes
