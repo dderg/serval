@@ -1395,6 +1395,16 @@ fn drain_requests_refuse_a_full_channel_instead_of_blocking() {
         speed: 10.0,
         accel: 100.0,
     };
+    let buzz = crate::pump::BuzzParams {
+        routes: Arc::from(Vec::new()),
+        wave: crate::pump::BuzzWave {
+            freq_start_millihz: 5_000,
+            freq_end_millihz: 5_000,
+            amplitude_nm: 100_000,
+            duration_ms: 1_000,
+            ramp_ms: 100,
+        },
+    };
 
     let full =
         |sent: Result<(), StreamWorkerError>| matches!(sent, Err(StreamWorkerError::ChannelFull));
@@ -1403,6 +1413,7 @@ fn drain_requests_refuse_a_full_channel_instead_of_blocking() {
     assert!(full(h.update_mesh_try_start(None, 0.0).map(drop)));
     assert!(full(h.submit_nudge(nudge).map(drop)));
     assert!(full(h.update_axis_chains(AxisChainSet::default())));
+    assert!(full(h.submit_buzz(buzz).map(drop)));
 }
 
 /// The production feed parks on the wakeup fd and retries on `ChannelFull`;

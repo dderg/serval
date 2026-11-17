@@ -207,6 +207,10 @@ class MotionEngineWrapper:
         self._wait_pipeline_request("nudge")
         return duration
 
+    def resonance_buzz(self, routes, wave):
+        self._engine.resonance_buzz_start(routes, wave)
+        self._wait_pipeline_request("resonance buzz")
+
     def update_post_processor(self, name, key, value):
         engine_wait.wait_for(
             self._printer,

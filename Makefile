@@ -12,6 +12,16 @@ $(shell ./scripts/find-firmware-extras.sh)
 
 # Kconfig includes
 export KCONFIG_CONFIG     ?= $(CURDIR)/.config
+PYTHON=python3
+SERVAL_CONFIG_MARKER := CONFIG_SERVAL_CONFIG_MIGRATED=y
+ifneq ($(wildcard $(KCONFIG_CONFIG)),)
+ifeq ($(shell grep -cx '$(SERVAL_CONFIG_MARKER)' $(KCONFIG_CONFIG)),0)
+$(warning $(KCONFIG_CONFIG) was not saved by this tree: running olddefconfig so new options take their defaults; review it with 'make menuconfig')
+ifneq ($(shell $(PYTHON) lib/kconfiglib/olddefconfig.py src/Kconfig >/dev/null || echo failed),)
+$(error olddefconfig failed on $(KCONFIG_CONFIG): fix the file or remove it and run 'make menuconfig')
+endif
+endif
+endif
 -include $(KCONFIG_CONFIG)
 
 # Common command definitions
@@ -22,7 +32,6 @@ OBJCOPY=$(CROSS_PREFIX)objcopy
 OBJDUMP=$(CROSS_PREFIX)objdump
 STRIP=$(CROSS_PREFIX)strip
 CPP=$(CROSS_PREFIX)cpp
-PYTHON=python3
 
 # Source files
 src-y =

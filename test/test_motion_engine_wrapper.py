@@ -61,6 +61,9 @@ class PipelineNative:
         self.calls.append(("clear_bed_mesh_start",))
         return 0.25
 
+    def resonance_buzz_start(self, routes, wave):
+        self.calls.append(("resonance_buzz_start", routes, wave))
+
     def pipeline_request_poll(self):
         self.polls += 1
         self.calls.append(("pipeline_request_poll", self.polls))
@@ -114,6 +117,22 @@ def test_mesh_clear_returns_its_rebase_once_the_pipeline_adopted_it():
 
     assert wrapper.clear_bed_mesh() == 0.25
     assert native.calls[-1] == ("pipeline_request_poll", 2)
+
+
+def test_buzz_yields_to_the_reactor_until_the_pipeline_arms_it():
+    native = PipelineNative(served_on_poll=2)
+    printer = FakePrinter()
+    routes = [("stepper", 0b11, 0b10)]
+    wave = (5000, 5000, 100000, 1000, 100)
+
+    make_waiting_wrapper(native, printer).resonance_buzz(routes, wave)
+
+    assert native.calls == [
+        ("resonance_buzz_start", routes, wave),
+        ("pipeline_request_poll", 1),
+        ("pipeline_request_poll", 2),
+    ]
+    assert printer.reactor.pauses == pytest.approx([PIPELINE_REQUEST_POLL_S])
 
 
 def test_shutdown_aborts_a_dwell_the_pipeline_has_not_served():

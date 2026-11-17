@@ -229,7 +229,8 @@ impl ClockSyncEstimator {
         self.core.update(sent_time, clock_f);
         let new_freq = self.core.xy_covariance() / self.core.x_variance();
         if !self.synced {
-            if (new_freq - prev_freq).abs() <= self.sync_stable_freq_ppm * mcu_freq {
+            let is_rate = new_freq.is_finite() && new_freq > 0.0;
+            if is_rate && (new_freq - prev_freq).abs() <= self.sync_stable_freq_ppm * mcu_freq {
                 self.sync_stable_count += 1;
                 if self.sync_stable_count >= self.sync_stable_samples {
                     self.synced = true;

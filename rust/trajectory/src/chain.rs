@@ -108,21 +108,6 @@ impl NonlinearAdvance {
 }
 
 impl ChainStage {
-    /// The input time window this stage's output at `t` depends on, relative
-    /// to `t`. A convolution `(f ∗ k)(t)` reads `f` over `[t - k_hi, t - k_lo]`,
-    /// so the kernel's support enters reflected; the two coincide only for
-    /// symmetric kernels.
-    #[must_use]
-    pub fn input_window(&self) -> (f64, f64) {
-        match self {
-            Self::SmoothKernel(kernel) => {
-                let (k_lo, k_hi) = kernel.support();
-                (-k_hi, -k_lo)
-            }
-            Self::DerivativeGains { .. } | Self::NonlinearAdvance(_) => (0.0, 0.0),
-        }
-    }
-
     #[must_use]
     pub fn kernel_variance_s2(&self) -> f64 {
         match self {
@@ -327,16 +312,6 @@ impl CompiledChain {
     #[must_use]
     pub fn has_motor_side_gains(&self) -> bool {
         self.trailing_transform().is_some()
-    }
-
-    /// Whether this chain transforms its axis with zero-support stages alone.
-    /// Nothing widens the shaping window, so the shaper never refits the
-    /// column: the transform is baked into the materialized source before the
-    /// shaped frontier exists, and an axis riding this one as a leader cannot
-    /// see it by comparing raw against shaped.
-    #[must_use]
-    pub fn is_zero_support_only(&self) -> bool {
-        self.kernel.is_none() && self.transform.is_some()
     }
 
     #[must_use]

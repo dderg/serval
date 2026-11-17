@@ -51,6 +51,7 @@ NS_PER_S = 1e9
 DURATION_TOLERANCE = 0.10
 MAX_RESUME_LEAD_S = 1.0
 MAX_RESERVE_S = 1.0
+PAUSE_CANCEL_STOP_S_AFTER_860 = 6.0
 
 PACER_LOG = "info,motion_core::worker::ingress=debug"
 STOP_BRAKE_CAUSE = "RunwayExhausted"
@@ -127,6 +128,12 @@ def _long_moves(world) -> pathlib.Path:
 
 
 GCODES = {"first_layers": _first_layers, "long_moves": _long_moves}
+LATE_STOP = pytest.mark.xfail(
+    strict=True,
+    reason="#860: the fit stage, the planner and the turning guard hold "
+    "0.8 s strokes whole: the stop drains 10.5 s of them",
+)
+BENCH_STOPS = ["first_layers", pytest.param("long_moves", marks=LATE_STOP)]
 
 
 def _now_s(world) -> float:
@@ -225,6 +232,17 @@ def _assert_stopped_within_bound(
     assert after_feed_s <= bound_s, (
         f"X/Y kept stepping {after_feed_s:.2f}s after {what} stopped the "
         f"feed, past the {bound_s:.2f}s the engine accounts for: {record}"
+    )
+
+
+def _assert_stopped_in_time(what: str, stop: _Stop) -> None:
+    """The stop the bench session rows target once #860 is closed, issue
+    to last step (`PAUSE_CANCEL_STOP_S_AFTER_860` in
+    tools/bench/session_scenarios.py)."""
+    latency_s = stop.ended_s - stop.issued_s
+    assert latency_s <= PAUSE_CANCEL_STOP_S_AFTER_860, (
+        f"X/Y kept stepping {latency_s:.2f}s after {what} was issued, past "
+        f"the {PAUSE_CANCEL_STOP_S_AFTER_860}s a stop may take (#860)"
     )
 
 
@@ -444,17 +462,18 @@ def test_a_dwell_behind_long_moves_starts_without_a_brake(
     _assert_no_pacer_brake(world, printing.new())
 
 
+@pytest.mark.parametrize("gcode_name", BENCH_STOPS)
 @pytest.mark.parametrize("command", ("PAUSE", "CANCEL_PRINT"))
 def test_a_stop_on_the_bench_printer_ends_within_bound(
-    sim_world, monkeypatch, command
+    sim_world, monkeypatch, command, gcode_name
 ):
-    """Pi bench 2026-11-16, printer.cfg, first_layers, 20 s in: motion ran
-    on 7.4-8.5 s after PAUSE and CANCEL_PRINT, here 9.1 s. The turning
-    guard hands on up to 6.7 s of strokes at once there, straight into
-    the runway (#860); the engine must still account for all of it."""
+    """Pi bench 2026-11-16, printer.cfg, 20 s in: on first_layers motion
+    ran on 7.4-8.5 s after PAUSE and CANCEL_PRINT, here 9.1 s; on the
+    zigzag (`pause_sparse`) the PAUSE never acted. The turning guard held
+    the strokes back (#860); the engine must still account for all of it."""
     world = _boot_bench(sim_world, monkeypatch, configs.bench_print_config)
     control = world.sim_control("h7")
-    gcode = _first_layers(world)
+    gcode = GCODES[gcode_name](world)
 
     started_s = _start(world, gcode)
     _wait_print_time(world, started_s, ACTION_AT_S)
@@ -463,3 +482,4 @@ def test_a_stop_on_the_bench_printer_ends_within_bound(
 
     _assert_clean(world)
     _assert_stopped_within_bound(world, command, stop, stopping.new())
+    _assert_stopped_in_time(command, stop)

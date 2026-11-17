@@ -23,11 +23,13 @@ import lock
 import sim_config
 import throttle
 from capture import Capture
+from events import MARGIN_S as EVENTS_MARGIN_S
 from pi import (
     PI_LOGS,
     REPO_CFG,
     BenchError,
     enable_mco,
+    events_written_since,
     foreign_deploy,
     http,
     klipper_journal,
@@ -36,6 +38,7 @@ from pi import (
     read_deployed,
     restart_klipper,
     run_main,
+    scp_files_from_pi,
     scp_from_pi,
     ssh,
     upload,
@@ -287,6 +290,18 @@ def run(
     return run_dir
 
 
+def fetch_events(run_dir: Path, started: float) -> list[str]:
+    """Copy the Pi's event logs written since the run started (less the
+    margin events.py reads before it), not its whole rotated history: the
+    records of the run's window are all in them."""
+    local = run_dir / "events"
+    local.mkdir()
+    written = events_written_since(started - EVENTS_MARGIN_S)
+    if written:
+        scp_files_from_pi(written, local)
+    return [Path(remote).name for remote in written]
+
+
 def execute(
     run_dir: Path,
     summary: dict,
@@ -330,7 +345,7 @@ def execute(
         failure = BenchError(foreign)
 
     scp_from_pi(f"{PI_LOGS}/klippy.log", run_dir / "klippy.log")
-    scp_from_pi(f"{PI_LOGS}/events", run_dir / "events", recursive=True)
+    summary["events_files"] = fetch_events(run_dir, started)
     (run_dir / "journal.txt").write_text(klipper_journal(started))
     if tap:
         scp_from_pi(f"{PI_STEP_TAP_DIR}/step_tap_mcu*.bin", run_dir)

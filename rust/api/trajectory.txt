@@ -99,7 +99,6 @@ pub trajectory::chain::ChainStage::DerivativeGains::k2: f64
 pub trajectory::chain::ChainStage::NonlinearAdvance(trajectory::chain::NonlinearAdvance)
 pub trajectory::chain::ChainStage::SmoothKernel(nurbs::algebra::PiecewisePolynomialKernel)
 impl trajectory::chain::ChainStage
-pub fn trajectory::chain::ChainStage::input_window(&self) -> (f64, f64)
 pub fn trajectory::chain::ChainStage::kernel_variance_s2(&self) -> f64
 pub enum trajectory::chain::PostProcessorError
 pub trajectory::chain::PostProcessorError::AccelGainNeedsPrecedingKernel
@@ -145,7 +144,6 @@ pub fn trajectory::chain::CompiledChain::from_kernel_and_transform(core::option:
 pub fn trajectory::chain::CompiledChain::has_motor_side_gains(&self) -> bool
 pub fn trajectory::chain::CompiledChain::instantaneous_corner_velocity(&self) -> f64
 pub fn trajectory::chain::CompiledChain::is_empty(&self) -> bool
-pub fn trajectory::chain::CompiledChain::is_zero_support_only(&self) -> bool
 pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>
 pub fn trajectory::chain::CompiledChain::kernel_jerk_per_accel_hz(&self) -> f64
 pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64
@@ -440,7 +438,6 @@ pub trajectory::ChainStage::DerivativeGains::k2: f64
 pub trajectory::ChainStage::NonlinearAdvance(trajectory::chain::NonlinearAdvance)
 pub trajectory::ChainStage::SmoothKernel(nurbs::algebra::PiecewisePolynomialKernel)
 impl trajectory::chain::ChainStage
-pub fn trajectory::chain::ChainStage::input_window(&self) -> (f64, f64)
 pub fn trajectory::chain::ChainStage::kernel_variance_s2(&self) -> f64
 pub enum trajectory::ContinuousAxis
 pub trajectory::ContinuousAxis::Analytic
@@ -630,7 +627,6 @@ pub fn trajectory::chain::CompiledChain::from_kernel_and_transform(core::option:
 pub fn trajectory::chain::CompiledChain::has_motor_side_gains(&self) -> bool
 pub fn trajectory::chain::CompiledChain::instantaneous_corner_velocity(&self) -> f64
 pub fn trajectory::chain::CompiledChain::is_empty(&self) -> bool
-pub fn trajectory::chain::CompiledChain::is_zero_support_only(&self) -> bool
 pub fn trajectory::chain::CompiledChain::kernel(&self) -> core::option::Option<&nurbs::algebra::PiecewisePolynomialKernel>
 pub fn trajectory::chain::CompiledChain::kernel_jerk_per_accel_hz(&self) -> f64
 pub fn trajectory::chain::CompiledChain::kernel_variance_s2(&self) -> f64

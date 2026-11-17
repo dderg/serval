@@ -22,6 +22,12 @@ fn bench_printer_with(name: &str, corner: &str) -> PathBuf {
     config
 }
 
+fn printer_from(name: &str, text: &str) -> PathBuf {
+    let config = std::env::temp_dir().join(format!("{name}_{}.cfg", std::process::id()));
+    std::fs::write(&config, text).expect("temp config");
+    config
+}
+
 fn plans_within_the_extruder_limits(name: &str, gcode: &str, config: &Path) {
     let snapshot = corpus::plan(name, gcode, config).expect("the repro plans motion");
     let audit = corpus::extruder::extruder_audit(&snapshot, gcode, config)
@@ -195,4 +201,573 @@ fn a_crawl_on_a_valleys_floor_past_a_rest_needs_no_valley_of_its_own() {
         std::env::temp_dir().join(format!("fast_shaped_advance_{}.cfg", std::process::id()));
     std::fs::write(&config, FAST_SHAPED_ADVANCE).expect("temp config");
     plans_within_the_extruder_limits("reversal_retract_hop", REVERSAL_RETRACT_HOP, &config);
+}
+
+/// #896: a fast corexy with a kernel-free advance, drawn by the print-like
+/// planner fuzz.
+const OPENING_CRAWL_PRINTER: &str = "[printer]
+max_velocity: 694.719250661841
+max_accel: 60718.597334361424
+corner_deviation: 0.05729858307047112
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 15578.478844820105
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.014758274092604825
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 92.69466276064261
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 104.10850563404021
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #896: a crawl valley at the stream's opening holds zero back to where
+/// the leaders rested there and steps its weight at that rest's end; once
+/// the committed path passes the rest, its valley is pruned and the step
+/// was taken for one no valley holds.
+const OPENING_REVERSAL: &str = "G90
+M83
+G1 X150.0 Y150.0 Z0.2 F30000
+G1 X148.608 Y150.215 E0.04361 F13823
+G1 X149.069 Y150.277 E0.01973 F17083
+G1 X142.482 Y148.522 E0.22351 F4413
+G1 X153.429 Y137.328 F30000
+G1 X154.837 Y131.732 E0.22790 F3471
+";
+
+#[test]
+fn a_valley_step_behind_the_committed_path_is_read_by_nothing() {
+    let config =
+        std::env::temp_dir().join(format!("opening_crawl_printer_{}.cfg", std::process::id()));
+    std::fs::write(&config, OPENING_CRAWL_PRINTER).expect("temp config");
+    plans_within_the_extruder_limits("opening_reversal", OPENING_REVERSAL, &config);
+}
+
+/// #898: a corexy with a kernel-free advance and a 0.74 mm corner budget,
+/// drawn by the print-like planner fuzz.
+const WAITING_CRAWL_PRINTER: &str = "[printer]
+max_velocity: 942.3988288103301
+max_accel: 47403.38670336128
+corner_deviation: 0.7382658358164043
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 12568.097981509703
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.034813571169232026
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 54.08761953978757
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 66.50291608902367
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #898: extrusions, a retract and hop, a travel, and extrusions again:
+/// the projection took the path through a crawl whose valley was still
+/// waiting on the spans past it.
+const CRAWL_WAITING_PAST_A_HOP: &str = "G90
+M83
+G1 X150.0 Y150.0 Z0.2 F30000
+G1 X162.520 Y148.170 F17051
+G1 X161.935 Y148.180 E0.02696 F9159
+G1 X164.740 Y154.177 E0.30497 F15202
+G1 X163.435 Y145.208 E0.00660 F8121
+G1 X163.466 Y145.716 E0.01341 F4821
+G1 X163.193 Y146.504 E0.03146 F16205
+G1 E-0.5 F2400
+G1 Z0.600 F600
+G1 X146.809 Y122.606 F30000
+G1 Z0.200 F600
+G1 E0.5 F2400
+G1 X144.519 Y122.373 E0.06849 F15916
+G1 X157.333 Y126.537 E0.28132 F10331
+";
+
+#[test]
+fn a_waiting_crawl_keeps_its_path_untaken() {
+    let config =
+        std::env::temp_dir().join(format!("waiting_crawl_printer_{}.cfg", std::process::id()));
+    std::fs::write(&config, WAITING_CRAWL_PRINTER).expect("temp config");
+    plans_within_the_extruder_limits(
+        "crawl_waiting_past_a_hop",
+        CRAWL_WAITING_PAST_A_HOP,
+        &config,
+    );
+}
+
+/// #897: a corexy with a kernel-free advance limited to 6359 mm/s² and
+/// `square_corner_velocity: 0`, drawn by the print-like planner fuzz.
+const FAR_STEPS_PRINTER: &str = "[printer]
+max_velocity: 386.46480970262087
+max_accel: 51666.60727129722
+square_corner_velocity: 0
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 6358.545634714979
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.025743938421182125
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 105.76857975056504
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 80.640952705959
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #897: a reversal's crawl valley owns the ratio steps 0.9 and 2.5 mm
+/// after it, where the leaders may cross at ~206 mm/s; capped to the
+/// crawl's 0.24 mm step window their flow asked 6734 mm/s².
+const STEPS_FAR_PAST_A_REVERSAL: &str = "G90
+M83
+G1 X148.223 Y158.619 F10632
+G1 X150.159 Y151.491 E0.41688 F13620
+G1 X150.794 Y146.569 E0.23578 F11562
+G1 X155.997 Y145.112 E0.14745 F7538
+G1 X155.077 Y145.258 E0.02331 F4309
+G1 X153.500 Y145.541 E0.06676 F6878
+G1 X145.159 Y142.668 F14889
+";
+
+#[test]
+fn a_crawl_valley_widens_far_owned_steps_to_fit_their_flow() {
+    let config = std::env::temp_dir().join(format!("far_steps_printer_{}.cfg", std::process::id()));
+    std::fs::write(&config, FAR_STEPS_PRINTER).expect("temp config");
+    plans_within_the_extruder_limits(
+        "steps_far_past_a_reversal",
+        STEPS_FAR_PAST_A_REVERSAL,
+        &config,
+    );
+}
+
+/// #895: a corexy with a kernel-free advance limited to 12492 mm/s², drawn
+/// by the print-like planner fuzz.
+const SLIVER_LEG_PRINTER: &str = "[printer]
+max_velocity: 968.4864196022259
+max_accel: 11985.120692588014
+square_corner_velocity: 2.631337096765715
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 12491.664179298827
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.018760200306420192
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 103.34334564648618
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 63.85558791682546
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #895: short extrusions reversing into a slow travel. The crawl side
+/// read the leaders' jerk as the mean over a 9e-6 mm probe interval of a
+/// sliver leg, the fit's own: 40633 mm/s² against 12492.
+const SLIVER_LEGS_INTO_A_CRAWL: &str = "G90
+M83
+G1 Z0.200 F600
+G1 X188.228 Y132.858 E0.01540 F8236
+G1 X188.480 Y132.995 E0.00615 F6687
+G1 X188.231 Y132.863 E0.00765 F17733
+G1 X187.986 Y132.765 E0.00544 F4988
+G1 X187.919 Y132.776 E0.00120 F8358
+G1 X191.618 Y133.199 F1866
+";
+
+#[test]
+fn a_crawl_side_reads_a_sliver_legs_jerk_across_the_node_spacing() {
+    let config =
+        std::env::temp_dir().join(format!("sliver_leg_printer_{}.cfg", std::process::id()));
+    std::fs::write(&config, SLIVER_LEG_PRINTER).expect("temp config");
+    plans_within_the_extruder_limits(
+        "sliver_legs_into_a_crawl",
+        SLIVER_LEGS_INTO_A_CRAWL,
+        &config,
+    );
+}
+
+/// #895: `voron_first_layers_zhop.gcode` cut to an extrusion, a hop, a
+/// travel, a prime and the extrusion back: on the bowden profile the crawl
+/// side read 2238 mm/s² against 2000 over a 0.01 mm interval.
+const BOWDEN_HOP_PRIME_AND_BACK: &str = "G90
+M83
+G1 X103.97 Y98.711 E.24344
+G1 Z0.8
+G1 X121.55 Y126.414 F9000
+G1 Z0.6
+G1 E.8 F1500
+G1 X103.45 Y126.414 E.6089
+";
+
+#[test]
+fn a_bowden_crawl_side_after_a_prime_fits_its_limit() {
+    let config = corpus::repo().join("rust/motion-core/tests/configs/p1_bowden_ramp.cfg");
+    plans_within_the_extruder_limits(
+        "bowden_hop_prime_and_back",
+        BOWDEN_HOP_PRIME_AND_BACK,
+        &config,
+    );
+}
+
+/// #895: a corexy with 30 Hz shapers and a kernel-free advance limited to
+/// 2000 mm/s², shrunk by the print-like planner fuzz.
+const TWO_REVERSALS_PRINTER: &str = "[printer]
+max_velocity: 300
+max_accel: 3000
+square_corner_velocity: 2.7763543996128295
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 2000
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.027557459600702584
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 30
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 30
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #895: two reversals 0.5 mm apart: the after side of the first crawl
+/// reached over the second and read its turning, ~2e6 mm/s³, at the first
+/// side's weight: 3566 mm/s² against 2000.
+const TWO_REVERSALS: &str = "G90
+M83
+G1 X150.0 Y150.0 Z0.2 F30000
+G1 X149.646 Y149.065 F30000
+G1 X149.510 Y148.074 E0.04338 F1200
+G1 X149.512 Y147.074 E0.04338 F1200
+G1 X148.521 Y146.938 E0.04338 F1200
+G1 X149.324 Y147.172 E0.05215 F5434
+G1 X148.381 Y146.838 E0.04764 F8351
+";
+
+#[test]
+fn a_crawl_side_leaves_the_next_crawls_turning_to_its_valley() {
+    let config = printer_from("two_reversals_printer", TWO_REVERSALS_PRINTER);
+    plans_within_the_extruder_limits("two_reversals", TWO_REVERSALS, &config);
+}
+
+/// #912: a corexy with 55 Hz smooth shapers and a kernel-free advance,
+/// drawn by the print-like planner fuzz.
+const REVERSAL_PAST_A_RETRACT_PRINTER: &str = "[printer]
+max_velocity: 640.5295844275342
+max_accel: 19421.576176581028
+square_corner_velocity: 19.3295380619992
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 17616.127335386354
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.044418270385394816
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 55.16682954926499
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 55.52886882081576
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #912: the reversal from the travel back over it, past a retract and a
+/// z hop, widened the crawl valley of the turn before the retract back to
+/// that valley's end, over the extruding move the projection had already
+/// read at the valley's after side: the advance stepped its position by
+/// 0.0035 mm where the move hands over to the retract.
+const REVERSAL_PAST_A_RETRACT: &str = "G90
+M83
+G1 X150.0 Y150.0 Z0.2 F30000
+G1 X152.723 Y154.752 E0.27212 F3571
+G1 X152.359 Y154.137 E0.01266 F16890
+G1 E-0.5 F2400
+G1 Z0.600 F600
+G1 X168.940 Y162.366 F12013
+G1 X166.127 Y162.161 E0.00136 F6996
+G1 X160.259 Y164.980 E0.26930 F6423
+";
+
+#[test]
+fn a_crawl_valley_widened_past_a_retract_holds_zero_on_untaken_path() {
+    let config = printer_from(
+        "reversal_past_a_retract_printer",
+        REVERSAL_PAST_A_RETRACT_PRINTER,
+    );
+    plans_within_the_extruder_limits("reversal_past_a_retract", REVERSAL_PAST_A_RETRACT, &config);
+}
+
+/// #912's widening check, drawn by the print-like planner fuzz: an 88 Hz
+/// corexy with no square-corner velocity and a kernel-free advance.
+const WIDENED_FROM_THE_TAKEN_EDGE_PRINTER: &str = "[printer]
+max_velocity: 315.12426332023136
+max_accel: 5396.416678781325
+square_corner_velocity: 0
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 10069.342545867317
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.03820311461480342
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 88.15871560075092
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 87.77439227405594
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// The projection took the path to 3e-14 mm past the zero-wide crawl
+/// valley at s=25.115, which the next crawl widens.
+const WIDENED_FROM_THE_TAKEN_EDGE: &str = "G90
+M83
+G1 X150.0 Y150.0 Z0.2 F30000
+G1 X150.075 Y149.980 E0.00336 F11517
+G1 X166.285 Y147.318 F14701
+G1 E-0.5 F2400
+G1 Z0.600 F600
+G1 X158.077 Y147.036 F30000
+G1 Z0.200 F600
+G1 E0.5 F2400
+G1 X158.140 Y147.040 E0.00191 F7700
+G1 X158.635 Y147.446 E0.00638 F10130
+G1 X158.483 Y147.069 E0.02095 F12356
+G1 X158.568 Y147.517 F3615
+G1 E-0.5 F2400
+";
+
+#[test]
+fn a_crawl_valley_widens_from_the_edge_of_the_taken_path() {
+    let config = printer_from(
+        "widened_from_the_taken_edge_printer",
+        WIDENED_FROM_THE_TAKEN_EDGE_PRINTER,
+    );
+    plans_within_the_extruder_limits(
+        "widened_from_the_taken_edge",
+        WIDENED_FROM_THE_TAKEN_EDGE,
+        &config,
+    );
+}
+
+/// `voron_first_layers_zhop.gcode` on the straight-line snapshot printer,
+/// whose extruder has no advance: a crawl here widens the last crawl
+/// valley over path the projection has taken, which nothing reads.
+const PRIME_AFTER_A_HOP: &str = "G90
+M83
+G1 X119.827 Y125.753 Z2 F30000
+G1 X124.431 Y101.534 F9000
+G1 Z2.2
+G1 E.8 F1500
+G1 X124.414 Y101.674 E.00476
+G1 X124.427 Y102.682 E.03391
+";
+
+#[test]
+fn a_follower_without_an_advance_widens_crawl_valleys_over_taken_path() {
+    let config = corpus::repo().join("snapshots/cases/straight_line/printer.cfg");
+    corpus::plan("prime_after_a_hop", PRIME_AFTER_A_HOP, &config).expect("the print plans");
 }

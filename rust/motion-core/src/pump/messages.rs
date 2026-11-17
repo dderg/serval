@@ -470,7 +470,7 @@ pub(super) fn anchored_start(
     })
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BuzzParams {
     pub routes: Arc<[BuzzRoute]>,
     pub wave: BuzzWave,
