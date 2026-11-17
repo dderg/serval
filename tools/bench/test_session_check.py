@@ -372,3 +372,114 @@ def test_a_plain_run_is_judged_by_the_run_wide_checks_only():
         "1 pacer brakes outside commanded stops"
         in verdict["checks"][3]["detail"]
     )
+
+
+RESTART_SENT = 1_000.0
+QUEUE_DRAINED = RESTART_SENT + 8.0
+SECOND_PRINT_SENT = QUEUE_DRAINED + 12.0
+SECOND_PRINT_DONE = SECOND_PRINT_SENT + 70.0
+LATCHED_MCU = (
+    "Previous MCU 'mcu' shutdown: Missed scheduling of next digital out event"
+)
+
+
+def _action(act: str, sent: float, returned: float) -> dict:
+    return {
+        "act": act,
+        "after": "previous",
+        "delay_s": 0.0,
+        "script": "",
+        "sent": sent,
+        "returned": returned,
+        "ok": True,
+        "error": None,
+    }
+
+
+def _print_event(event: str, t: float, outcome: str | None = None) -> dict:
+    record = {"t": t, "event": event, "level": "info"}
+    if outcome is not None:
+        record["outcome"] = outcome
+    return record
+
+
+def _host_restart_session() -> dict:
+    first_start = RESTART_SENT - 20.0
+    settled = SECOND_PRINT_DONE + 6.0
+    return {
+        "run_dir": "synthetic",
+        "head": "synthetic",
+        "scenario": "host_restart",
+        "window": [first_start - 1.0, settled + 4.0],
+        "actions": [
+            _action("start_print", first_start, first_start),
+            _action("host_restart", RESTART_SENT, QUEUE_DRAINED + 1.0),
+            _action("start_print", SECOND_PRINT_SENT, SECOND_PRINT_SENT),
+        ],
+        "states": [
+            {
+                "t": SECOND_PRINT_DONE + 3.0,
+                "klippy": "ready",
+                "klippy_message": "Printer is ready",
+                "print": "complete",
+                "print_message": "",
+            }
+        ],
+        "post_check": {
+            "started": settled,
+            "lines": [{"line": "M400", "ok": True, "error": None}],
+            "after": {"klippy": "ready"},
+        },
+        "spans": [
+            [first_start + 2.0, QUEUE_DRAINED, 50_000],
+            [SECOND_PRINT_SENT + 1.0, SECOND_PRINT_DONE, 40_000],
+        ],
+        "events": [
+            _print_event("print.start", first_start),
+            _print_event("print.end", QUEUE_DRAINED + 3.0, "reset"),
+            _print_event("print.start", SECOND_PRINT_SENT),
+            _print_event("print.end", SECOND_PRINT_DONE, "complete"),
+        ],
+        "journal": [],
+    }
+
+
+def test_a_host_restart_that_drains_reconnects_and_prints_again_passes():
+    verdicts = _verdicts(_host_restart_session())
+    failed = [v for v in verdicts.values() if not v.ok]
+    assert failed == []
+    assert "stopped after 8.000 s <= 35 s (#939)" in (
+        verdicts["stop_after_host_restart"].detail
+    )
+
+
+def test_an_mcu_latched_in_shutdown_across_the_host_restart_fails():
+    evidence = _host_restart_session()
+    evidence["events"].append(
+        {
+            "t": QUEUE_DRAINED + 2.0,
+            "event": "klippy_shutdown",
+            "level": "error",
+            "reason": LATCHED_MCU,
+        }
+    )
+    verdict = _verdicts(evidence)["shutdown"]
+    assert not verdict.ok
+    assert LATCHED_MCU in verdict.detail
+
+
+def test_steps_running_on_after_the_host_restart_fail():
+    evidence = _host_restart_session()
+    first, second = evidence["spans"]
+    evidence["spans"] = [[first[0], second[1], first[2] + second[2]]]
+    verdict = _verdicts(evidence)["stop_after_host_restart"]
+    assert not verdict.ok
+    assert "motion did not stop" in verdict.detail
+
+
+def test_no_second_print_after_the_host_restart_fails_the_outcomes():
+    evidence = _host_restart_session()
+    evidence["events"] = evidence["events"][:2]
+    verdict = _verdicts(evidence)["outcomes"]
+    assert not verdict.ok
+    assert "ended reset (expected reset, complete)" in verdict.detail

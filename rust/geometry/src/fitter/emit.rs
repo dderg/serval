@@ -304,7 +304,10 @@ pub(super) fn chain_blend_followers(
     for axis in axes {
         let r_in = inbound.exit_anchor(axis);
         let r_out = outbound.entry_anchor(axis);
-        let ratio_at = |s: f64| r_in + (r_out - r_in) * s / total;
+        let ratio_at = |s: f64| {
+            let along = s / total;
+            r_in * (1.0 - along) + r_out * along
+        };
         for (i, demands) in out.iter_mut().enumerate() {
             let d = FollowerDemand::ramp(axis, ratio_at(bounds[i]), ratio_at(bounds[i + 1]));
             if d.max_abs_ratio() > 0.0 {
