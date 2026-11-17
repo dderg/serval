@@ -4,9 +4,9 @@ close" with two classic steppers still holding queued moves. The shutdown
 must finish (stepper_shutdown clears each move queue before move_reset's
 relinked free list can loop it) and leave the MCU answering.
 
-The shutdown longjmps out of the frame carrying the late command, dropping
-any frames the MCU read behind it in the same chunk; the MCU then NAKs while
-awaiting the frame after the late one until klippy retransmits it.
+The shutdown longjmps out of the frame carrying the late command; the MCU
+feeds the frames it read behind it on its next pass (#879), so the only
+frame it can still await is the one after the late command.
 
 klippy queues motion only a few seconds ahead of the playhead, so the late
 command is armed before the zigzag goes out: the heater's next refresh
