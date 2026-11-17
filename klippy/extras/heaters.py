@@ -24,6 +24,7 @@ MAX_HEAT_TIME = 3.0
 AMBIENT_TEMP = 25.0
 PID_PARAM_BASE = 255.0
 MAX_MAINTHREAD_TIME = 5.0
+OFF_POLL_S = 0.010
 QUELL_STALE_TIME = 7.0
 PID_PROFILE_VERSION = 1
 PID_PROFILE_OPTIONS = {
@@ -173,11 +174,11 @@ class Heater:
         self.mcu_pwm.set_pwm(pwm_time, value)
 
     def switch_off(self):
-        mcu = self.mcu_pwm.get_mcu()
-        now = mcu.estimated_print_time(self.reactor.monotonic())
         with self.lock:
             self.target_temp = 0.0
             if self.last_pwm_value:
+                mcu = self.mcu_pwm.get_mcu()
+                now = mcu.estimated_print_time(self.reactor.monotonic())
                 off_time = max(now, self.last_pwm_time) + self.pwm_delay
                 self._send_pwm(off_time, 0.0)
             return self.last_pwm_time
@@ -1188,7 +1189,10 @@ class PrinterHeaters:
         self.has_started = self.have_load_sensors = False
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
         self.printer.register_event_handler(
-            "gcode:request_restart", self._switch_off_before_restart
+            "gcode:request_restart", self.turn_off_all_heaters
+        )
+        self.printer.register_event_handler(
+            "klippy:stopping", self._switch_off_before_stop
         )
         # Register commands
         self.gcode = self.printer.lookup_object("gcode")
@@ -1295,15 +1299,20 @@ class PrinterHeaters:
             "available_monitors": self.available_monitors,
         }
 
-    def turn_off_all_heaters(self):
+    def turn_off_all_heaters(self, print_time=0.0):
         for heater in self.heaters.values():
             heater.set_temp(0.0)
 
-    def _switch_off_before_restart(self, print_time):
-        if not self.heaters:
+    def _switch_off_before_stop(self):
+        if self.printer.is_shutdown() or not self.heaters:
             return
         off_since = max(heater.switch_off() for heater in self.heaters.values())
-        self.printer.lookup_object("toolhead").wait_until_print_time(off_since)
+        if not off_since:
+            return
+        reactor = self.printer.get_reactor()
+        mcu = self.printer.lookup_object("mcu")
+        while mcu.estimated_print_time(reactor.monotonic()) < off_since:
+            reactor.pause(reactor.monotonic() + OFF_POLL_S)
 
     cmd_TURN_OFF_HEATERS_help = "Turn off all heaters"
 
