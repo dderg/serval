@@ -12,7 +12,7 @@ use super::super::{
 use super::{
     AdvanceValley, CLUSTER_REACH_S, CROSSING_PROBES, Crossing, ENVELOPE_SLOPE, KERNEL_PEAK,
     NODE_SPACING_PER_WIDTH, NODE_SPACING_S, PathReach, RampLeg, RatioSmoothing, RestSide,
-    ShapedLeaders, Spill, TimedSeam, ValleyKind, WIDTH_SLOPE_BOUND, WidthField, slowest_crawl,
+    ShapedLeaders, Spill, TimedSeam, ValleyKind, WIDTH_SLOPE_BOUND, WidthField, leg_crawls,
 };
 
 /// `(length, ratio at start, ratio at end)` per span.
@@ -1873,7 +1873,7 @@ fn a_crawl_right_before_a_legs_end_is_found_whichever_seam_is_slower() {
         let shaped_leaders = ShapedLeaders::of(&shaped, &[0, 1]);
         let shaped_odometer = odometer(&shaped, &shaped_leaders);
         let leg = moving_leg(&shaped, (&shaped_leaders, &shaped_odometer), 100.0);
-        let found = slowest_crawl(&shaped_leaders, &leg, f64::INFINITY);
+        let found = leg_crawls(&shaped_leaders, &leg, f64::INFINITY)[0];
         let Some((_, crossing)) = found else {
             panic!(
                 "a leg whose closing seam is {end_excess_mm_s} mm/s faster than its opening \
