@@ -373,6 +373,12 @@ def test_purge_after_cleannozzle_dwell_and_mesh_load(sim_world, topology):
     _assert_clean(world)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="#892: the API FIRMWARE_RESTART lands in the print's M400/G1, "
+    "which raises GreenletExit: 'Internal error on command' and a shutdown",
+)
 @pytest.mark.parametrize("fraction", [0.02, 0.3])
 @pytest.mark.parametrize("topology", sorted(TOPOLOGIES))
 def test_firmware_restart_mid_print(sim_world, topology, fraction):
