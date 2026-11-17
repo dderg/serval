@@ -25,6 +25,7 @@ import shutil
 import signal
 import statistics
 import subprocess
+import threading
 import sys
 import tempfile
 import time
@@ -41,6 +42,8 @@ WORKER_TIMEOUT_S = 900
 STUCK_GRACE_S = 120
 RESULT_FILE = "result.json"
 REPRO_FILE = "repro.txt"
+LEDGER_FILE = "ledger.jsonl"
+SUMMARY_FILE = "summary.txt"
 MINIMIZED_DIR = "minimized"
 
 
@@ -73,6 +76,11 @@ def _parse(argv) -> argparse.Namespace:
     )
     parser.add_argument("--minimize", action="store_true")
     parser.add_argument("--keep-passing", action="store_true")
+    parser.add_argument(
+        "--run-name",
+        help="fixed run directory under --out-root; a rerun skips the "
+        "scenarios its ledger already records",
+    )
     parser.add_argument(
         "--step-tap",
         action="store_true",
@@ -158,9 +166,24 @@ class Runner:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        self.run_dir = args.out_root / f"run-{stamp}-{os.getpid()}"
+        name = args.run_name or f"run-{stamp}-{os.getpid()}"
+        self.run_dir = args.out_root / name
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.ledger = self.run_dir / LEDGER_FILE
+        self.ledger_lock = threading.Lock()
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs)
+
+    def recorded(self) -> dict[str, dict]:
+        """Results already in this run's ledger, by scenario directory: a
+        resumed run skips them."""
+        if not self.ledger.exists():
+            return {}
+        lines = self.ledger.read_text().splitlines()
+        return {r["dir"]: r for r in map(json.loads, lines) if r.get("dir")}
+
+    def _record(self, result: dict) -> None:
+        with self.ledger_lock, self.ledger.open("a") as stream:
+            stream.write(json.dumps(result) + "\n")
 
     def evaluate(self, directory: pathlib.Path, seed_mode: bool) -> dict:
         result = _spawn(directory)
@@ -188,26 +211,32 @@ class Runner:
 
     def run_seeds(self, seeds) -> list[dict]:
         started = time.monotonic()
+        done = self.recorded()
+        results = []
         futures = []
         for seed in seeds:
             for attempt in range(self.args.repeat):
+                name = self._name(f"seed-{seed}", attempt)
+                if name in done:
+                    results.append(done[name])
+                    continue
                 if (
                     self.args.budget_s
                     and time.monotonic() - started > self.args.budget_s
                 ):
-                    return [future.result() for future in futures]
-                futures.append(self.pool.submit(self._seed, seed, attempt))
+                    return results + [future.result() for future in futures]
+                futures.append(self.pool.submit(self._seed, seed, name))
                 while sum(not f.done() for f in futures) >= self.args.jobs:
                     time.sleep(0.2)
-        return [future.result() for future in futures]
+        return results + [future.result() for future in futures]
 
     def _name(self, stem: str, attempt: int) -> str:
         return stem if self.args.repeat == 1 else f"{stem}-r{attempt}"
 
-    def _seed(self, seed: int, attempt: int) -> dict:
-        name = self._name(f"seed-{seed}", attempt)
+    def _seed(self, seed: int, name: str) -> dict:
         directory = self._prepare(scenario.generate(seed), name)
         result = self.evaluate(directory, seed_mode=True)
+        self._record(result)
         print(_line(result), flush=True)
         return result
 
@@ -301,10 +330,7 @@ def main(argv=None) -> int:
         for result in first_failures.values():
             runner.minimize(result)
     summary = _summary(results, time.monotonic() - started)
-    (runner.run_dir / "summary.txt").write_text(summary + "\n")
-    (runner.run_dir / "results.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in results)
-    )
+    (runner.run_dir / SUMMARY_FILE).write_text(summary + "\n")
     print(summary)
     print(f"results: {runner.run_dir}")
     return 1 if any(r["status"] == FAIL for r in results) else 0

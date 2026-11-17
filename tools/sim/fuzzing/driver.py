@@ -247,13 +247,29 @@ class Session:
                 f"{[p.value for p in self.probes]}",
             )
         steps = self._steps()
-        label = f"rest probe {index}"
+        label = (
+            f"print {self.print_index} rest probe {index} "
+            f"({self._step_timing()})"
+        )
         self._check_rest(steps, self.probes[index].position, label)
         self.recheck = _Recheck(
             self._now_ns() + int(PROBE_RECHECK_S * NS_PER_S), steps, label
         )
         self.mark_level = level
         self.next_probe += 1
+
+    def _step_timing(self) -> str:
+        """When the mark pin was seen against the last step any motor
+        took: a probe seen after motion resumed has a last step at or
+        just before the pin."""
+        last_ns = max(
+            self.controls[m.process].get_step_times(m.step_line)["last_ns"]
+            for m in self.motors
+        )
+        return (
+            f"pin seen {self._now_ns() / NS_PER_S:.3f} s, last step "
+            f"{last_ns / NS_PER_S:.3f} s"
+        )
 
     def _finish_recheck(self) -> None:
         recheck, self.recheck = self.recheck, None
@@ -266,7 +282,9 @@ class Session:
         if moved:
             raise Violation(
                 Check.REST_STEPS,
-                f"{recheck.label}: motors moved during the rest dwell: {moved}",
+                f"{recheck.label}: motors moved within {PROBE_RECHECK_S} s "
+                f"of the pin, inside the G4 P{program.PROBE_HOLD_MS} after "
+                f"it: {moved}; now {self._step_timing()}",
             )
 
     def _settle_recheck(self) -> None:
