@@ -7,7 +7,7 @@ use geometry::{
 };
 
 use super::super::{RatioSpan, Table};
-use super::{Crossing, RampLeg, RatioSmoothing, Seam};
+use super::{Crossing, NODE_SPACING_S, RampLeg, RatioSmoothing, Seam};
 
 /// Probes per leg the side trail reads the leaders at, both ends included
 /// once more.
@@ -171,6 +171,39 @@ impl SideTrail {
             },
         )
     }
+
+    /// `interval` read across at least `span` of the leaders' time about
+    /// its middle, between the probes of any leg nearest outside it. The
+    /// fit holds `s̈` within its tolerance `A` and leaves the jerk free, so
+    /// over an interval of a sliver leg, 1e-5 mm long, the mean `Δs̈/Δt`
+    /// reads a sliver piece's jerk, within only `2A/Δt` of the leaders'
+    /// own; across `span` that error is `2A/span`. An interval as long
+    /// already, or one the trail has no probe beyond, reads as it is.
+    fn read_across<'a>(&'a self, interval: Interval<'a>, span: f64) -> Interval<'a> {
+        let (from, to, _) = interval;
+        if to.t - from.t >= span {
+            return interval;
+        }
+        let middle = 0.5 * (from.t + to.t);
+        let start = self
+            .probes
+            .iter()
+            .filter(|probe| probe.t <= middle - 0.5 * span)
+            .max_by(|left, right| left.t.total_cmp(&right.t));
+        let end = self
+            .probes
+            .iter()
+            .filter(|probe| probe.t >= middle + 0.5 * span)
+            .min_by(|left, right| left.t.total_cmp(&right.t));
+        let (Some(start), Some(end)) = (start, end) else {
+            return interval;
+        };
+        (
+            start,
+            end,
+            (end.path_accel - start.path_accel) / (end.t - start.t),
+        )
+    }
 }
 
 /// Two neighbouring probes of one leg and the mean `s⃛` between them
@@ -248,7 +281,10 @@ impl Edge {
 /// reads past `table_end` waits for the spans laid there
 /// ([`RatioSmoothing::reads_within`]). It fails loudly where the leaders
 /// leave the follower no room in any interval: it never narrows a side to
-/// make it fit.
+/// make it fit. An interval whose own reading passes the limit is read
+/// again across the width field's node spacing first
+/// ([`SideTrail::read_across`]): a sliver leg's mean reads the fit, not
+/// the leaders.
 ///
 /// The advance reads `r·(s̈ + k·Φ·s⃛)`, `Φ` the product of the valleys'
 /// weights, at most this side's `W(d)` at a distance `d` from the crawl:
@@ -350,7 +386,13 @@ pub(super) fn crawl_side(
         trail
             .intervals_within(window, side)
             .fold(true, |fits, interval| {
-                let (ratio, own) = (ratio_over(interval), own_over(interval));
+                let ratio = ratio_over(interval);
+                let interval = if ratio * own_over(interval) >= rule.max_accel_mm_s2 {
+                    trail.read_across(interval, NODE_SPACING_S)
+                } else {
+                    interval
+                };
+                let own = own_over(interval);
                 assert!(
                     ratio * own < rule.max_accel_mm_s2,
                     "follower projection: the leaders ask {} mm/s² of the follower between \

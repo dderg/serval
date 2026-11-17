@@ -417,3 +417,93 @@ fn a_crawl_valley_widens_far_owned_steps_to_fit_their_flow() {
     std::fs::write(&config, FAR_STEPS_PRINTER).expect("temp config");
     plans_within_the_extruder_limits("steps_far_past_a_reversal", STEPS_FAR_PAST_A_REVERSAL, &config);
 }
+
+/// #895: a corexy with a kernel-free advance limited to 12492 mm/s², drawn
+/// by the print-like planner fuzz.
+const SLIVER_LEG_PRINTER: &str = "[printer]
+max_velocity: 968.4864196022259
+max_accel: 11985.120692588014
+square_corner_velocity: 2.631337096765715
+max_z_velocity: 25
+max_z_accel: 100
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+[axis x]
+post_processors: shaper_x
+[axis y]
+post_processors: shaper_y
+[axis z]
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+max_accel: 12491.664179298827
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.018760200306420192
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 103.34334564648618
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 63.85558791682546
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z]
+drive: stepper
+[motor extruder]
+drive: stepper
+[extruder]
+axis: e
+max_extrude_only_velocity: 50
+max_extrude_only_accel: 5000
+";
+
+/// #895: short extrusions reversing into a slow travel. The crawl side
+/// read the leaders' jerk as the mean over a 9e-6 mm probe interval of a
+/// sliver leg, the fit's own: 40633 mm/s² against 12492.
+const SLIVER_LEGS_INTO_A_CRAWL: &str = "G90
+M83
+G1 Z0.200 F600
+G1 X188.228 Y132.858 E0.01540 F8236
+G1 X188.480 Y132.995 E0.00615 F6687
+G1 X188.231 Y132.863 E0.00765 F17733
+G1 X187.986 Y132.765 E0.00544 F4988
+G1 X187.919 Y132.776 E0.00120 F8358
+G1 X191.618 Y133.199 F1866
+";
+
+#[test]
+fn a_crawl_side_reads_a_sliver_legs_jerk_across_the_node_spacing() {
+    let config =
+        std::env::temp_dir().join(format!("sliver_leg_printer_{}.cfg", std::process::id()));
+    std::fs::write(&config, SLIVER_LEG_PRINTER).expect("temp config");
+    plans_within_the_extruder_limits("sliver_legs_into_a_crawl", SLIVER_LEGS_INTO_A_CRAWL, &config);
+}
+
+/// #895: `voron_first_layers_zhop.gcode` cut to an extrusion, a hop, a
+/// travel, a prime and the extrusion back: on the bowden profile the crawl
+/// side read 2238 mm/s² against 2000 over a 0.01 mm interval.
+const BOWDEN_HOP_PRIME_AND_BACK: &str = "G90
+M83
+G1 X103.97 Y98.711 E.24344
+G1 Z0.8
+G1 X121.55 Y126.414 F9000
+G1 Z0.6
+G1 E.8 F1500
+G1 X103.45 Y126.414 E.6089
+";
+
+#[test]
+fn a_bowden_crawl_side_after_a_prime_fits_its_limit() {
+    let config = corpus::repo().join("rust/motion-core/tests/configs/p1_bowden_ramp.cfg");
+    plans_within_the_extruder_limits("bowden_hop_prime_and_back", BOWDEN_HOP_PRIME_AND_BACK, &config);
+}
