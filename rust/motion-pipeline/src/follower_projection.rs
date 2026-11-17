@@ -1924,8 +1924,15 @@ impl FollowerState {
         p
     }
 
+    /// Drops the front tracks no window from `keep_after` on reads: a track
+    /// goes once the next one starts before `keep_after`, so a track before
+    /// a dwell stays while the hold it anchors is read.
     fn trim_projected(&mut self, keep_after: f64) {
-        let drop = self.projected.partition_point(|p| p.t_end < keep_after);
+        let drop = self
+            .projected
+            .windows(2)
+            .take_while(|pair| pair[1].t_start < keep_after)
+            .count();
         if drop > 0 {
             self.projected.drain(..drop);
             self.projected_trimmed = true;

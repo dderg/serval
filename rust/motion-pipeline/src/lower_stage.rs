@@ -54,11 +54,15 @@ impl Lowerer {
                         self.has_motion_history = false;
                     }
                     Control::SetAxisChains(chains) => {
+                        assert!(
+                            self.rest_hold_pending,
+                            "lowerer: a chain swap arrived before the drain that parks the stream"
+                        );
                         let next = chains.rest_support();
                         let settle = self.rest.after_motion.max(next.after_motion);
                         if self.has_motion_history
                             && settle > 0.0
-                            && !self.emit_hold(self.t + settle, 0, output)
+                            && !self.emit_parked_hold(self.t + settle, output)
                         {
                             return false;
                         }
@@ -210,6 +214,10 @@ impl Lowerer {
             return true;
         }
         self.emit_hold(self.t + settle, 0, output)
+    }
+
+    fn emit_parked_hold(&mut self, t_end: f64, output: &mut impl FnMut(BaseItem) -> bool) -> bool {
+        self.emit_hold(t_end, 0, output) && output(BaseItem::Drain)
     }
 
     fn emit_hold(

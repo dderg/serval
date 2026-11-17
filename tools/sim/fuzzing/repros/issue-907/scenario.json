@@ -1,0 +1,59 @@
+{
+ "seed": 34,
+ "printer": {
+  "base": "heaters",
+  "topology": "one_mcu",
+  "max_velocity": 700.0,
+  "max_accel": 10297.0,
+  "corner": "square_corner_velocity",
+  "corner_value": 21.9,
+  "max_z_velocity": 10.0,
+  "max_z_accel": 30.0,
+  "shaper_x": null,
+  "shaper_y": null,
+  "pa_k": 0.0386,
+  "extruder_kernel": {
+   "kernel": "smooth_mzv",
+   "value": 169.4
+  },
+  "mesh": "none",
+  "mesh_points": [],
+  "mesh_fade": false,
+  "mesh_at_start": false,
+  "heaters": false,
+  "pause_macro": "base",
+  "cancel_macro": "base",
+  "end_steps": [],
+  "idle_timeout_s": null
+ },
+ "programs": [
+  {
+   "name": "A",
+   "segments": [
+    {
+     "kind": "retract",
+     "lines": [
+      "G1 E-0.8 F2400",
+      "G90",
+      "G1 X65.07 Y49.28 F25140",
+      "G1 E0.8 F2400",
+      ";fuzz_probe"
+     ]
+    },
+    {
+     "kind": "retract",
+     "lines": [
+      "G1 E-0.8 F2400",
+      "G90",
+      "G1 X73.603 Y50.448 F31980",
+      "G1 E0.8 F2400"
+     ]
+    }
+   ],
+   "end_print": false
+  }
+ ],
+ "prints": [
+  "A"
+ ]
+}

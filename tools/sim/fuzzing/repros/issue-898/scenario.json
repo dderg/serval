@@ -1,0 +1,64 @@
+{
+ "seed": 60,
+ "printer": {
+  "base": "bench",
+  "topology": "one_mcu",
+  "max_velocity": 1000.0,
+  "max_accel": 10000.0,
+  "corner": "corner_deviation",
+  "corner_value": 0.21,
+  "max_z_velocity": 25.0,
+  "max_z_accel": 100.0,
+  "shaper_x": {
+   "kernel": "smooth_mzv",
+   "value": 91.2
+  },
+  "shaper_y": {
+   "kernel": "smooth_zv",
+   "value": 37.9
+  },
+  "pa_k": 0.0538,
+  "extruder_kernel": null,
+  "mesh": "none",
+  "mesh_points": [],
+  "mesh_fade": false,
+  "mesh_at_start": false,
+  "heaters": false,
+  "pause_macro": "base",
+  "cancel_macro": "base",
+  "end_steps": [],
+  "idle_timeout_s": null
+ },
+ "programs": [
+  {
+   "name": "A",
+   "segments": [
+    {
+     "kind": "mesh_seam",
+     "lines": [
+      "G90",
+      "G1 Z1.12 F600",
+      "G1 X271.662531 Y20.162704 F31200",
+      "G1 X239.121642 Y19.837296 E1.21709 F21060",
+      "G1 X128.61 Y226.328 F31200"
+     ]
+    },
+    {
+     "kind": "mesh_seam",
+     "lines": [
+      "G90",
+      "G1 Z0.68 F600",
+      "G1 X25.522295 Y25.861875 F34260",
+      "G1 X16.178742 Y15.938827 F44580",
+      "G1 X230.726 Y93.785 F34260",
+      ";fuzz_probe"
+     ]
+    }
+   ],
+   "end_print": false
+  }
+ ],
+ "prints": [
+  "A"
+ ]
+}

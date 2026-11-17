@@ -595,7 +595,8 @@ impl AnalyticMoveSpan {
                 + 2.0 * warp.wxy * path_velocity[0] * path_velocity[1]
                 + warp.wyy * path_velocity[1] * path_velocity[1]
                 + 2.0 * warp.wxz * path_velocity[0] * path_velocity[2]
-                + 2.0 * warp.wyz * path_velocity[1] * path_velocity[2],
+                + 2.0 * warp.wyz * path_velocity[1] * path_velocity[2]
+                + warp.wzz * path_velocity[2] * path_velocity[2],
         };
         finite_pva(result, t)
     }

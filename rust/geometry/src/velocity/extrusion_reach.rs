@@ -205,13 +205,16 @@ impl SeamSide {
 /// ([`reaching_accel`]): whatever acceleration and seam caps the planner
 /// derives, its plan of the move stays at or under it. The seams that
 /// bound it either side hold the leaders under `entry` and `exit`,
-/// `run_mm` apart along the path, the move among the moves between.
+/// `run_mm` apart along the path, the move among the moves between,
+/// `behind_mm` after the entry seam and `ahead_mm` before the exit seam.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReachableSpeed {
     pub peak_mm_s: f64,
     pub entry: SeamLimit,
     pub exit: SeamLimit,
     pub run_mm: f64,
+    pub behind_mm: f64,
+    pub ahead_mm: f64,
 }
 
 impl ReachableSpeed {
@@ -225,17 +228,23 @@ impl ReachableSpeed {
             entry: behind.limit,
             exit: ahead.limit,
             run_mm: behind.run_mm + ahead.run_mm + length,
+            behind_mm: behind.run_mm,
+            ahead_mm: ahead.run_mm,
         }
     }
 
-    /// The fastest the run peaks at with every move on it planned at a
-    /// budget `accel`.
-    pub fn run_peak(&self, accel: f64) -> f64 {
+    /// The fastest the move peaks at with every move on its run planned at
+    /// a budget `accel`.
+    pub fn peak_under(&self, accel: f64) -> f64 {
+        let climb = |limit: SeamLimit, run_mm: f64| {
+            let speed = limit.at(accel);
+            (speed * speed + 2.0 * accel * run_mm).sqrt()
+        };
         peak_between(
-            self.entry.at(accel),
-            self.exit.at(accel),
+            climb(self.entry, self.behind_mm),
+            climb(self.exit, self.ahead_mm),
             accel,
-            self.run_mm,
+            self.run_mm - self.behind_mm - self.ahead_mm,
         )
     }
 }
