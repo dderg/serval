@@ -867,7 +867,10 @@ impl TurningGuard {
         let odometer = Odometer::new(self.h(), self.valleys.fit);
         let track = &self.valleys.track;
         let last_cell = track.end() - 1;
-        let last = (last_cell, odometer.through(last_cell, track.floor_through_end()));
+        let last = (
+            last_cell,
+            odometer.through(last_cell, track.floor_through_end()),
+        );
         let ramp_cap = self.valleys.ramp_cap_mm;
         let mut index = 0;
         while index < self.valleys.travels.len() {

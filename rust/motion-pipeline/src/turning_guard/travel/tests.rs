@@ -39,7 +39,9 @@ fn extruding_on(cells: impl IntoIterator<Item = i64>) -> ExtrudingCells {
 /// How many cells of the cruise the fitted leaders take at least to cover
 /// `path_mm`.
 fn cells_over(path_mm: f64) -> i64 {
-    (1..).find(|&cells| reading(cells) - reading(0) > path_mm).unwrap()
+    (1..)
+        .find(|&cells| reading(cells) - reading(0) > path_mm)
+        .unwrap()
 }
 
 fn travel() -> TravelCrawl {
@@ -122,7 +124,12 @@ fn a_rescan_forgets_the_extruding_cells_it_reads_again() {
     extruding.truncate_from(first, reading(first - 1));
 
     assert!(matches!(
-        travel().ahead(&extruding, (first - 1, reading(first - 1)), RAMP_CAP_MM, false),
+        travel().ahead(
+            &extruding,
+            (first - 1, reading(first - 1)),
+            RAMP_CAP_MM,
+            false
+        ),
         Ahead::Waits
     ));
 }

@@ -15,7 +15,10 @@ fn unshaped_bench_printer(name: &str) -> PathBuf {
     let mut text =
         std::fs::read_to_string(corpus::repo().join(BENCH_PRINTER)).expect("read config");
     for shaper in BENCH_SHAPERS {
-        assert!(text.contains(shaper), "{BENCH_PRINTER} no longer has {shaper:?}");
+        assert!(
+            text.contains(shaper),
+            "{BENCH_PRINTER} no longer has {shaper:?}"
+        );
         text = text.replacen(shaper, "", 1);
     }
     printer_from(name, &text)
@@ -89,7 +92,9 @@ fn an_unshaped_sweep_zigzag_plans() {
 #[test]
 fn an_unshaped_extruding_zigzag_fits_the_extruder() {
     let config = unshaped_bench_printer("unshaped_extruding_zigzag");
-    let gcode = zigzag("", TRIAGE_PITCH_MM, TRIAGE_MOVES, |_| Some(ZIGZAG_E_PER_MOVE));
+    let gcode = zigzag("", TRIAGE_PITCH_MM, TRIAGE_MOVES, |_| {
+        Some(ZIGZAG_E_PER_MOVE)
+    });
     plans_within_the_extruder_limits("unshaped_extruding_zigzag", &gcode, &config);
 }
 
@@ -106,9 +111,8 @@ fn an_unshaped_travel_zigzag_past_an_extrusion_fits_the_extruder() {
     let config = unshaped_bench_printer("unshaped_zigzag_past_extrusion");
     let line_end = ZIGZAG_START_X - TRAVEL_PAST_REACH_MM;
     let line_start = line_end - LINE_MM;
-    let lead_in = format!(
-        "G1 X{line_start} Y{ZIGZAG_Y} F6000\nG1 X{line_end} Y{ZIGZAG_Y} E{LINE_E}\n"
-    );
+    let lead_in =
+        format!("G1 X{line_start} Y{ZIGZAG_Y} F6000\nG1 X{line_end} Y{ZIGZAG_Y} E{LINE_E}\n");
     let gcode = zigzag(&lead_in, TRIAGE_PITCH_MM, TRIAGE_MOVES, |_| None);
     plans_within_the_extruder_limits("unshaped_zigzag_past_extrusion", &gcode, &config);
 }
