@@ -206,7 +206,7 @@ fn set_velocity_limit(
     let velocity = args.float("VELOCITY", Bound::Above(0.0))?;
     let accel = args.float("ACCEL", Bound::Above(0.0))?;
     let square_corner_velocity = args.float("SQUARE_CORNER_VELOCITY", Bound::AtLeast(0.0))?;
-    let corner_deviation = args.float("CORNER_DEVIATION", Bound::AtLeast(0.0))?;
+    let corner_deviation = args.float("CORNER_DEVIATION", Bound::Above(0.0))?;
     if square_corner_velocity.is_some() && corner_deviation.is_some() {
         return Err(WaypointError::CornerBudgetAliases { line: args.line });
     }

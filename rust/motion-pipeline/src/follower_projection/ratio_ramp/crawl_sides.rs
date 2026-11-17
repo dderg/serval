@@ -386,14 +386,12 @@ pub(super) struct StepWindows {
 }
 
 /// A ratio step a crawl valley holds the weight at zero around: which
-/// table it steps, where, by how much, and the seams of the sloped run of
-/// spans either side of it, its own among them, whose windows the valley
-/// caps with it.
+/// table it steps, where, and the seams of the sloped run of spans either
+/// side of it, its own among them, whose windows the valley caps with it.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct OwnedStep {
     pub(super) table: Table,
     pub(super) s: f64,
-    step: f64,
     pub(super) run: Vec<f64>,
 }
 
@@ -416,7 +414,6 @@ impl OwnedStep {
         Self {
             table,
             s: seam.s,
-            step: seam.step.abs(),
             run,
         }
     }
@@ -543,10 +540,12 @@ impl StepWindows {
     /// Fails loudly where the flow over the zero stretch asks more than the
     /// follower's limit: `r·A` at the largest ratio the smoothed laid
     /// table, laid as `laid`, reads there ([`RatioSmoothing::peak_ratio_in`]),
-    /// and `¾·|Δ|·ṡ²/window` for each owned step of the laid table, `ṡ²`
-    /// read as far from the crawl as its run's windows reach. The table's
-    /// own slopes, which a window of any width averages to no steeper, are
-    /// the planner's to hold.
+    /// and `¾·|Δ|·ṡ²/window` for each ratio step `Δ` of an owned run of the
+    /// laid table, `ṡ²` read as far from the crawl as the step's own capped
+    /// window reaches: a step ramps over its window alone, and the run's
+    /// other seams only change the slope. The table's own slopes, which a
+    /// window of any width averages to no steeper, are the planner's to
+    /// hold.
     pub(super) fn assert_flow_fits(
         &self,
         smoothing: &RatioSmoothing,
@@ -558,15 +557,12 @@ impl StepWindows {
         }
         let zero = self.zero_stretch();
         let path_accel = self.path_accel(&smoothing.trail);
-        let reaching = |(first, last): (f64, f64)| {
-            let farthest = (first - self.turn).abs().max((last - self.turn).abs());
-            self.speed_squared_within(path_accel, farthest + self.window)
-        };
         let ramps: f64 = self
-            .owned
-            .iter()
-            .filter(|owned| owned.table == Table::Laid)
-            .map(|owned| 0.75 * owned.step * reaching(owned.extent()) / self.window)
+            .laid_steps(laid)
+            .map(|(s, step)| {
+                let reaching = (s - self.turn).abs() + self.window;
+                0.75 * step * self.speed_squared_within(path_accel, reaching) / self.window
+            })
             .sum();
         let flow = smoothing.peak_ratio_in(Table::Laid, laid, zero.0, zero.1) * path_accel + ramps;
         assert!(
@@ -581,5 +577,33 @@ impl StepWindows {
             zero.1,
             rule.max_accel_mm_s2
         );
+    }
+
+    /// Each seam of the owned runs of the laid table, laid as `laid`, that
+    /// steps its ratio, once, with the step's size.
+    fn laid_steps<'a>(&'a self, laid: &'a [RatioSpan]) -> impl Iterator<Item = (f64, f64)> + 'a {
+        let laid_runs = self
+            .owned
+            .iter()
+            .enumerate()
+            .filter(|(_, owned)| owned.table == Table::Laid);
+        laid_runs
+            .flat_map(move |(index, owned)| {
+                owned.run.iter().copied().filter(move |&s| {
+                    !self.owned[..index]
+                        .iter()
+                        .any(|earlier| earlier.table == Table::Laid && earlier.run.contains(&s))
+                })
+            })
+            .filter_map(move |s| {
+                let at = laid.partition_point(|span| span.s0 < s);
+                assert!(
+                    at > 0 && laid.get(at).is_some_and(|span| span.s0 == s),
+                    "follower projection: a crawl valley owns a seam at s={s} the laid table no \
+                     longer has"
+                );
+                let step = Seam::between(&laid[at - 1], &laid[at]).map_or(0.0, |seam| seam.step);
+                (step != 0.0).then_some((s, step.abs()))
+            })
     }
 }
