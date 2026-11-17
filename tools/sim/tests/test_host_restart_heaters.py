@@ -39,8 +39,10 @@ def _chamber(world):
 
 def test_host_restart_switches_a_low_duty_heater_off(sim_world):
     world = sim_world(
-        lambda w: configs.minimal_config(w.h7_pty, str(w.gcode_dir))
-        + PROPORTIONAL_HEATER,
+        lambda w: (
+            configs.minimal_config(w.h7_pty, str(w.gcode_dir))
+            + PROPORTIONAL_HEATER
+        ),
         dual_mcu=False,
     )
     control = world.sim_control("h7")
@@ -59,8 +61,9 @@ def test_host_restart_switches_a_low_duty_heater_off(sim_world):
         f"SET_HEATER_TEMPERATURE HEATER=chamber TARGET={low_duty_target_c:.3f}"
     )
     world.wait_until(
-        lambda: control.gpio_edges(HEATER_CHIP, HEATER_LINE)
-        >= pulses_before + 2,
+        lambda: (
+            control.gpio_edges(HEATER_CHIP, HEATER_LINE) >= pulses_before + 2
+        ),
         timeout=SETTLE_S,
         what="the heater pulsing under 5 % duty",
     )
