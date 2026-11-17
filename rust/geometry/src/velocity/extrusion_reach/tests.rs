@@ -231,9 +231,13 @@ fn a_streamed_move_settles_once_the_moves_after_it_cover_its_reach() {
         "the last move ahead in its reach waits for the move after it to bound its speed"
     );
     reach.push(moves[4].clone());
-    assert_ratios(&settled(&mut reach), &[RATIO]);
+    assert!(
+        reach.pop().is_none(),
+        "the extrusion steps its ratio into the travel after it, whose budget the join reads \
+         too: it waits for the moves after the travel to cover the travel's reach"
+    );
     reach.close();
-    assert_ratios(&settled(&mut reach), &[RATIO, RATIO, 0.0, 0.0]);
+    assert_ratios(&settled(&mut reach), &[RATIO, RATIO, RATIO, 0.0, 0.0]);
 }
 
 #[test]
