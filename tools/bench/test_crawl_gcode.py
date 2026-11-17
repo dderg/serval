@@ -108,7 +108,8 @@ def test_the_slow_speeds_span_the_crawl_speed():
     assert SPECS["crawl_s5"].crawl_speed_mm_s == 2.5
 
 
-@pytest.mark.parametrize("name", ["crawl_s5", "crawl_s20"])
+@pytest.mark.parametrize("name", ["crawl_s5", "crawl_s20", "mid_crawl_s5_300s"])
 def test_the_sim_repros_print_the_bench_crawl_files(name):
+    spec = next(s for s in (*CRAWL_PRINTS, *MID_PRINTS) if s.name == name)
     fixture = crawl_gcode.BENCH.parents[1] / "tools/sim/gcode" / f"{name}.gcode"
-    assert fixture.read_text() == crawl_gcode.render(SPECS[name])
+    assert fixture.read_text() == spec.text()
