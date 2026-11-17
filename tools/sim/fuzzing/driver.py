@@ -285,7 +285,7 @@ class Session:
                 Check.REST_STEPS,
                 f"{recheck.label}: motors moved within {PROBE_RECHECK_S} s "
                 f"of the pin, inside the G4 P{program.PROBE_HOLD_MS} after "
-                f"it: {moved}; now {self._step_timing()}",
+                f"it\nsteps moved: {moved}; now {self._step_timing()}",
             )
 
     def _settle_recheck(self) -> None:
