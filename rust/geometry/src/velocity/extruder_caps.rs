@@ -1,4 +1,4 @@
-use super::extrusion_reach::ExtrusionBudget;
+use super::extrusion_reach::{ExtrusionBudget, REACHABLE_SLACK};
 use crate::frontend::ExtruderCaps;
 use std::sync::Arc;
 
@@ -293,7 +293,10 @@ impl StepJoin {
     ) -> Option<Self> {
         let caps = ExtruderCaps::stricter(up_caps, dn_caps)?;
         let ratios = [ends[0].0, ends[0].1, ends[1].0, ends[1].1];
-        let moved = ratios.windows(2).map(|pair| (pair[1] - pair[0]).abs()).sum();
+        let moved = ratios
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .sum();
         (moved != 0.0).then_some(Self {
             caps,
             ratios,
@@ -432,6 +435,14 @@ pub(super) fn ratio_step_ceiling(
 /// moves either side does. Both take it, so the larger of their budgets
 /// always crosses the join from a stop within the limits, and a stop there,
 /// the fitter's at a step it does not blend included, keeps them.
+///
+/// The crossing's demand rounds differently at accelerations an ulp apart,
+/// and the velocity cap's trade (`LinearRate::capped`, `rate_cap.rs`)
+/// may plan a move an ulp under its budget: a budget at the bisected edge
+/// of the fitting crossings would leave the plan where the check at the
+/// join flips. Both the limit kept and the budget returned therefore hold
+/// [`REACHABLE_SLACK`] of the acceleration clear of that edge, the budget
+/// one checked to fit.
 pub(super) fn rest_crossing_accel(
     join: &StepJoin,
     (fastest, axes): (f64, [bool; SPATIAL_AXES]),
@@ -448,7 +459,7 @@ pub(super) fn rest_crossing_accel(
         let flow = StepFlow::new(caps, join.ratios, fastest, accel);
         rule.crossing_fits(&join.crossing(&flow, (rest_room_mm, jerk_gain * accel), 0.0))
     };
-    if fits(accel) {
+    if fits(accel * (1.0 + REACHABLE_SLACK)) {
         return f64::INFINITY;
     }
     let (mut fitting, mut exceeding) = (0.0, accel);
@@ -460,7 +471,12 @@ pub(super) fn rest_crossing_accel(
             exceeding = mid;
         }
     }
-    fitting
+    let below_trade_rounding = fitting * (1.0 - REACHABLE_SLACK);
+    assert!(
+        fits(below_trade_rounding),
+        "the crossing from a stop fits at {fitting} mm/s² but not {REACHABLE_SLACK} under it"
+    );
+    below_trade_rounding
 }
 
 /// What the leaders' kernels make of a planned speed `v₀` at a ratio step

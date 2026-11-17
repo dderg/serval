@@ -13,8 +13,10 @@ use crate::ratio_ramp::{RATIO_RAMP_MAX_TIME_S, rest_room_reach_mm};
 
 /// The relative margin a move's reachable speed keeps over the envelope it
 /// is read off, so a plan that reaches the envelope to the last rounding
-/// never rides the ceiling it becomes.
-const REACHABLE_SLACK: f64 = 1e-9;
+/// never rides the ceiling it becomes; and a stop-crossing budget keeps
+/// under the bisected edge of the crossings that fit
+/// ([`super::extruder_caps::rest_crossing_accel`]).
+pub(super) const REACHABLE_SLACK: f64 = 1e-9;
 
 /// The largest extrusion ratio `m` lays along the path on `axis`: 0 for
 /// travel, retraction (a negative ratio) and an extrude-only move, whose
@@ -957,9 +959,11 @@ impl Marks {
         if up.rest || down.rest {
             return Some(f64::INFINITY);
         }
-        let Some(join) = StepJoin::new((up.extruder, down.extruder), [up.ratio_ends, down.ratio_ends])
-            .filter(StepJoin::binds_stop_crossings)
-        else {
+        let Some(join) = StepJoin::new(
+            (up.extruder, down.extruder),
+            [up.ratio_ends, down.ratio_ends],
+        )
+        .filter(StepJoin::binds_stop_crossings) else {
             return Some(f64::INFINITY);
         };
         let dn_side = self.join_side(dn, closed)?;
@@ -1203,7 +1207,7 @@ pub struct ExtrusionBudget {
     pub rest_room_mm: f64,
     pub fastest_reachable_mm_s: f64,
     pub strongest_accel_mm_s2: f64,
-    pub step_accel_mm_s2: f64,
+    pub(crate) step_accel_mm_s2: f64,
     pub reachable: ReachableSpeed,
 }
 

@@ -380,12 +380,8 @@ fn the_planner_caps_the_climbing_travel_after_an_extrusion_on_an_unshaped_leader
     let demand_cap = 2000.0 / (RATIO * (1.0 + 0.5 * X_GAIN) + ramp);
     let z_share = 5.0 / 2525.0_f64.sqrt();
     assert!(velocity_step(&extruder, RATIO, demand_cap, z_share) <= 1.0);
-    let budgets = crate::velocity::extrusion_budgets(
-        &fitted.moves,
-        0.0,
-        f64::INFINITY,
-        f64::INFINITY,
-    );
+    let budgets =
+        crate::velocity::extrusion_budgets(&fitted.moves, 0.0, f64::INFINITY, f64::INFINITY);
     let stop_cap = fitted
         .moves
         .iter()
