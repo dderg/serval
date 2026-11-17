@@ -947,12 +947,14 @@ pub fn geometry::velocity::law::RailPair::acceleration_at(&self, f64) -> f64
 pub fn geometry::velocity::law::RailPair::acceleration_bound(&self) -> f64
 pub fn geometry::velocity::law::RailPair::acceleration_variation(&self, f64, f64) -> f64
 pub struct geometry::velocity::ReachableSpeed
+pub geometry::velocity::ReachableSpeed::ahead_mm: f64
+pub geometry::velocity::ReachableSpeed::behind_mm: f64
 pub geometry::velocity::ReachableSpeed::entry: geometry::SeamLimit
 pub geometry::velocity::ReachableSpeed::exit: geometry::SeamLimit
 pub geometry::velocity::ReachableSpeed::peak_mm_s: f64
 pub geometry::velocity::ReachableSpeed::run_mm: f64
 impl geometry::ReachableSpeed
-pub fn geometry::ReachableSpeed::run_peak(&self, f64) -> f64
+pub fn geometry::ReachableSpeed::peak_under(&self, f64) -> f64
 pub struct geometry::velocity::SeamLimit
 pub geometry::velocity::SeamLimit::ceiling_mm_s: f64
 pub geometry::velocity::SeamLimit::kappa: f64
@@ -1404,12 +1406,14 @@ pub geometry::RatioStep::peak_ratio: f64
 pub geometry::RatioStep::ratio_step: f64
 pub geometry::RatioStep::speed_mm_s: f64
 pub struct geometry::ReachableSpeed
+pub geometry::ReachableSpeed::ahead_mm: f64
+pub geometry::ReachableSpeed::behind_mm: f64
 pub geometry::ReachableSpeed::entry: geometry::SeamLimit
 pub geometry::ReachableSpeed::exit: geometry::SeamLimit
 pub geometry::ReachableSpeed::peak_mm_s: f64
 pub geometry::ReachableSpeed::run_mm: f64
 impl geometry::ReachableSpeed
-pub fn geometry::ReachableSpeed::run_peak(&self, f64) -> f64
+pub fn geometry::ReachableSpeed::peak_under(&self, f64) -> f64
 pub struct geometry::RebuildsWithin
 impl geometry::RebuildsWithin
 pub fn geometry::RebuildsWithin::at(&self, (f64, f64), f64, f64) -> f64
