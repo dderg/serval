@@ -2551,3 +2551,105 @@ fn assert_record_follows_the_brakes(
     }
     assert!(segments > 0, "the record holds the dispatched segments");
 }
+
+const SILENT_PRODUCER_BRAKE_DEADLINE: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ProducerSilence {
+    /// The producer declared the wait it stops feeding for (M109).
+    Declared,
+    /// The producer just stopped feeding.
+    Undeclared,
+}
+
+/// Streams strokes at twice realtime, then falls silent until the pacer
+/// brakes the stream to rest on its empty inbox, and returns the causes of
+/// the drains the dispatch record holds.
+fn drain_causes_after_falling_silent(silence: ProducerSilence) -> Vec<u8> {
+    let timeline = ExecutionTimeline {
+        frontier: Arc::default(),
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(real_router())),
+    };
+    let dir = crate::dispatch_record::tests::scratch_dir(&format!("silent-{silence:?}"));
+    let record = DispatchRecorder::open(&dir).unwrap();
+    let sink = PacedSink {
+        inner: AnchoredSink::on(&timeline).recording(&record),
+        realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(2.0_f64.to_bits())),
+    };
+    let mut h = spawn_recorded(
+        cfg_cap(1024),
+        AxisChainSet::default(),
+        vec![0.0; 4],
+        sink.clone(),
+        timeline,
+        Some(Arc::clone(&record)),
+        Production::AsShaped,
+    );
+    let phase = StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500));
+    let mut at = [0.0_f64, 0.0, 0.0];
+    let started = Instant::now();
+    for line_no in 1.. {
+        if started.elapsed() >= phase.streaming {
+            break;
+        }
+        let (m, end) = phase.next_move(line_no, at);
+        while let Err(e) = h.submit_move(m.clone()) {
+            assert!(matches!(e, StreamWorkerError::ChannelFull), "{e}");
+            std::thread::yield_now();
+        }
+        at = end;
+    }
+    let idle_brakes = || h.links.pacer_drains.idle.load(Ordering::SeqCst);
+    let brakes_while_feeding = idle_brakes();
+    if silence == ProducerSilence::Declared {
+        while let Err(e) = h.declare_wait() {
+            assert!(matches!(e, StreamWorkerError::ChannelFull), "{e}");
+            std::thread::yield_now();
+        }
+    }
+    let silent = Instant::now();
+    while idle_brakes() == brakes_while_feeding {
+        assert!(
+            silent.elapsed() < SILENT_PRODUCER_BRAKE_DEADLINE,
+            "the pacer never braked a stream whose producer fell silent"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.flush().unwrap();
+    h.shutdown();
+    drop(h);
+    drop(sink);
+    drop(Arc::into_inner(record).expect("every holder of the record closed"));
+    let records =
+        crate::dispatch_record::tests::decode(&crate::dispatch_record::tests::only_record(&dir));
+    std::fs::remove_dir_all(&dir).unwrap();
+    records
+        .iter()
+        .filter_map(|record| match record {
+            crate::dispatch_record::tests::Decoded::Drain { cause, .. } => Some(*cause),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_brake_behind_a_declared_wait_is_recorded_as_that_wait() {
+    let causes = drain_causes_after_falling_silent(ProducerSilence::Declared);
+    assert!(
+        causes.contains(&(DrainCause::DeclaredWait as u8))
+            && !causes.contains(&(DrainCause::PacerBrake as u8)),
+        "the producer declared its wait before falling silent, yet the brake is \
+         recorded as a producer that fell behind: drain causes {causes:?}"
+    );
+}
+
+#[test]
+fn a_brake_of_a_silent_undeclared_producer_is_a_pacer_brake() {
+    let causes = drain_causes_after_falling_silent(ProducerSilence::Undeclared);
+    assert!(
+        causes.contains(&(DrainCause::PacerBrake as u8))
+            && !causes.contains(&(DrainCause::DeclaredWait as u8)),
+        "drain causes {causes:?}"
+    );
+}
