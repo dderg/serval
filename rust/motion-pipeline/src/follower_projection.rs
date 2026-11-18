@@ -3585,12 +3585,26 @@ impl<'a> FollowerSignal<'a> {
     /// Whether an advance step inside the segment is no more than the
     /// leaders' own pieces explain where they meet with a speed residual,
     /// which the ratio scales: rounding a weld at the next join absorbs.
+    /// The probes either side of the step read the odometer up to an ulp
+    /// apart (a ratio crossing holds each to its own side), and the read
+    /// moves along its path slope over that distance as it does at a join
+    /// ([`SeamInput::misalignment`]).
     fn leader_residual_explains(&self, step: &AdvanceStep, (t_start, t_end): (f64, f64)) -> bool {
-        let residual = (self.shaped_speed(trajectory::next_toward(step.t, t_end))
-            - self.shaped_speed(trajectory::next_toward(step.t, t_start)))
-        .abs();
+        let (before, after) = (
+            trajectory::next_toward(step.t, t_start),
+            trajectory::next_toward(step.t, t_end),
+        );
+        let (rate_before, rate_after) = (self.shaped_speed(before), self.shaped_speed(after));
+        let (s_before, s_after) = (self.s_owned(before), self.s_owned(after));
+        let misalignment = (s_after - s_before).abs()
+            * self
+                .ramped_read_slope(s_before)
+                .abs()
+                .max(self.ramped_read_slope(s_after).abs())
+            * rate_before.abs().max(rate_after.abs());
         (step.velocity_after - step.velocity_before).abs()
-            <= self.ratio_bounds.ratio * residual
+            <= self.ratio_bounds.ratio * (rate_after - rate_before).abs()
+                + misalignment
                 + ADVANCE_STEP_VELOCITY_ROUNDING
                     * step
                         .velocity_before

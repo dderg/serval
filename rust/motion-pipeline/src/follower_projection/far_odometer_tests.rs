@@ -16,9 +16,9 @@ use crate::worker_pool::WorkerPool;
 const E_AXIS: usize = 3;
 const FIT_TOL: FitTol = FitTol::absolute(1e-4, 50.0);
 const ADVANCE_K: f64 = 0.02;
-const TRAVEL_MM_S: f64 = 1000.0;
+const TRAVEL_MM_S: f64 = 100_000.0;
 /// Past 2^20 mm the odometer's ulp is 2.3e-10 mm.
-const TRAVEL_S: f64 = 1050.0;
+const TRAVEL_S: f64 = 10.5;
 const CRAWL_MM_S: f64 = 1.0;
 const STEP_RATIO: f64 = 0.1;
 
@@ -80,7 +80,7 @@ fn leg(moved: &[f64], span: (f64, f64), ratio: f64, (y0, e0): (f64, f64)) -> Con
     }
 }
 
-/// A travel of about 1.05e6 mm, a brake into a crawl, and a ratio step
+/// A travel of about 1.2e6 mm, a brake into a crawl, and a ratio step
 /// from travel to extrusion at the crawl, then a stop.
 fn step_after_a_long_travel() -> Vec<ContinuousSegment> {
     let (rise_time, brake_time, crawl_time, stop_time) = (1.0, 2.0, 0.05, 0.15);
