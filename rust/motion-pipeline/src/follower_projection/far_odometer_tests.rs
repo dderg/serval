@@ -177,14 +177,14 @@ fn a_ratio_step_a_kilometre_into_the_print_reads_no_advance_step() {
 #[test]
 fn the_benchy_seed_probes_explain_their_read_change() {
     let before = super::ReadProbe {
-        s: 16_384.195_945_522_118_563_53,
+        s: 16_384.195_945_522_12,
         read_slope: 0.766_702_981_280_104_7 * 0.252_672_397_177_862_94
             + 0.038_814_097_549_786_424 * 579_971.277_588_857_2,
         leader_speed: 1.839_700_841_300_515e-2,
         ratio: 0.038_814_097_549_786_424,
     };
     let after = super::ReadProbe {
-        s: 16_384.195_945_522_122_201_51,
+        s: 16_384.195_945_522_122,
         read_slope: 0.038_814_097_550_570_574 * 579_970.185_970_952_6,
         leader_speed: 1.839_700_851_062_980_2e-2,
         ratio: 0.038_814_097_550_570_574,
