@@ -964,11 +964,16 @@ impl Reserve {
     /// The most the rebuild asks in cell `n`, one of the side's, where
     /// `binds` holds for a bound on it; `None` where a bound it does not
     /// hold for shows the rebuild cannot bind. `binds` holds for every
-    /// bound past one it holds for.
+    /// bound past one it holds for. `shaped` holds the shaped speed and
+    /// acceleration ceilings of the cell checked, inside `n`: the fitted
+    /// leaders there stay within them and the fit's misses, where the
+    /// track bounds them only by the box over its whole move, whose peak
+    /// speed no back-off lowers.
     pub fn rebuild_where(
         &self,
         n: i64,
         track: &TrackView,
+        shaped: (f64, f64),
         binds: impl Fn(f64) -> bool,
     ) -> Option<f64> {
         assert!(
@@ -988,7 +993,16 @@ impl Reserve {
         if !binds(leaders.screened((block, block_end), first, track)) {
             return None;
         }
-        let within = leaders.within_at(n, first, track);
+        if !binds(leaders.within_at(n, first, track)) {
+            return None;
+        }
+        let tracked = leaders.at(n, first, track);
+        let within = JoinedLeaders {
+            speed: tracked.speed.min(shaped.0 + leaders.fit.speed),
+            accel: tracked.accel.min(shaped.1 + leaders.fit.accel),
+            ..tracked
+        }
+        .rebuild(&leaders.within);
         binds(within).then(|| {
             within.min(
                 *leaders
@@ -1183,16 +1197,22 @@ impl Crawl {
     /// the leaders' least path in the [`VALLEY_LEAD_BUDGET_S`] after the
     /// run covers once those cells are tracked; where they cover too
     /// little, the first grid width past the leaders' reach once the path
-    /// after the run covers it. Where the segment ends first (`all` its
-    /// cells tracked) no room is left ([`Reserve::none`]): past its end the
-    /// leaders rest, and the projection, reading no motion there, widens
-    /// the side until it fits. `false` while it waits.
+    /// after the run covers it. Never narrower than `laid`, the width the
+    /// side was laid at before a re-plan past the run: backing those moves
+    /// off slows the leaders over the budget, and a narrower side would
+    /// rebuild steeper on the cells already proven against the wider one,
+    /// which may lie behind the frozen seam where no back-off reaches; it
+    /// waits until the path after the run covers it. Where the segment ends
+    /// first (`all` its cells tracked) no room is left ([`Reserve::none`]):
+    /// past its end the leaders rest, and the projection, reading no motion
+    /// there, widens the side until it fits. `false` while it waits.
     pub fn resolve_after(
         &mut self,
         track: &TrackView,
         all: bool,
         (h, fit): (f64, FitMiss),
         shadow: &dyn Fn(i64) -> CellBounds,
+        laid: Option<f64>,
     ) -> bool {
         let slot = self.slot;
         let (first, last) = slot.cells;
@@ -1215,6 +1235,14 @@ impl Crawl {
                 None => return false,
             },
         };
+        let width = laid.map_or(width, |laid| width.max(laid));
+        if width > covered.most {
+            if !all {
+                return false;
+            }
+            self.after = Some(Reserve::none(slot.cells));
+            return true;
+        }
         let mut side_to = last;
         while side_to < to && slot.distance(track, side_to + 1, h, fit).0 < width {
             side_to += 1;

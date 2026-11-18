@@ -67,5 +67,10 @@ fn the_guard_plans_a_crawl_at_a_printing_ratio_at_the_floor() {
 #[test]
 #[should_panic(expected = "turning guard: the cell at")]
 fn the_guard_stops_a_crawl_at_the_largest_ratio_under_the_floor() {
-    crawl(largest_ratio(), 0.85 * floor(), false);
+    crawl(largest_ratio(), 0.7 * floor(), false);
+}
+
+#[test]
+fn the_guard_plans_a_crawl_at_the_largest_ratio_at_the_floor() {
+    crawl(largest_ratio(), floor(), false);
 }

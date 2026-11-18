@@ -3,6 +3,8 @@ use geometry::{CrawlSide, VALLEY_LEAD_BUDGET_S, widest_crawl_side_within};
 use super::{CellBounds, CellTrack, Crawl, FitMiss, Reserve, RunScan, Slot, TrackView};
 
 const H: f64 = 2.5e-4;
+/// Shaped ceilings that leave a side's cells to the track's box alone.
+const BOXED_ONLY: (f64, f64) = (f64::INFINITY, f64::INFINITY);
 
 fn cell(speed: f64, accel: f64) -> CellBounds {
     CellBounds {
@@ -81,7 +83,7 @@ fn a_crawl_leaves_room_for_the_widest_grid_side_the_lead_budget_covers_before_it
             .rebuild(widest);
     let (first, last) = crawl.before.cells;
     let most = (first..=last)
-        .filter_map(|n| crawl.before.rebuild_where(n, &track, |_| true))
+        .filter_map(|n| crawl.before.rebuild_where(n, &track, BOXED_ONLY, |_| true))
         .fold(0.0, f64::max);
     assert!(
         0.0 < most && most <= whole_side,
@@ -129,12 +131,45 @@ fn the_block_screen_leaves_every_cell_s_rebuild_as_its_own_bound_reads_it() {
             let n = side.cells.0 + offset as i64;
             let expected = (rebuild > threshold).then(|| rebuild.min(whole));
             assert_eq!(
-                side.rebuild_where(n, &track, |bound| bound > threshold),
+                side.rebuild_where(n, &track, BOXED_ONLY, |bound| bound > threshold),
                 expected,
                 "cell {n} over the threshold {threshold}"
             );
         }
     }
+}
+
+/// A checked cell whose shaped motion runs slower than its move's box asks
+/// the rebuild of its own leaders.
+#[test]
+fn a_side_cell_asks_the_rebuild_of_its_own_shaped_motion() {
+    let fit = FitMiss::of(0.005, 50.0);
+    let crawl_cells = (800, 810);
+    let track = track_with_crawl(10.0, crawl_cells, 1200, fit);
+    let track = view(&track, fit);
+    let slot = slot_over(&track, crawl_cells, fit).expect("the run crawls");
+    let crawl = Crawl::found(slot, 1, &track, -1, (H, fit), &|n| track.get(n))
+        .expect("the side fits the budget");
+    let side = &crawl.before;
+    let leaders = side.leaders.as_ref().expect("the side leaves room");
+    let n = crawl_cells.0 - 1;
+    let shaped = (2.0, 60.0);
+    let boxed = side
+        .rebuild_where(n, &track, BOXED_ONLY, |_| true)
+        .expect("a bound");
+    let own = side
+        .rebuild_where(n, &track, shaped, |_| true)
+        .expect("a bound");
+    let tracked = leaders.at(n, side.cells.0, &track);
+    let expected = super::JoinedLeaders {
+        speed: tracked.speed.min(shaped.0 + fit.speed),
+        accel: tracked.accel.min(shaped.1 + fit.accel),
+        ..tracked
+    }
+    .rebuild(&leaders.within)
+    .min(leaders.side.rebuild(side.width));
+    assert!(own < boxed, "{own} against the box's {boxed}");
+    assert_eq!(own, expected);
 }
 
 #[test]
@@ -148,15 +183,51 @@ fn a_crawl_s_after_side_waits_for_the_lead_budget_past_its_run() {
     let mut crawl = Crawl::found(slot, 1, &short, -1, (H, fit), &|n| short.get(n))
         .expect("the side fits the budget");
     assert!(
-        !crawl.resolve_after(&short, false, (H, fit), &|n| short.get(n)),
+        !crawl.resolve_after(&short, false, (H, fit), &|n| short.get(n), None),
         "the after side settled before its budget's cells were tracked"
     );
     let long = track_with_crawl(10.0, crawl_cells, crawl_cells.1 + budget_cells + 1, fit);
     let long = view(&long, fit);
-    assert!(crawl.resolve_after(&long, false, (H, fit), &|n| long.get(n)));
+    assert!(crawl.resolve_after(&long, false, (H, fit), &|n| long.get(n), None));
     let after = crawl.after.clone().expect("the after side settled");
     assert!(after.cells.0 == crawl_cells.0 && after.cells.1 > crawl_cells.1);
     assert_eq!(crawl.reach(), (crawl.before.cells.0, after.cells.1));
+}
+
+/// The width a crawl's after side resolves at, the leaders past the run at
+/// `cruise` mm/s, read through `end`, never narrower than `laid`.
+fn after_width(cruise: f64, end: i64, laid: Option<f64>) -> Option<f64> {
+    let fit = FitMiss::of(0.005, 50.0);
+    let crawl_cells = (800, 810);
+    let track = track_with_crawl(cruise, crawl_cells, end, fit);
+    let track = view(&track, fit);
+    let slot = slot_over(&track, crawl_cells, fit).expect("the run crawls");
+    let mut crawl = Crawl::found(slot, 1, &track, -1, (H, fit), &|n| track.get(n))
+        .expect("the side fits the budget");
+    crawl
+        .resolve_after(&track, false, (H, fit), &|n| track.get(n), laid)
+        .then(|| crawl.after.expect("the after side settled").width)
+}
+
+/// A back-off past a crawl slows the leaders over its after side's budget:
+/// the side stays as wide as it was laid, waiting for the path to cover it,
+/// instead of narrowing and rebuilding steeper on cells proven against it.
+#[test]
+fn a_back_off_past_a_crawl_never_narrows_its_after_side() {
+    let budget_cells = (VALLEY_LEAD_BUDGET_S / H).floor() as i64;
+    let end = 810 + budget_cells + 1;
+    let laid = after_width(10.0, end, None).expect("the side settles past the budget");
+    let slowed = after_width(5.0, end, None).expect("the side settles past the budget");
+    assert!(
+        slowed < laid,
+        "slower leaders lay {slowed} mm, not under {laid} mm"
+    );
+    assert_eq!(
+        after_width(5.0, end, Some(laid)),
+        None,
+        "the side settled before the path covered its {laid} mm"
+    );
+    assert_eq!(after_width(5.0, 4 * end, Some(laid)), Some(laid));
 }
 
 /// The projection holds the weight at zero back to a rest where no before

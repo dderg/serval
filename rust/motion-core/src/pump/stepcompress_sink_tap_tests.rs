@@ -222,7 +222,7 @@ fn the_tap_replays_a_host_buzz() {
     let mut tap = TapProbe::attach(&mut h);
     let profile = buzz_profile(50_000, 50_000, 100_000, 20, 2);
     h.endpoint
-        .arm_buzz(0b001, 0, &profile, buzz_start(&h))
+        .arm_buzz(0b001, 0, &profile, buzz_start(&h), CYCLES_PER_SECOND)
         .expect("idle pulse lane accepts a buzz");
     for tick in 1..=20 {
         h.now

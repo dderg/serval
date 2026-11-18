@@ -1,5 +1,5 @@
 use std::cell::{Ref, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
@@ -24,7 +24,7 @@ mod variation;
 use screen::{MoveSummary, Read, ShapedBox};
 use shadow::{
     AdvanceDemand, CellMotion, FollowerKernels, GridMemo, GridSample, PlannedGrid, Ride,
-    ShapedSample, shaped_at,
+    ShapedSample, cells_read, shaped_at,
 };
 use travel::{Ahead, ExtrudingCells, Odometer, TravelCrawl};
 use valley::{CellBounds, CellTrack, Crawl, FitMiss, RunScan, TrackView};
@@ -94,6 +94,10 @@ const MEMO_WINDOWS: i64 = 16;
 /// proves every cell such a side may reach with the room its rebuild there
 /// needs added ([`valley::Crawl`]): the projection then finds a side no
 /// wider that fits, and reaches back no further than it holds the path.
+/// An after side keeps the width it was first laid at when a back-off
+/// slows the leaders past its crawl: the narrower side the slower leaders
+/// would cover rebuilds steeper, so the back-off would raise the demand it
+/// answers, on cells it can no longer reach once they are emitted.
 /// A crawl whose side cannot fit within the budget backs the moves around
 /// it off, and fails loudly where no back-off can help ([`ValleyStuck`]).
 /// Rest valleys, where the leaders rest over an extrude-only move or a
@@ -139,14 +143,16 @@ pub(crate) struct TurningGuard {
 /// Where the follower projection may lay advance valleys: the grid cells
 /// scanned for crawls, in order up to `scanned`, the run of crawling cells
 /// still open from `run` as `run_scan` reads it, the crawls found whose
-/// valleys a cell still to check may read, the runs of crawling cells
-/// along which the follower may extrude nothing within the projection's
-/// read range, where it extrudes, and the widest ramp of a ratio step any
-/// move may take: at the printer's `max_velocity`, which every move's
-/// limit stays under (`RuntimeLimits::effective`).
+/// valleys a cell still to check may read, the width each crawl's after
+/// side was first laid at, by the cell its run starts in, the runs of
+/// crawling cells along which the follower may extrude nothing within the
+/// projection's read range, where it extrudes, and the widest ramp of a
+/// ratio step any move may take: at the printer's `max_velocity`, which
+/// every move's limit stays under (`RuntimeLimits::effective`).
 struct Valleys {
     track: CellTrack,
     crawls: Vec<Crawl>,
+    after_widths: BTreeMap<i64, f64>,
     travels: Vec<TravelCrawl>,
     extruding: ExtrudingCells,
     ramp_cap_mm: f64,
@@ -272,11 +278,19 @@ impl Reservation<'_> {
     }
 
     /// What cell `cell` asks with the side's rebuild on top of `weighted`,
-    /// `None` where a bound on the rebuild keeps it within `limit`.
-    fn binding_ask(&self, weighted: f64, cell: i64, limit: f64, track: &TrackView) -> Option<f64> {
+    /// the leaders there within the `shaped` speed and acceleration
+    /// ceilings, `None` where a bound on the rebuild keeps it within
+    /// `limit`.
+    fn binding_ask(
+        &self,
+        (weighted, shaped): (f64, (f64, f64)),
+        cell: i64,
+        limit: f64,
+        track: &TrackView,
+    ) -> Option<f64> {
         let asks = |rebuild: f64| weighted + self.scale * rebuild;
         self.side
-            .rebuild_where(cell, track, |rebuild| asks(rebuild) > limit)
+            .rebuild_where(cell, track, shaped, |rebuild| asks(rebuild) > limit)
             .map(asks)
     }
 }
@@ -288,7 +302,8 @@ impl CellCheck<'_> {
     /// advance reads `Φ·σ⃛` with the weight `Φ` anywhere in `[0, 1]`, and
     /// the room the side's rebuild needs is added; a binding there backs
     /// off the moves the side reads too, whose acceleration the rebuild
-    /// grows with.
+    /// grows with. A side whose rebuild keeps the cell within the limit
+    /// adds none of its moves: scaling them cannot lower the demand.
     fn asks(
         &self,
         kernels: &FollowerKernels,
@@ -298,9 +313,8 @@ impl CellCheck<'_> {
         valley_cell: i64,
     ) -> Option<Check> {
         let h = kernels.h;
-        let (back, ahead) = kernels.sample_span();
         let motion = CellMotion::between(kernels, from, to);
-        let read = ((n - back) as f64 * h, (n + 1 + ahead) as f64 * h);
+        let read = kernels.cells_read((n, n));
         let reach = Read::over(
             self.caps.axis_index,
             self.nearby
@@ -331,10 +345,17 @@ impl CellCheck<'_> {
                     ),
                     0.0,
                 );
-                let binding =
-                    side.binding_ask(weighted, valley_cell, self.caps.max_accel_mm_s2, self.track);
+                let shaped = (motion.speed_ceiling, motion.accel_ceiling);
+                let Some(binding) = side.binding_ask(
+                    (weighted, shaped),
+                    valley_cell,
+                    self.caps.max_accel_mm_s2,
+                    self.track,
+                ) else {
+                    return (asked, window);
+                };
                 (
-                    binding.map_or(asked, |binding| asked.max(binding)),
+                    asked.max(binding),
                     (window.0.min(side.window.0), window.1.max(side.window.1)),
                 )
             },
@@ -409,6 +430,7 @@ impl TurningGuard {
             valleys: Valleys {
                 track: CellTrack::default(),
                 crawls: Vec::new(),
+                after_widths: BTreeMap::new(),
                 travels: Vec::new(),
                 extruding: ExtrudingCells::default(),
                 ramp_cap_mm: 0.5 * config.limits.max_velocity_mm_s * RATIO_RAMP_MAX_TIME_S,
@@ -701,8 +723,7 @@ impl TurningGuard {
                 }
             }
             let anchored = bounds_a_run || n.rem_euclid(window) == 0;
-            let read = ((n - self.span.0) as f64 * h, (n + 1 + ahead) as f64 * h);
-            let ramp = self.extrusion_ramp_over(read);
+            let ramp = self.extrusion_ramp_over(cells_read(self.span, h, (n, n)));
             let odometer = Odometer::new(h, fit);
             let track = &mut self.valleys.track;
             let before = odometer.through(n - 1, track.floor_through_end());
@@ -730,15 +751,25 @@ impl TurningGuard {
         }
         let fit = self.valleys.fit;
         let mut crawls = std::mem::take(&mut self.valleys.crawls);
+        let mut after_widths = std::mem::take(&mut self.valleys.after_widths);
         {
             let bounds = |n: i64| self.tracked_bounds(n);
             let shadow = |n: i64| self.shadow(n);
             let track = TrackView::new(&self.valleys.track, &bounds, (h, fit));
             for crawl in crawls.iter_mut().filter(|crawl| crawl.after.is_none()) {
-                crawl.resolve_after(&track, all, (h, fit), &shadow);
+                let run_start = crawl.cells().0;
+                let laid = after_widths.get(&run_start).copied();
+                if !crawl.resolve_after(&track, all, (h, fit), &shadow, laid) {
+                    continue;
+                }
+                let width = crawl.after.as_ref().map_or(0.0, |after| after.width);
+                if width > 0.0 {
+                    after_widths.insert(run_start, width);
+                }
             }
         }
         self.valleys.crawls = crawls;
+        self.valleys.after_widths = after_widths;
         None
     }
 
@@ -911,10 +942,9 @@ impl TurningGuard {
     /// crawl at the fit's tolerance of a rate would, it fails loudly.
     fn lay_crawl(&mut self, slot: valley::Slot, line: u32) -> Option<Binding> {
         let h = self.h();
-        let (back, ahead) = self.span;
         let fit = self.valleys.fit;
         let (start, end) = slot.cells;
-        let (from, to) = (start as f64 * h, (end + 1) as f64 * h);
+        let from = start as f64 * h;
         let segment_table_start = -1;
         let found = {
             let bounds = |n: i64| self.tracked_bounds(n);
@@ -938,10 +968,11 @@ impl TurningGuard {
                     }
                     .fail();
                 }
+                let read = cells_read(self.span, h, (start, end));
                 Some(Binding {
                     cell: from,
-                    from: from - back as f64 * h,
-                    to: to + ahead as f64 * h,
+                    from: read.0,
+                    to: read.1,
                     demand: overreach.width,
                     max_accel: overreach.covered,
                     asked: Asked::ValleySide,
@@ -1052,11 +1083,11 @@ impl TurningGuard {
             .then(|| self.reservations(&caps, (first, last - 1)))
             .unwrap_or_default();
         let window = (timing.t0 - back as f64 * h, timing.t1() + ahead as f64 * h);
-        let nearby: Vec<MoveSummary> = self.summaries_over(window).collect();
+        let screened: Vec<MoveSummary> = self.summaries_over(window).collect();
         if reserves.is_empty()
             && screen::passes(
                 &follower.coarse,
-                nearby.iter().copied(),
+                screened.iter().copied(),
                 &demand,
                 |axes| caps.path_jerk_gain(axes),
                 caps.max_accel_mm_s2,
@@ -1066,6 +1097,9 @@ impl TurningGuard {
         }
         let bounds = |n: i64| self.tracked_bounds(n);
         let track = TrackView::new(&self.valleys.track, &bounds, (h, self.valleys.fit));
+        let nearby: Vec<MoveSummary> = self
+            .summaries_over(cells_read(self.span, h, (first, last - 1)))
+            .collect();
         let cell = CellCheck {
             demand,
             caps: &caps,
@@ -1456,6 +1490,7 @@ impl TurningGuard {
         let Valleys {
             track,
             crawls,
+            after_widths,
             travels,
             extruding,
             scanned,
@@ -1476,6 +1511,7 @@ impl TurningGuard {
             - budget_cells;
         track.trim_before(keep);
         extruding.trim_before(keep);
+        after_widths.retain(|&run_start, _| run_start >= keep);
         keep
     }
 
@@ -1489,7 +1525,6 @@ impl TurningGuard {
         (from, to): (i64, i64),
     ) -> Vec<Reservation<'_>> {
         let h = self.h();
-        let (back, ahead) = self.span;
         self.valleys
             .crawls
             .iter()
@@ -1497,10 +1532,7 @@ impl TurningGuard {
             .flat_map(|crawl| std::iter::once(&crawl.before).chain(crawl.after.as_ref()))
             .filter(|side| side.cells.0 <= to && from <= side.cells.1)
             .map(|side| {
-                let window = (
-                    (side.cells.0 - back) as f64 * h,
-                    (side.cells.1 + 1 + ahead) as f64 * h,
-                );
+                let window = cells_read(self.span, h, side.cells);
                 let ratio = self
                     .summaries_over(window)
                     .filter_map(|summary| summary.ratio)
@@ -1808,9 +1840,11 @@ impl TurningGuard {
     /// sides read the motion up to [`VALLEY_LEAD_BUDGET_S`] past its run,
     /// and a re-plan there resizes them, so the sides of every crawl whose
     /// run ends within that budget and the kernels' reach before the first
-    /// move unchecked count; the first move overlapping the earliest of
-    /// these is the earliest a back-off can touch. The motion it changes
-    /// moves the shaped motion `w` (the kernels' forward reach) before it,
+    /// move unchecked count, and those of every crawl whose after side,
+    /// laid wider than the path the budget covers, reaches that move; the
+    /// first move overlapping the earliest of these is the earliest a
+    /// back-off can touch. The motion it changes moves the shaped motion
+    /// `w` (the kernels' forward reach) before it,
     /// where a crawl may then be found whose before side reaches the
     /// [`VALLEY_LEAD_BUDGET_S`] further back and whose cells' checks back
     /// off from `u` before that: the first move overlapping there is the
@@ -1852,7 +1886,7 @@ impl TurningGuard {
             .valleys
             .crawls
             .iter()
-            .filter(|crawl| crawl.cells().1 + budget_cells + ahead + 2 >= unchecked_cell)
+            .filter(|crawl| reopens(crawl.cells(), crawl.reach().1))
             .map(|crawl| crawl.before.cells.0);
         let travel_runs = self
             .valleys

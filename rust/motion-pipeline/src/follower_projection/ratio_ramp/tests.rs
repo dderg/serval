@@ -452,6 +452,40 @@ fn a_rest_an_ulp_past_a_resting_node_closes_the_window_on_its_own_place() {
     assert_eq!(field.width(seam), 0.0);
 }
 
+/// #964: a window short of a rest still to become a width node reads
+/// nothing past it, whatever the last node's width: the ratio laid after
+/// the rest is not read from before it, the ratio before it within reach
+/// still is.
+#[test]
+fn a_window_short_of_a_pending_rest_reads_no_ratio_past_it() {
+    let rest = 12.0;
+    let table = vec![
+        (11.0, 0.0, 0.0),
+        (rest - 11.0, 0.02, 0.02),
+        (5.0, 0.03, 0.03),
+    ];
+    let mut field = WidthField::default();
+    field.push_rest(0.0);
+    let mut s = 0.5;
+    while s <= 10.0 {
+        field.push(s, 1.0);
+        s += 0.5;
+    }
+    field.place_rest_among_laid(rest);
+    let state = smoothed(&table, field);
+    let (lo, hi) = (11.5, 11.6);
+    assert!(
+        hi + state.smoothing.reach_back(hi) > rest,
+        "the last node's width reaches past the rest"
+    );
+    assert_eq!(
+        state
+            .smoothing
+            .peak_ratio_in(SpanTable::Advance, &state.advance_spans, lo, hi),
+        0.02
+    );
+}
+
 #[test]
 fn an_excursion_between_two_rests_within_a_node_spacing_opens_a_window() {
     let mut field = WidthField::default();

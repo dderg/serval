@@ -1,9 +1,8 @@
 """A print whose short lead-in runs into a long slow section must start
-without braking the pacer (#983). On the Pi bench the same print aborts
-klippy: the first anchor commits an 8.4 ms segment while the planning front
-holds the rest of the print, and planning it takes longer than the lead.
-The sim's clock stands still while the host plans, so here the same start
-shows as a pacer brake with zero runway that drains the whole print."""
+without braking the pacer (#1003). #998 fixed the bench abort (#983); here
+the start still shows as a `RunwayExhausted` brake with zero runway before
+the set-off, draining the whole print, the class #1003 records on the bench
+for crawl_s20."""
 
 import json
 import pathlib
@@ -22,7 +21,7 @@ class BrakeAtStart(AssertionError):
 
 
 @pytest.mark.expected_seconds(30)
-@pytest.mark.xfail(strict=True, raises=BrakeAtStart, reason="#983")
+@pytest.mark.xfail(strict=True, raises=BrakeAtStart, reason="#1003")
 def test_a_slow_section_after_a_short_lead_in_starts_without_a_pacer_brake(
     sim_world, monkeypatch, tmp_path
 ):

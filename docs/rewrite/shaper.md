@@ -474,9 +474,16 @@ read them is proven to fit the extruder's `max_accel`:
   the moves it reads by `(limit/demand)^(2/3)`, clamped to [0.5, 0.95], and
   re-plans the span around them between two seams whose speeds it keeps
   (`geometry::replan_span`): the same caps, stops, seam ceilings and
-  extrusion budgets the planner applies, on the lowered budgets. The
-  re-planned moves are checked again; a move backed off 64 times fails
-  loudly.
+  extrusion budgets the planner applies, on the lowered budgets. The moves
+  it reads are those its samples read, each grid sample carrying the
+  planned acceleration over the cell after it (`shadow::cells_read`), and
+  those of each crawl valley side whose rebuild takes the cell past the
+  limit. The rebuild in a cell is bounded by that cell's own shaped speed
+  and acceleration, which back-offs lower, not by its move's feed-limited
+  peak, and an after side keeps the width it was first laid at: slower
+  leaders past it would lay it narrower and rebuild steeper. The re-planned
+  moves are checked again; a move asked to drop under 1/32 of its budget
+  fails loudly.
 - **Release**: a move leaves once no pending check can back off a move it
   depends on: the earliest planned time a pending check reads, less the
   kernels' backward reach, has a brake horizon

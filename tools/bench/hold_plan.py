@@ -54,14 +54,20 @@ EXPECTED_ROW_S = {
     "firmware_restart": 110,
     "host_restart": 260,
     "estop": 120,
-    "estop_g4": 130,
+    "estop_g4": 160,
     "soak_mesh_session": SOAK_SESSION_ROW_S,
     "soak_throttled": SOAK_LONG_ROW_S,
     "crawl_s1": 200,
     "crawl_s5": 200,
+    "crawl_s5_fast": 200,
     "crawl_s10": 200,
     "crawl_s20": 200,
+    "crawl_s5_20s": 120,
+    "crawl_s5_lead": 220,
     "crawl_s5_rest": 210,
+    "mid_crawl_s5_300s": 420,
+    "mid_crawl_s1_300s": 420,
+    "mid_first_layers_m220_s5": 340,
 }
 
 
