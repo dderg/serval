@@ -58,6 +58,7 @@ ESTOP_SHUTDOWN_REASONS = frozenset(
 SHUTDOWN_EVENTS = frozenset({"klippy_shutdown", "mcu_shutdown"})
 JOURNAL_LINES_SHOWN = 3
 CLOSING_BRAKE_CAUSE = "RunwayExhausted"
+DECLARED_WAIT_CAUSE = "DeclaredWait"
 PACER_BRAKE = "pipe_drain"
 RESERVE_RAISED = "pacer_reserve_raised"
 RUN_WIDE = "run-wide"
@@ -456,8 +457,12 @@ def ratchet_check(evidence: Evidence, check: ReserveNotRatcheted) -> Verdict:
 
 
 def brakes_check(evidence: Evidence, check: NoStrayBrakes) -> Verdict:
-    strays = evidence.stray(PACER_BRAKE)
-    at_stops = len(evidence.named(PACER_BRAKE)) - len(strays)
+    strays = [
+        e
+        for e in evidence.stray(PACER_BRAKE)
+        if e["cause"] != DECLARED_WAIT_CAUSE
+    ]
+    excused = len(evidence.named(PACER_BRAKE)) - len(strays)
     if strays:
         listed = ", ".join(
             f"{e['cause']} at {evidence.at(e['t'])}" for e in strays
@@ -467,7 +472,10 @@ def brakes_check(evidence: Evidence, check: NoStrayBrakes) -> Verdict:
             f"({check.issue}): {listed}"
         )
         return Verdict("pacer_brakes", False, detail)
-    detail = f"no pacer brake outside commanded stops ({at_stops} at them)"
+    detail = (
+        "no pacer brake outside commanded stops or declared waits "
+        f"({excused} at them)"
+    )
     return Verdict("pacer_brakes", True, detail)
 
 

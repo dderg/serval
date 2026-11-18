@@ -48,6 +48,9 @@ pub enum DrainCause {
     Requested = 0,
     /// The pacer braked a producer that fell behind the playhead.
     PacerBrake = 1,
+    /// The pacer braked a stream whose producer declared a wait (M109,
+    /// TEMPERATURE_WAIT) and sends no motion until it ends.
+    DeclaredWait = 2,
 }
 
 pub fn encode_header(out: &mut Vec<u8>) {

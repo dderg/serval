@@ -236,20 +236,25 @@ impl PyMotionEngine {
                 ))
             })?;
             self.register_mcu_shutdown_interceptor(io, cfg.mcu_id, pump_control)?;
-            let measured_freq = clock_of(cfg.mcu_id).map(|(_, f)| f).ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "init_planner: mcu {} has no clock estimate; a lane's spans must use the \
-                     same slope the host projects its starts with",
-                    cfg.mcu_id
-                ))
-            })?;
+            let nominal_freq = self
+                .nominal_clock_freqs
+                .lock_ok()
+                .get(&cfg.mcu_id)
+                .map(|&hz| f64::from(hz))
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "init_planner: mcu {} has no nominal clock frequency; its claim \
+                         records CLOCK_FREQ",
+                        cfg.mcu_id
+                    ))
+                })?;
 
             if cfg.has_pulse_lanes() {
                 let endpoint = motion_core::pump::build_endpoint(
                     cfg,
                     Arc::downgrade(io),
                     pump_control.clone(),
-                    measured_freq,
+                    nominal_freq,
                     Arc::clone(&clock_of),
                 )
                 .map_err(PyRuntimeError::new_err)?;
@@ -282,7 +287,7 @@ impl PyMotionEngine {
                     cfg,
                     Arc::downgrade(io),
                     pump_control.clone(),
-                    measured_freq,
+                    nominal_freq,
                     Arc::clone(&clock_of),
                 )
                 .map_err(PyRuntimeError::new_err)?;

@@ -327,5 +327,8 @@ def test_lookahead_callback_announces_toolhead_activity_to_idle_timeout():
 
     est = mcu.estimated_print_time(reactor.monotonic())
     assert motion.printer.events == [
-        ("toolhead:sync_print_time", (reactor.monotonic(), est, 0.0))
+        (
+            "toolhead:sync_print_time",
+            (reactor.monotonic(), est, est + motion.motion_lead),
+        )
     ]

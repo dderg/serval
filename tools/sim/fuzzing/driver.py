@@ -19,11 +19,11 @@ from typing import Callable, Optional
 
 from tools.sim.fuzzing import printer, program, thermal
 from tools.sim.fuzzing.checks import (
+    DECLARED_WAIT_BRAKE_CAUSE,
     DURATION_TOLERANCE,
     ENDPOINT_DEATH_GRACE_S,
     ESTOP_DEADLINE_S,
     ESTOP_REASON,
-    IDLE_BRAKE_CAUSE,
     MOTION_STILL_S,
     PACER_BRAKE,
     Check,
@@ -191,7 +191,6 @@ class Session:
         self.print_index = 0
         self.excluded = False
         self.extrude_scaled = False
-        self.host_waits: list[tuple[int, int]] = []
         self.ready_ns = 0
         self.hotend = None
         if self.spec.hotend_model:
@@ -567,7 +566,6 @@ class Session:
         self._gcode(
             f"SDCARD_PRINT_FILE FILENAME={path.name}", Check.PRINT_OUTCOME
         )
-        self.host_waits.append((start_ns, self._heat_waits(name)))
         for action in self.scenario.actions_for(index):
             if not self._advance(
                 start_ns, start_ns + int(action.at_s * NS_PER_S)
@@ -796,23 +794,6 @@ class Session:
             start <= high_ns and low_ns <= end for start, end in self.windows
         )
 
-    def _heat_waits(self, name: str) -> int:
-        segments = self.scenario.program(name).segments
-        return sum(s.kind is program.Kind.HEAT_WAIT for s in segments)
-
-    def _spend_host_wait(self, at_ns: int) -> bool:
-        """A print waiting on its hotend (M109, TEMPERATURE_WAIT) sends no
-        moves, and the pacer brings the stream to rest at the end of the
-        queued ones once their runway runs out: one such brake per heat
-        wait of the print it falls in."""
-        starts = [start for start, _ in self.host_waits]
-        index = bisect.bisect_right(starts, at_ns) - 1
-        if index < 0 or self.host_waits[index][1] == 0:
-            return False
-        start, left = self.host_waits[index]
-        self.host_waits[index] = (start, left - 1)
-        return True
-
     def _check_brakes(self) -> None:
         self.wall.stop()
         for event in events_since(self.world.log_dir, self.offsets):
@@ -821,10 +802,9 @@ class Session:
             low, high = self.wall.virtual_span(event_wall_ns(event))
             if self._allowed_brake(low, high):
                 continue
-            idle = event.get("cause") == IDLE_BRAKE_CAUSE
-            if idle and self._spend_host_wait(low):
+            if event.get("cause") == DECLARED_WAIT_BRAKE_CAUSE:
                 self.notes.append(
-                    f"idle brake at {low / NS_PER_S:.3f} s in a heat wait"
+                    f"declared-wait brake at {low / NS_PER_S:.3f} s"
                 )
                 continue
             fields = {

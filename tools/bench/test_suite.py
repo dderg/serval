@@ -337,15 +337,16 @@ def _crawl_suite(monkeypatch, tmp_path, failing: set[str]):
     )
 
 
-def test_the_crawl_group_marks_every_row_but_the_rest_one_failing_until_983():
-    marks = {row.name: row.fails_until for row in suite.CRAWL_MATRIX}
-    assert marks == {
-        "crawl_s1": "#983",
-        "crawl_s5": "#983",
-        "crawl_s10": "#983",
-        "crawl_s20": "#983",
-        "crawl_s5_rest": "",
+def test_the_crawl_group_marks_only_the_rows_bench_runs_still_fail():
+    marks = {
+        row.name: row.fails_until
+        for row in suite.CRAWL_MATRIX
+        if row.fails_until
     }
+    assert marks == suite.CRAWL_FAILS_UNTIL
+    assert "#983" not in marks.values()
+    names = [row.name for row in suite.CRAWL_MATRIX]
+    assert {"crawl_s1", "crawl_s5", "crawl_s5_fast", "crawl_s10"} <= set(names)
     assert not any(row in suite.CRAWL_MATRIX for row in suite.ROWS)
 
 
@@ -359,21 +360,20 @@ def test_marked_crawl_rows_that_fail_are_expected_failures(
         row["name"]: (row["passed"], row["expected_fail"], row["fails_until"])
         for row in summary["rows"]
     }
-    assert verdicts["crawl_s5"] == (False, True, "#983")
-    assert verdicts["crawl_s5_rest"] == (True, False, "")
+    assert verdicts["crawl_s20"] == (False, True, "#1003")
+    assert verdicts["crawl_s5"] == (True, False, "")
 
 
 def test_a_marked_crawl_row_that_passes_fails_the_suite(monkeypatch, tmp_path):
-    still_failing = {"crawl_s1", "crawl_s10", "crawl_s20"}
-    events, summary = _crawl_suite(monkeypatch, tmp_path, still_failing)
+    events, summary = _crawl_suite(monkeypatch, tmp_path, set())
     assert events[-1] == 1
-    fixed = next(row for row in summary["rows"] if row["name"] == "crawl_s5")
+    fixed = next(row for row in summary["rows"] if row["name"] == "crawl_s20")
     assert fixed["passed"] and fixed["expected_fail"]
 
 
-def test_the_rest_crawl_row_failing_fails_the_suite(monkeypatch, tmp_path):
+def test_an_unmarked_crawl_row_failing_fails_the_suite(monkeypatch, tmp_path):
     marked = {row.name for row in suite.CRAWL_MATRIX if row.fails_until}
-    events, _ = _crawl_suite(monkeypatch, tmp_path, {*marked, "crawl_s5_rest"})
+    events, _ = _crawl_suite(monkeypatch, tmp_path, {*marked, "crawl_s5"})
     assert events[-1] == 1
 
 

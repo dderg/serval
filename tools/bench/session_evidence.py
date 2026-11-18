@@ -20,6 +20,8 @@ import numpy as np
 
 SPAN_JOIN_S = 0.25
 TIME_DECIMALS = 4
+RESTART_ACTS = ("firmware_restart", "host_restart")
+READY = "ready"
 EVENT_NAMES = (
     "print.start",
     "print.pause",
@@ -81,15 +83,18 @@ def collect(run_dir: Path) -> dict:
     end = (
         session["ended"] or datetime.fromisoformat(info["host_end"]).timestamp()
     )
+    states = state_changes(session["samples"])
+    spans = activity_spans(capture.deltas, capture.tick_hz, start)
     return {
         "run_dir": str(run_dir),
         "head": info["deployed"]["head"],
         "scenario": session["scenario"],
         "window": [_at(start), _at(end)],
         "actions": session["actions"],
-        "states": state_changes(session["samples"]),
+        "states": states,
+        "restarts": restart_timings(session["actions"], states, spans),
         "post_check": session["post_check"],
-        "spans": activity_spans(capture.deltas, capture.tick_hz, start),
+        "spans": spans,
         "events": watched_events(run_dir / "events", start, end),
         "stats": klippy_stats(run_dir / "events", start, end),
         "journal": abort_lines((run_dir / "journal.txt").read_text()),
@@ -165,6 +170,47 @@ def state_changes(samples: list[dict]) -> list[dict]:
             }
         )
     return changes
+
+
+def restart_timings(
+    actions: list[dict], states: list[dict], spans: list[list]
+) -> list[dict]:
+    """Seconds from each restart request to klippy's next `ready` and to the
+    first stepping after it (#987: ready no longer waits for clock-sync
+    convergence; the first motion does)."""
+    timings = []
+    for action in actions:
+        if action["act"] not in RESTART_ACTS:
+            continue
+        sent = action["sent"]
+        left = _first(
+            s["t"] for s in states if s["t"] > sent and s["klippy"] != READY
+        )
+        ready = None
+        if left is not None:
+            ready = _first(
+                s["t"] for s in states if s["t"] > left and s["klippy"] == READY
+            )
+        moved = None
+        if ready is not None:
+            moved = _first(span[0] for span in spans if span[0] >= ready)
+        timings.append(
+            {
+                "act": action["act"],
+                "sent": sent,
+                "ready_s": _since(ready, sent),
+                "first_motion_s": _since(moved, sent),
+            }
+        )
+    return timings
+
+
+def _first(values):
+    return next(iter(values), None)
+
+
+def _since(at: float | None, sent: float) -> float | None:
+    return None if at is None else _at(at - sent)
 
 
 def activity_spans(
