@@ -360,14 +360,17 @@ def test_marked_crawl_rows_that_fail_are_expected_failures(
         row["name"]: (row["passed"], row["expected_fail"], row["fails_until"])
         for row in summary["rows"]
     }
-    assert verdicts["crawl_s20"] == (False, True, "#1003")
+    assert verdicts["mid_crawl_s5_300s"] == (False, True, "#1007")
+    assert verdicts["crawl_s20"] == (True, False, "")
     assert verdicts["crawl_s5"] == (True, False, "")
 
 
 def test_a_marked_crawl_row_that_passes_fails_the_suite(monkeypatch, tmp_path):
     events, summary = _crawl_suite(monkeypatch, tmp_path, set())
     assert events[-1] == 1
-    fixed = next(row for row in summary["rows"] if row["name"] == "crawl_s20")
+    fixed = next(
+        row for row in summary["rows"] if row["name"] == "mid_crawl_s5_300s"
+    )
     assert fixed["passed"] and fixed["expected_fail"]
 
 
