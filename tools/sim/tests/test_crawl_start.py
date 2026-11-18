@@ -14,6 +14,7 @@ pytestmark = pytest.mark.needs_elf
 
 GCODE = pathlib.Path(__file__).resolve().parents[1] / "gcode" / "crawl_s5.gcode"
 HOST_COMPUTE_SCALES = ("1.0", "2.0", "3.0")
+BENCH_RUN_PY_PRINT_END = "M400\n"
 
 
 class BrakeAtStart(AssertionError):
@@ -28,7 +29,7 @@ def test_a_slow_section_after_a_short_lead_in_starts_without_a_pacer_brake(
     monkeypatch.setenv("SERVAL_HOST_COMPUTE_SCALE", compute_scale)
     monkeypatch.setenv("RUST_LOG", "info,motion_core::worker::ingress=debug")
     gcode = tmp_path / GCODE.name
-    gcode.write_text(GCODE.read_text())
+    gcode.write_text(GCODE.read_text() + BENCH_RUN_PY_PRINT_END)
     world = sim_world(
         lambda w: configs.bench_print_config(w.h7_pty, str(w.gcode_dir)),
         dual_mcu=False,
