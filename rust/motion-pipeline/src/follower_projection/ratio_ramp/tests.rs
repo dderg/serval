@@ -1044,7 +1044,10 @@ fn the_width_rests_on_the_ratio_step_a_resting_leg_lays_beside_the_rest() {
         state
             .smoothing
             .lay((&state.spans, &state.advance_spans), &leg, &rule);
-        state.smoothing.close_at(travel + 2.0 * REST_LEG_SPILL_MM);
+        state.smoothing.close_at(
+            travel + 2.0 * REST_LEG_SPILL_MM,
+            (&state.spans, &state.advance_spans),
+        );
         let ratio_step = travel + tail;
         let width = &state.smoothing.width;
         assert_eq!(
@@ -1897,7 +1900,7 @@ fn a_crawl_valley_held_at_zero_back_to_where_the_leaders_move_fails_loudly() {
 #[test]
 fn a_crawl_valley_held_at_zero_back_to_a_rest_keeps_the_weight_continuous() {
     let mut floored = advanced_smoothing();
-    floored.close_at(499.5);
+    floored.close_at(499.5, (&[], &[]));
     floored.place_valley(500.0, ((499.5, 500.0), (0.0, 0.18)), (4.0e-3, 4.0e-3));
     let mut rested = advanced_smoothing();
     rested.valleys.push(AdvanceValley {
@@ -1938,7 +1941,7 @@ fn a_crawl_valley_held_at_zero_back_to_a_drain_reaches_no_taken_path() {
         DRAIN_MM,
         shaped_leaders.into_reads(shaped_odometer),
     );
-    smoothing.close_at(DRAIN_MM);
+    smoothing.close_at(DRAIN_MM, (&[], &[]));
     assert_eq!(
         smoothing.take_final(&[]).len(),
         1,
