@@ -3172,7 +3172,13 @@ impl OdometerKnots {
         self.leaves() as f64 * f64::EPSILON * self.leaf_magnitude
     }
 
-    fn scale_to(&self, ingested: f64) -> f64 {
+    /// The scale that lays the integrated arc onto the `owned` path, once
+    /// the integral is checked against the `ingested` arc. A segment owns
+    /// its arc short of a span boundary its end lies within alignment past
+    /// ([`FollowerState::owned_span_end`]): its odometer reaches that end
+    /// at the segment's end, so it never holds while the leaders still move
+    /// and the signal's position and velocity stay one motion.
+    fn scale_onto(&self, ingested: f64, owned: f64) -> f64 {
         let integrated = self.length();
         let start = self.t[0];
         let end = self.t[self.t.len() - 1];
@@ -3192,7 +3198,7 @@ impl OdometerKnots {
              can account for",
             self.leaves()
         );
-        ingested / integrated
+        owned / integrated
     }
 }
 
@@ -3292,7 +3298,7 @@ pub(crate) struct FollowerSignal<'a> {
     state: &'a FollowerState,
     e_start: f64,
     s_start: f64,
-    /// The odometer's start plus the length it was scaled to, the sum the
+    /// The odometer's start plus the ingested length, the sum the
     /// projection loop carries to the next segment's start, so a segment
     /// starts where its predecessor ends whether one emit held both or not.
     s_end: f64,
@@ -3376,9 +3382,14 @@ impl<'a> FollowerSignal<'a> {
                 }
             }
         }
-        let odometer_scale = knots.scale_to(odometer.length);
         let s_end = odometer.start + odometer.length;
         let s_owned_end = state.owned_span_end(odometer.start, s_end);
+        let owned_length = if s_owned_end < s_end {
+            s_owned_end - odometer.start
+        } else {
+            odometer.length
+        };
+        let odometer_scale = knots.scale_onto(odometer.length, owned_length);
         let ratio_bounds = RatioBounds::ridden(state, odometer.start, s_owned_end);
         let reach_retracts = state.retracts_within(odometer.start, s_end);
 
