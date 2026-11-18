@@ -113,6 +113,19 @@ impl PyMotionEngine {
         })?;
         Ok(planner.feed_wakeup_read_fd())
     }
+    /// `false` when the move channel is full: the caller yields and retries,
+    /// as with `submit_move`.
+    fn declare_wait(&self) -> PyResult<bool> {
+        let guard = self.planner.lock_ok();
+        let planner = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("planner not initialized — call init_planner first")
+        })?;
+        match planner.declare_wait() {
+            Ok(()) => Ok(true),
+            Err(motion_core::worker::StreamWorkerError::ChannelFull) => Ok(false),
+            Err(e) => Err(planner_err(e)),
+        }
+    }
     /// `None` when the move channel is full — the caller yields and retries;
     /// blocking here would stall the whole klippy reactor thread.
     fn fence_start(&self, force: bool) -> PyResult<Option<u64>> {

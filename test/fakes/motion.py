@@ -268,6 +268,9 @@ class FakeEngine:
         self.calls.append(("claim_mcu", name, serial_path, baud))
         return self._returns.get("claim_mcu", 7)
 
+    def declare_wait(self):
+        return self._call("declare_wait")
+
     def fence_start(self, force):
         return self._call("fence_start", force)
 
