@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::CommittedFrontier;
 use super::dispatch::WorkerLinks;
@@ -143,7 +143,7 @@ impl IntakeGate {
     fn queued_secs(&self) -> f64 {
         let inbox_s = self.inbox_ns.load(Ordering::Acquire) as f64 / NS_PER_S;
         let runway_s = self.frontier.runway_secs();
-        self.links.ahead_secs(runway_s, Instant::now()) + inbox_s
+        self.links.ahead_secs(runway_s, self.frontier.now()) + inbox_s
     }
 
     /// Planned motion the pump has not taken yet: it plays once the

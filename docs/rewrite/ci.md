@@ -67,16 +67,19 @@ to `.ci-logs/<job>.log` (gitignored, overwritten per job per run). Prefer
 reading that file over re-running a gate verbosely: the failure dump is capped
 at 100 lines, the file is not.
 
-`--keep-logs` is a `tools/sim/run.sh test` flag (reachable through `ci.sh
-sim-e2e`). The sim's `--rm` container normally takes every world's logs with
-it; the flag puts pytest's basetemp on a host mount, leaving the whole tree in
-`.sim-logs/run/<test-name>0/world0/`:
+The sim's `--rm` container takes every world's logs with it, except a failed
+test's: `tools/sim/run.sh test` copies those to
+`.sim-logs/failed/<run>/<test-nodeid>/world0/` on every run (CI uploads them as
+the `sim-failed-logs-<shard>` artifact). `--keep-logs` (reachable through
+`ci.sh sim-e2e`) puts pytest's basetemp on a host mount, leaving every world,
+passing ones too, in `.sim-logs/run/<test-name>0/world0/`. Either tree holds:
 
 ```
 logs/klippy.log            klippy's own log
 logs/klippy.stdout         tracebacks that never reached the log
 logs/h7.log, f4.log        MCU process stdout/stderr
 logs/events/host-py.jsonl  structured event store (also host-rust, <mcu>.jsonl)
+logs/vtime.csv             virtual vs real time
 printer.cfg                the exact config the world booted
 ```
 
