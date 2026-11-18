@@ -37,6 +37,14 @@ Use `cargo nextest run -p <crate>` or `-E 'test(<name>)'` to scope down.
 Doc-tests are the one gap — `nextest` skips them, so run `cargo test --doc`
 when you touch doc examples.
 
+A test that judges pacing against the playhead (brakes, underruns, set-off)
+never runs on the wall clock: on this box, at load 50-170, its threads miss
+any real-time margin and the anchor aborts the test (#1006). The real-pipeline
+worker tests run on `worker::tests::VirtualClock`, which stands still while any
+test thread runs or waits for a CPU and jumps to the next timed wait once all
+are blocked, so a pinned core under 48 busy loops slows them down but cannot
+fail them. Costs (a slow producer, a slow dispatcher) are `clock.sleep`s.
+
 Test output is quiet by design: `ci.sh <job>` prints one `PASS <tally>` line
 off a terminal, and dumps the last 100 lines of the log when the job fails;
 nextest prints failures and slow tests only. Never re-run a gate verbosely to
@@ -45,10 +53,12 @@ nextest prints failures and slow tests only. Never re-run a gate verbosely to
 When you do need the detail, the complete log of every job is already on disk
 at `.ci-logs/<job>.log` — read or grep that instead of re-running. `ci.sh -v
 <job>` streams live if you really want it in the transcript. For a simulator
-post-mortem, `tools/sim/run.sh test --keep-logs` (also via `ci.sh sim-e2e
---keep-logs`) leaves each world's `klippy.log`, MCU logs, `printer.cfg` and
-`events/*.jsonl` under `.sim-logs/run/<test>/world0/`; without it the `--rm`
-container deletes them.
+post-mortem, every `tools/sim/run.sh test` (so `ci.sh sim-e2e` and CI's shards,
+which upload them as the `sim-failed-logs-<shard>` artifact) keeps each failed
+test's worlds — `klippy.log`, `klippy.stdout`, MCU logs, `events/*.jsonl`,
+`vtime.csv`, `printer.cfg` — under `.sim-logs/failed/<run>/<test>/world0/`; a
+passing test leaves nothing. `--keep-logs` keeps every world, passing ones too,
+under `.sim-logs/run/`.
 
 # Before opening or updating a PR
 

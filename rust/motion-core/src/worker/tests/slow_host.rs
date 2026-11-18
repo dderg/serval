@@ -133,32 +133,14 @@ fn bench_planner() -> planner_config::PlannerConfig {
     planner_config::from_doc::planner_config_from_text(&text).expect("bench planner config")
 }
 
-fn submit(h: &StreamWorkerHandle, m: &geometry::Move) {
-    loop {
-        match h.submit_move(m.clone()) {
-            Ok(()) => return,
-            Err(StreamWorkerError::ChannelFull) => std::thread::sleep(Duration::from_millis(1)),
-            Err(e) => panic!("submit_move: {e}"),
-        }
-    }
-}
-
 /// Prints `gcode` on the bench printer's config with each stream's
 /// producer handing on the motion behind its first segment the bench's
 /// gap later, and returns every segment the anchor would have aborted on.
 fn overruns_printing(gcode: &str) -> Vec<Overrun> {
     let script = LiveScript::new(gcode, &bench_planner(), None, GcodePos([0.0; 3]))
         .unwrap_or_else(|e| panic!("crawl print: {e}"));
-    let clock = host_rt::clock::MockClock::new();
-    let timeline = ExecutionTimeline {
-        frontier: Arc::default(),
-        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
-        router: Arc::new(Mutex::new(
-            host_rt::passthrough_queue::PassthroughRouter::with_clock(
-                Arc::clone(&clock) as Arc<dyn host_rt::clock::Clock + Send + Sync>
-            ),
-        )),
-    };
+    let clock = VirtualClock::start();
+    let timeline = virtual_timeline(&clock);
     let watch = OverrunWatch {
         inner: AnchoredSink::on(&timeline),
         overruns: Arc::default(),
@@ -171,13 +153,13 @@ fn overruns_printing(gcode: &str) -> Vec<Overrun> {
         timeline,
         None,
         Production::GapAfterFirstSegments {
-            clock,
+            clock: Arc::clone(&clock),
             gap: BENCH_GAP_AFTER_FIRST_SEGMENT,
         },
     );
     for step in script.steps {
         match step {
-            PlanStep::Move(m) => submit(&h, &m),
+            PlanStep::Move(m) => submit_on(&clock, &h, &m),
             PlanStep::Rest { dwell_s } => h
                 .dwell_try_start(dwell_s)
                 .expect("the dwell is queued")
@@ -246,11 +228,8 @@ fn a_stream_at_rest_never_brakes_while_its_producer_keeps_feeding() {
         GcodePos([0.0; 3]),
     )
     .unwrap_or_else(|e| panic!("crawl print: {e}"));
-    let timeline = ExecutionTimeline {
-        frontier: Arc::default(),
-        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
-        router: Arc::new(Mutex::new(real_router())),
-    };
+    let clock = VirtualClock::start();
+    let timeline = virtual_timeline(&clock);
     let mut h = spawn_on_timeline(
         script.config.clone(),
         script.chains.clone(),
@@ -262,8 +241,8 @@ fn a_stream_at_rest_never_brakes_while_its_producer_keeps_feeding() {
         let PlanStep::Move(m) = step else {
             panic!("the crawl print holds no rest");
         };
-        submit(&h, &m);
-        std::thread::sleep(FEEDING_GAP);
+        submit_on(&clock, &h, &m);
+        clock.sleep(FEEDING_GAP);
     }
     let brakes = (
         h.links.pacer_drains.idle.load(Ordering::SeqCst),
