@@ -115,6 +115,28 @@ fn merging_never_exceeds_the_dispatch_span_bound() {
 }
 
 #[test]
+fn a_pair_summing_to_the_bound_never_rounds_past_it_once_merged() {
+    let short_secs = 0.0005005;
+    let first = view(0.010668, short_secs, HOLD_POSITION, true);
+    let second = view(
+        first.stream_t_end,
+        MAX_SPAN_SECS - short_secs,
+        HOLD_POSITION,
+        true,
+    );
+    let mut queue = VecDeque::from([first.clone()]);
+    append_spans_merging_holds(&mut queue, vec![second.clone()], true);
+    for staged in &queue {
+        assert!(
+            staged.stream_t_end - staged.stream_t_start <= MAX_SPAN_SECS,
+            "merged view of {} s exceeds the dispatch bound",
+            staged.stream_t_end - staged.stream_t_start
+        );
+    }
+    assert_tiles(&queue, &first, &second);
+}
+
+#[test]
 fn a_hold_one_ulp_away_stays_a_separate_view() {
     let mut queue = VecDeque::from([hold(0)]);
     let nudged = f64::from_bits(HOLD_POSITION.to_bits() + 1);

@@ -19,7 +19,7 @@ klippy/plugins/*
 .idea/*
 
 # Test-run logs kept for inspection: per-gate logs from scripts/ci.sh, and
-# whole simulator worlds from `tools/sim/run.sh test --keep-logs`
+# simulator worlds from `tools/sim/run.sh test` (failed tests; all with --keep-logs)
 .ci-logs/
 .sim-logs/
 .sim-fuzz/

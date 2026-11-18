@@ -19,11 +19,9 @@ REGRESSIONS = sorted(
 
 
 @pytest.mark.parametrize("directory", REGRESSIONS, ids=lambda path: path.name)
-def test_a_fixed_bug_stays_fixed(directory, tmp_path):
+def test_a_fixed_bug_stays_fixed(directory, tmp_path, fuzz_keep_dir):
     chosen = scenario.load(directory)
-    result = execute.run_scenario(
-        chosen, tmp_path / "world", tmp_path / "failure"
-    )
+    result = execute.run_scenario(chosen, tmp_path / "world", fuzz_keep_dir)
     assert result["status"] == execute.PASS, (
         f"{directory.name}: {scenario.describe(chosen)}\n"
         f"{result['signature']}\n{result['evidence']}"
