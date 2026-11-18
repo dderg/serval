@@ -225,3 +225,56 @@ fn a_crawl_at_ten_mm_s_after_a_short_lead_in_starts_ahead_of_its_playhead() {
 fn a_crawl_after_a_rest_inside_the_print_sets_off_ahead_of_its_playhead() {
     assert_starts_without_overrun(5.0, 3000.0, &[REST_BEFORE_THE_CRAWL]);
 }
+
+/// The gap a producer that keeps feeding leaves between two moves: klippy
+/// parses and submits the next line while the ingress has already taken
+/// the last one.
+const FEEDING_GAP: Duration = Duration::from_millis(20);
+
+/// #1003: crawl_s20 on the Pi. A stream at rest whose planning front holds
+/// its slow section found its inbox empty between two of klippy's moves
+/// after its prime, counted from its first move, had run out, and braked to
+/// rest: the drain planned every move held to rest, and the toolhead
+/// stopped where they ended, 108 s into the slow section. Nothing was in
+/// flight to protect, and klippy was still feeding.
+#[test]
+fn a_stream_at_rest_never_brakes_while_its_producer_keeps_feeding() {
+    let script = LiveScript::new(
+        &crawl_print(20.0, PRINT_FEED, &[]),
+        &bench_planner(),
+        None,
+        GcodePos([0.0; 3]),
+    )
+    .unwrap_or_else(|e| panic!("crawl print: {e}"));
+    let timeline = ExecutionTimeline {
+        frontier: Arc::default(),
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(real_router())),
+    };
+    let mut h = spawn_on_timeline(
+        script.config.clone(),
+        script.chains.clone(),
+        script.home.clone(),
+        AnchoredSink::on(&timeline),
+        timeline,
+    );
+    for step in script.steps {
+        let PlanStep::Move(m) = step else {
+            panic!("the crawl print holds no rest");
+        };
+        submit(&h, &m);
+        std::thread::sleep(FEEDING_GAP);
+    }
+    let brakes = (
+        h.links.pacer_drains.idle.load(Ordering::SeqCst),
+        h.links.pacer_drains.busy.load(Ordering::SeqCst),
+    );
+    h.flush().unwrap();
+    h.shutdown();
+    assert_eq!(
+        brakes,
+        (0, 0),
+        "the pacer braked (idle, busy) a stream at rest while its producer kept \
+         feeding a move every {FEEDING_GAP:?}"
+    );
+}

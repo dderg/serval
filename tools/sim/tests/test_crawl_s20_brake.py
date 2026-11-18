@@ -1,9 +1,10 @@
 """#1003, Pi bench 2026-11-17 (5ea04ef2c, printer.cfg): crawl_s20, a 2.3 s
-lead-in at 100 mm/s then 120 s of extruding laps at 20 mm/s, completes but
-the pacer orders a `RunwayExhausted` brake 0.36 s after the print starts,
-with the stream not yet set off, and the toolhead stops mid slow section
-where the drained moves end. At SERVAL_HOST_COMPUTE_SCALE 2 the simulator
-does the same; at scale 1 it does not."""
+lead-in at 100 mm/s then 120 s of extruding laps at 20 mm/s, completed but
+the pacer ordered a `RunwayExhausted` brake 0.36 s after the print started,
+with the stream not yet set off, on an inbox found empty between two of
+klippy's moves, and the toolhead stopped mid slow section where the drained
+moves ended. The simulator did the same at SERVAL_HOST_COMPUTE_SCALE 2 and
+3."""
 
 import json
 import pathlib
@@ -17,7 +18,7 @@ pytestmark = pytest.mark.needs_elf
 GCODE = (
     pathlib.Path(__file__).resolve().parents[1] / "gcode" / "crawl_s20.gcode"
 )
-PI_COMPUTE_SCALE = "2.0"
+HOST_COMPUTE_SCALES = ("1.0", "2.0", "3.0")
 PRINT_TIMEOUT_S = 600
 
 
@@ -26,9 +27,11 @@ class PacerBrake(AssertionError):
 
 
 @pytest.mark.expected_seconds(40)
-@pytest.mark.xfail(strict=True, raises=PacerBrake, reason="#1003")
-def test_crawl_s20_prints_without_a_pacer_brake_on_a_pi(sim_world, monkeypatch):
-    monkeypatch.setenv("SERVAL_HOST_COMPUTE_SCALE", PI_COMPUTE_SCALE)
+@pytest.mark.parametrize("compute_scale", HOST_COMPUTE_SCALES)
+def test_crawl_s20_prints_without_a_pacer_brake(
+    sim_world, monkeypatch, compute_scale
+):
+    monkeypatch.setenv("SERVAL_HOST_COMPUTE_SCALE", compute_scale)
     world = sim_world(
         lambda w: configs.bench_print_config(w.h7_pty, str(w.gcode_dir)),
         dual_mcu=False,

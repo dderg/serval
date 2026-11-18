@@ -405,3 +405,61 @@ fn a_wait_shorter_than_a_nanosecond_is_due() {
         "the runway past one brake has run out"
     );
 }
+
+/// The gap between two of klippy's moves: the ingress takes each the
+/// moment it lands and finds its inbox empty until the next.
+const PRODUCER_GAP: Duration = Duration::from_millis(20);
+
+/// #1003: crawl_s20 on the Pi braked a stream at rest 0.36 s into its
+/// print, on an inbox found empty between two of klippy's moves.
+#[test]
+fn a_stream_at_rest_waits_while_its_producer_keeps_handing_moves_on() {
+    let base = Instant::now();
+    let mut pacer = Pacer::default();
+    let mut now = base;
+    while now.duration_since(base) < 4 * Duration::from_secs_f64(STARTUP_PRIME_S) {
+        pacer.note_move(now);
+        now += PRODUCER_GAP;
+        assert_eq!(
+            pacer.idle_verdict(0.0, true, now),
+            IdleVerdict::Wait(Duration::from_secs_f64(STARTUP_PRIME_S) - PRODUCER_GAP),
+            "a producer that handed a move on {PRODUCER_GAP:?} ago has not gone quiet"
+        );
+    }
+    assert_eq!(
+        pacer.idle_verdict(0.0, true, now + Duration::from_secs_f64(STARTUP_PRIME_S)),
+        IdleVerdict::Brake,
+        "a producer quiet for the prime has stopped handing moves on: the stream at \
+         rest brakes so they play"
+    );
+}
+
+/// #1007, Pi bench: while klippy fed a 300 s crawl the turning guard held
+/// whole, the committed runway fell from the cap to 0.256 s, the planning
+/// steps 0.145, 0.145 and 0.288 s among it. Nothing more would have been
+/// committed before the run's own planning finished; a slower host
+/// underruns there (sim, scale 2). The pacer must brake while one brake
+/// still fits.
+#[test]
+fn a_planning_step_that_exhausts_the_runway_brakes_while_moves_keep_arriving() {
+    const BENCH_STEPS: [(f64, f64); 3] = [(2.6, 2.455), (2.455, 2.31), (0.544, 0.256)];
+    let mut pacer = Pacer::default();
+    assert!(!pacer.busy_brake_due(2.6), "a full runway brakes nothing");
+    let brakes: Vec<bool> = BENCH_STEPS
+        .iter()
+        .map(|&(before_s, after_s)| {
+            pacer.note_step(before_s, after_s, Duration::ZERO);
+            pacer.busy_brake_due(after_s)
+        })
+        .collect();
+    assert_eq!(
+        brakes,
+        [false, false, true],
+        "the last step left 0.256 s, under one brake ({} s): the stream must brake",
+        pacer.one_brake_secs()
+    );
+    assert!(
+        BENCH_STEPS[2].1 > LOW_MARGIN_WARN_SECS,
+        "the brake is ordered while its trajectory can still beat the transport floor"
+    );
+}

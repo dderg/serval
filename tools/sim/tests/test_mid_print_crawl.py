@@ -1,9 +1,11 @@
 """#1007: a long slow section between ordinary printing,
 `mid_crawl_s5_300s` (20 s of strokes at 100 mm/s, 300 s of extruding laps
-at 2.5 mm/s, 20 s of strokes), plans its whole slow section in one planning
-step. At SERVAL_HOST_COMPUTE_SCALE 2 that step costs about 2 s of printer
-time, and the pacer brakes the stream to rest near the end of the slow
-section."""
+at 2.5 mm/s, 20 s of strokes). The turning guard holds the approach and the
+whole open crawl run until the run closes, so the run's planning lands in
+one step that must fit in the committed runway: 1.4-2.2 s of it at
+SERVAL_HOST_COMPUTE_SCALE 1-3. It fits by tenths of a second at 1 and 2,
+and the pacer brakes or the stream underruns in some runs; at 3 it
+underruns."""
 
 import json
 import pathlib
@@ -11,6 +13,7 @@ import pathlib
 import pytest
 
 from tools.sim import configs
+from tools.sim.world import SimError
 
 pytestmark = pytest.mark.needs_elf
 
@@ -19,7 +22,22 @@ GCODE = (
     / "gcode"
     / "mid_crawl_s5_300s.gcode"
 )
-PI_COMPUTE_SCALE = "2.0"
+ON_THE_EDGE = pytest.mark.xfail(
+    raises=(AssertionError, SimError),
+    reason="#1007: the run's planning step fits the committed runway by tenths "
+    "of a second here; scale 1 braked 9 of 10 runs alone, scale 2 passed 2 of 3",
+)
+HOST_COMPUTE_SCALES = (
+    pytest.param("1.0", id="1.0", marks=ON_THE_EDGE),
+    pytest.param("2.0", id="2.0", marks=ON_THE_EDGE),
+    pytest.param(
+        "3.0",
+        id="3.0",
+        marks=pytest.mark.xfail(
+            strict=True, raises=(AssertionError, SimError), reason="#1007"
+        ),
+    ),
+)
 PRINT_TIMEOUT_S = 900
 FATAL_EVENTS = ("anchor_underrun", "anchor_low_margin", "stream_worker_fatal")
 
@@ -29,11 +47,11 @@ class PacerBrake(AssertionError):
 
 
 @pytest.mark.expected_seconds(60)
-@pytest.mark.xfail(strict=True, raises=PacerBrake, reason="#1007")
+@pytest.mark.parametrize("compute_scale", HOST_COMPUTE_SCALES)
 def test_a_long_slow_section_mid_print_prints_without_a_pacer_brake(
-    sim_world, monkeypatch
+    sim_world, monkeypatch, compute_scale
 ):
-    monkeypatch.setenv("SERVAL_HOST_COMPUTE_SCALE", PI_COMPUTE_SCALE)
+    monkeypatch.setenv("SERVAL_HOST_COMPUTE_SCALE", compute_scale)
     world = sim_world(
         lambda w: configs.bench_print_config(w.h7_pty, str(w.gcode_dir)),
         dual_mcu=False,
