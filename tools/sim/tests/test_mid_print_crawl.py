@@ -3,8 +3,8 @@
 at 2.5 mm/s, 20 s of strokes). The turning guard holds the approach and the
 whole open crawl run until the run closes, so the run's planning lands in
 one step that must fit in the committed runway: 1.4-2.2 s of it at
-SERVAL_HOST_COMPUTE_SCALE 1-3, which brakes the stream at scale 1 and
-underruns it at 2 and 3."""
+SERVAL_HOST_COMPUTE_SCALE 1-3. It fits at 1, fits by tenths of a second at
+2 and underruns at 3."""
 
 import json
 import pathlib
@@ -12,6 +12,7 @@ import pathlib
 import pytest
 
 from tools.sim import configs
+from tools.sim.world import SimError
 
 pytestmark = pytest.mark.needs_elf
 
@@ -20,7 +21,25 @@ GCODE = (
     / "gcode"
     / "mid_crawl_s5_300s.gcode"
 )
-HOST_COMPUTE_SCALES = ("1.0", "2.0", "3.0")
+HOST_COMPUTE_SCALES = (
+    pytest.param("1.0", id="1.0"),
+    pytest.param(
+        "2.0",
+        id="2.0",
+        marks=pytest.mark.xfail(
+            raises=AssertionError,
+            reason="#1007: the run's planning step fits the runway by tenths of a "
+            "second here, passing 2 of 3 runs",
+        ),
+    ),
+    pytest.param(
+        "3.0",
+        id="3.0",
+        marks=pytest.mark.xfail(
+            strict=True, raises=(AssertionError, SimError), reason="#1007"
+        ),
+    ),
+)
 PRINT_TIMEOUT_S = 900
 FATAL_EVENTS = ("anchor_underrun", "anchor_low_margin", "stream_worker_fatal")
 
@@ -30,7 +49,6 @@ class PacerBrake(AssertionError):
 
 
 @pytest.mark.expected_seconds(60)
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#1007")
 @pytest.mark.parametrize("compute_scale", HOST_COMPUTE_SCALES)
 def test_a_long_slow_section_mid_print_prints_without_a_pacer_brake(
     sim_world, monkeypatch, compute_scale
