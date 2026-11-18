@@ -219,6 +219,9 @@ pub enum StreamMsg {
         params: crate::pump::BuzzParams,
         notify: Sender<Result<crate::pump::BuzzToken, String>>,
     },
+    /// The producer waits on a condition it declared (M109,
+    /// TEMPERATURE_WAIT) and sends no motion until its next move.
+    DeclaredWait,
     Shutdown,
 }
 
@@ -440,10 +443,10 @@ impl StreamWorkerHandle {
         }
         .into_staged(move |item| trajectory.send(item).is_ok());
         let pacer = ingress::Pacer::default();
+        links.publish_reserve(pacer.reserve_secs());
         let intake = Arc::new(intake_gate::IntakeGate::new(
             Arc::clone(&timeline.frontier),
             Arc::clone(&links),
-            pacer.reserve_secs(),
         ));
         let ingress = ingress::Ingress {
             config,
@@ -456,6 +459,7 @@ impl StreamWorkerHandle {
             throttle: producer_throttle::ProducerThrottle::from_env(),
             last_line: 0,
             moves_sent: 0,
+            producer: ingress::Producer::Feeding,
             dispatch_record,
             pump: pump.clone(),
             intake: Arc::clone(&intake),
@@ -594,6 +598,13 @@ impl StreamWorkerHandle {
         let (notify, done) = bounded(1);
         self.try_send_arming(StreamMsg::HoldStartUntil { host_s, notify })?;
         Ok(done)
+    }
+
+    /// Non-blocking, like `fence_start`: the producer sends no motion until
+    /// its next move, so a brake on the moves queued before it is that
+    /// wait's planned stop, not a producer that fell behind.
+    pub fn declare_wait(&self) -> Result<(), StreamWorkerError> {
+        self.try_send_arming(StreamMsg::DeclaredWait)
     }
 
     pub fn discard_pending(&self) {

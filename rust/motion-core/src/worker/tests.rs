@@ -9,6 +9,8 @@ use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use motion_pipeline::{Control, DispatchCommand, StreamConfig};
 use trajectory::{ContinuousSegment, NudgeProfile};
 
+mod slow_host;
+
 #[derive(Clone, Default)]
 struct Capture {
     segs: Arc<Mutex<Vec<(f64, f64, f64)>>>, // (t_start, t_end, x_at_end)
@@ -101,7 +103,59 @@ fn spawn_on_timeline(
     sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
 ) -> TestWorker {
-    spawn_recorded(config, chains, home, sink, timeline, None)
+    spawn_recorded(
+        config,
+        chains,
+        home,
+        sink,
+        timeline,
+        None,
+        Production::AsShaped,
+    )
+}
+
+/// How the shaped trajectory reaches the dispatcher.
+enum Production {
+    AsShaped,
+    /// The producer takes `gap` on `clock` to hand on the motion behind each
+    /// stream's first segment: #983's Pi, planning a slow section after the
+    /// lowerer's rest hold was out.
+    GapAfterFirstSegments {
+        clock: Arc<host_rt::clock::MockClock>,
+        gap: Duration,
+    },
+}
+
+impl Production {
+    /// Relays `shaped` to the dispatcher as this producer would hand it on.
+    fn relay(
+        self,
+        shaped: crossbeam_channel::Receiver<motion_pipeline::TrajectoryItem>,
+    ) -> crossbeam_channel::Receiver<motion_pipeline::TrajectoryItem> {
+        let Self::GapAfterFirstSegments { clock, gap } = self else {
+            return shaped;
+        };
+        let (relay, relayed) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+        std::thread::spawn(move || {
+            let mut segments_since_rest = 0_usize;
+            for item in shaped {
+                match item {
+                    motion_pipeline::TrajectoryItem::Seg(_) => {
+                        segments_since_rest += 1;
+                        if segments_since_rest == 2 {
+                            clock.advance(gap);
+                        }
+                    }
+                    motion_pipeline::TrajectoryItem::Parked => segments_since_rest = 0,
+                    motion_pipeline::TrajectoryItem::Control(_) => {}
+                }
+                if relay.send(item).is_err() {
+                    return;
+                }
+            }
+        });
+        relayed
+    }
 }
 
 fn spawn_recorded(
@@ -111,6 +165,7 @@ fn spawn_recorded(
     mut sink: impl SegmentSink + Send + 'static,
     timeline: ExecutionTimeline,
     dispatch_record: Option<Arc<DispatchRecorder>>,
+    production: Production,
 ) -> TestWorker {
     struct NoEndpoint;
     impl crate::pump::SpanSink for NoEndpoint {
@@ -125,7 +180,8 @@ fn spawn_recorded(
         }
     }
     let (control, control_rx) = crossbeam_channel::unbounded();
-    let (output, trajectory_rx) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+    let (output, shaped) = crossbeam_channel::bounded(TRAJECTORY_CHANNEL_CAP);
+    let trajectory_rx = production.relay(shaped);
     let links = Arc::new(WorkerLinks::default());
     let mut dispatcher = Dispatcher::new(Arc::clone(&links), Arc::clone(&timeline.frontier));
     let admission = Arc::clone(&links);
@@ -262,6 +318,11 @@ impl SegmentSink for AnchoredSink {
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.anchor.lock_ok().follow_stream_to(stream_t);
     }
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
+        let host_now = self.router.lock_ok().host_now_secs();
+        let start = self.anchor.lock_ok().set_off_start(seg.t_start, host_now)?;
+        Some(Duration::from_secs_f64((start - host_now).max(0.0)))
+    }
 }
 
 #[test]
@@ -370,6 +431,9 @@ impl SegmentSink for PacedSink {
     }
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.inner.follow_stream_to(stream_t);
+    }
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
+        self.inner.set_off_in(seg)
     }
 }
 
@@ -1544,7 +1608,6 @@ fn drain_requests_refuse_a_full_channel_instead_of_blocking() {
     let intake = Arc::new(intake_gate::IntakeGate::new(
         Arc::default(),
         Arc::clone(&links),
-        0.0,
     ));
     let h = StreamWorkerHandle {
         sender,
@@ -2048,6 +2111,9 @@ impl SegmentSink for StallAfterFirstSink {
     fn follow_stream_to(&mut self, stream_t: f64) {
         self.inner.follow_stream_to(stream_t);
     }
+    fn set_off_in(&self, seg: &ContinuousSegment) -> Option<Duration> {
+        self.inner.set_off_in(seg)
+    }
 }
 
 /// Pi bench, #856: a print committed its first 0.13 s at once, anchored it
@@ -2368,6 +2434,7 @@ fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_pl
         sink.clone(),
         timeline,
         Some(Arc::clone(&record)),
+        Production::AsShaped,
     );
     let mut at = [0.0_f64, 0.0, 0.0];
     let mut line_no = 1;
@@ -2483,4 +2550,106 @@ fn assert_record_follows_the_brakes(
         }
     }
     assert!(segments > 0, "the record holds the dispatched segments");
+}
+
+const SILENT_PRODUCER_BRAKE_DEADLINE: Duration = Duration::from_secs(10);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ProducerSilence {
+    /// The producer declared the wait it stops feeding for (M109).
+    Declared,
+    /// The producer just stopped feeding.
+    Undeclared,
+}
+
+/// Streams strokes at twice realtime, then falls silent until the pacer
+/// brakes the stream to rest on its empty inbox, and returns the causes of
+/// the drains the dispatch record holds.
+fn drain_causes_after_falling_silent(silence: ProducerSilence) -> Vec<u8> {
+    let timeline = ExecutionTimeline {
+        frontier: Arc::default(),
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(real_router())),
+    };
+    let dir = crate::dispatch_record::tests::scratch_dir(&format!("silent-{silence:?}"));
+    let record = DispatchRecorder::open(&dir).unwrap();
+    let sink = PacedSink {
+        inner: AnchoredSink::on(&timeline).recording(&record),
+        realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(2.0_f64.to_bits())),
+    };
+    let mut h = spawn_recorded(
+        cfg_cap(1024),
+        AxisChainSet::default(),
+        vec![0.0; 4],
+        sink.clone(),
+        timeline,
+        Some(Arc::clone(&record)),
+        Production::AsShaped,
+    );
+    let phase = StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500));
+    let mut at = [0.0_f64, 0.0, 0.0];
+    let started = Instant::now();
+    for line_no in 1.. {
+        if started.elapsed() >= phase.streaming {
+            break;
+        }
+        let (m, end) = phase.next_move(line_no, at);
+        while let Err(e) = h.submit_move(m.clone()) {
+            assert!(matches!(e, StreamWorkerError::ChannelFull), "{e}");
+            std::thread::yield_now();
+        }
+        at = end;
+    }
+    let idle_brakes = || h.links.pacer_drains.idle.load(Ordering::SeqCst);
+    let brakes_while_feeding = idle_brakes();
+    if silence == ProducerSilence::Declared {
+        while let Err(e) = h.declare_wait() {
+            assert!(matches!(e, StreamWorkerError::ChannelFull), "{e}");
+            std::thread::yield_now();
+        }
+    }
+    let silent = Instant::now();
+    while idle_brakes() == brakes_while_feeding {
+        assert!(
+            silent.elapsed() < SILENT_PRODUCER_BRAKE_DEADLINE,
+            "the pacer never braked a stream whose producer fell silent"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.flush().unwrap();
+    h.shutdown();
+    drop(h);
+    drop(sink);
+    drop(Arc::into_inner(record).expect("every holder of the record closed"));
+    let records =
+        crate::dispatch_record::tests::decode(&crate::dispatch_record::tests::only_record(&dir));
+    std::fs::remove_dir_all(&dir).unwrap();
+    records
+        .iter()
+        .filter_map(|record| match record {
+            crate::dispatch_record::tests::Decoded::Drain { cause, .. } => Some(*cause),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_brake_behind_a_declared_wait_is_recorded_as_that_wait() {
+    let causes = drain_causes_after_falling_silent(ProducerSilence::Declared);
+    assert!(
+        causes.contains(&(DrainCause::DeclaredWait as u8))
+            && !causes.contains(&(DrainCause::PacerBrake as u8)),
+        "the producer declared its wait before falling silent, yet the brake is \
+         recorded as a producer that fell behind: drain causes {causes:?}"
+    );
+}
+
+#[test]
+fn a_brake_of_a_silent_undeclared_producer_is_a_pacer_brake() {
+    let causes = drain_causes_after_falling_silent(ProducerSilence::Undeclared);
+    assert!(
+        causes.contains(&(DrainCause::PacerBrake as u8))
+            && !causes.contains(&(DrainCause::DeclaredWait as u8)),
+        "drain causes {causes:?}"
+    );
 }

@@ -17,6 +17,9 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 use crate::leader_prefit::{LeaderGroupFits, LeaderPrefitter};
 use crate::shaper::{Shaper, SourceMaterializer};
 use crate::{BaseItem, Control, Pipeline, PlanningFront, StreamInput, TrajectoryItem};
+use compute_charge::{ChargeAccount, pay};
+
+mod compute_charge;
 
 /// Items each stage's inbox holds. Bounded so a slow shaper backpressures
 /// planning instead of buffering without limit: the pacer reads how far
@@ -61,6 +64,7 @@ pub struct StagedPipeline {
     shaper_inbox: Option<ShaperInbox>,
     prefit_thread: Option<JoinHandle<()>>,
     shaper_thread: Option<JoinHandle<ShaperExit>>,
+    charge: Option<ChargeAccount>,
 }
 
 impl Pipeline {
@@ -68,6 +72,7 @@ impl Pipeline {
         self,
         sink: impl FnMut(TrajectoryItem) -> bool + Send + 'static,
     ) -> StagedPipeline {
+        let charge_scale = compute_charge::scale_from_env();
         let Self { front, shaper } = self;
         let materializer = SourceMaterializer::of(&shaper);
         let prefitter = LeaderPrefitter::of(&shaper);
@@ -76,12 +81,12 @@ impl Pipeline {
         let prefit_thread = std::thread::Builder::new()
             .name("kalico-prefit".into())
             .stack_size(crate::worker_pool::FAN_OUT_THREAD_STACK)
-            .spawn(move || run_prefit(prefitter, &prefit_rx, &shaper_tx))
+            .spawn(move || run_prefit(prefitter, &prefit_rx, &shaper_tx, charge_scale))
             .expect("spawn prefit thread");
         let shaper_thread = std::thread::Builder::new()
             .name("kalico-shaper".into())
             .stack_size(crate::worker_pool::FAN_OUT_THREAD_STACK)
-            .spawn(move || run_shaper(shaper, &shaper_rx, sink))
+            .spawn(move || run_shaper(shaper, &shaper_rx, sink, charge_scale))
             .expect("spawn shaper thread");
         StagedPipeline {
             front,
@@ -94,6 +99,7 @@ impl Pipeline {
             }),
             prefit_thread: Some(prefit_thread),
             shaper_thread: Some(shaper_thread),
+            charge: charge_scale.map(ChargeAccount::closed),
         }
     }
 }
@@ -105,10 +111,13 @@ fn run_prefit(
     mut prefitter: LeaderPrefitter,
     rx: &Receiver<ShaperInput>,
     shaper: &Sender<ShaperInput>,
+    charge_scale: Option<f64>,
 ) {
+    let mut account = charge_scale.map(ChargeAccount::opened);
     while let Ok(input) = rx.recv() {
         if let ShaperInput::Item(item) = &input {
             let fits = prefitter.prefit(item);
+            pay(account.as_mut());
             if !fits.is_empty() && shaper.send(ShaperInput::LeaderPrefits(fits)).is_err() {
                 return;
             }
@@ -124,7 +133,13 @@ fn run_shaper(
     mut shaper: Shaper,
     rx: &Receiver<ShaperInput>,
     mut sink: impl FnMut(TrajectoryItem) -> bool,
+    charge_scale: Option<f64>,
 ) -> ShaperExit {
+    let mut account = charge_scale.map(ChargeAccount::opened);
+    let mut sink = |item| {
+        pay(account.as_mut());
+        sink(item)
+    };
     loop {
         let Ok(input) = rx.recv() else {
             return ShaperExit::PlanningHungUp;
@@ -203,6 +218,10 @@ impl StagedPipeline {
             .expect("pipeline already finished");
         let materializer = &mut self.materializer;
         let planned_through_s = &mut self.planned_through_s;
+        let mut charge = self.charge.as_mut();
+        if let Some(account) = &mut charge {
+            account.open();
+        }
         (&mut self.front, move |mut item| {
             match &item {
                 BaseItem::Seg(seg) => *planned_through_s = planned_through_s.max(seg.t_end),
@@ -210,6 +229,7 @@ impl StagedPipeline {
                 BaseItem::Drain | BaseItem::Control(_) => {}
             }
             materializer.materialize(std::slice::from_mut(&mut item));
+            pay(charge.as_deref_mut());
             inbox.send(item)
         })
     }

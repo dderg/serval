@@ -38,7 +38,7 @@ ENDPOINT_DEATH_GRACE_S = 5.0
 DURATION_TOLERANCE = 0.10
 MOTION_STILL_S = 2.0
 PACER_BRAKE = "pipe_drain"
-IDLE_BRAKE_CAUSE = "RunwayExhausted"
+DECLARED_WAIT_BRAKE_CAUSE = "DeclaredWait"
 PACER_LOG = "info,motion_core::worker::ingress=debug"
 LATTICE_TOLERANCE_STEPS = 1e-6
 POSITION_REL_TOL = 1e-6

@@ -8,7 +8,7 @@ use geometry::{
 
 use super::{
     FloorLeaders, LeaderReads, OdometerLeaves, RatioSpan, SPAN_LOOKUP_SLACK_MM, SPAN_MIN_LEN_MM,
-    ShapedLeaders, Table,
+    ShapedLeaders, Table, span_alignment_envelope,
 };
 
 #[cfg(feature = "valley-audit")]
@@ -18,7 +18,7 @@ mod jet;
 mod models;
 
 use crawl_sides::{
-    Side, SideReads, SideTrail, StepRampBudget, StepWindows, Unlaid, crawl_side, held_side,
+    Edge, Side, SideReads, SideTrail, StepRampBudget, StepWindows, Unlaid, crawl_side, held_side,
 };
 pub(super) use jet::Jet;
 use jet::{horner, horner_with_slope};
@@ -1536,6 +1536,15 @@ impl WidthField {
             .reduce(f64::max)
     }
 
+    /// The first rest at or past `s` among the candidates still to become
+    /// nodes.
+    fn pending_rest_after(&self, s: f64) -> Option<f64> {
+        self.candidates
+            .iter()
+            .filter_map(Candidate::rest)
+            .find(|&rest| rest >= s)
+    }
+
     /// Turns every candidate at or before `through` whose base is known
     /// into a node or drops it, in order, then every seam no candidate
     /// still to come takes a ramp time or a width from. Where the leaders
@@ -2297,7 +2306,13 @@ impl RatioSmoothing {
         }
         let closes_a_rest =
             self.lay_rest_valley((spans, advance_spans), leg, rule, crossing, table_end);
-        if reach > SPAN_MIN_LEN_MM && self.open_rest.is_none() && !closes_a_rest {
+        if closes_a_rest {
+            for crawl in std::mem::take(&mut self.waiting_crawls) {
+                self.lay_crawl_valley((spans, advance_spans), rule, crawl, table_end);
+            }
+        }
+        let moving_past_a_rest = self.open_rest.is_none() || self.rest_close_waits();
+        if reach > SPAN_MIN_LEN_MM && moving_past_a_rest && !closes_a_rest {
             self.lay_crawl_valley(
                 (spans, advance_spans),
                 rule,
@@ -2305,7 +2320,7 @@ impl RatioSmoothing {
                 table_end,
             );
         }
-        let crawls = if leg.rests || self.open_rest.is_some() {
+        let crawls = if leg.rests || !moving_past_a_rest {
             [None; 3]
         } else {
             leg_crawls(leaders, leg, table_end)
@@ -2336,8 +2351,10 @@ impl RatioSmoothing {
     /// infinite `table_end`, where the leaders come to rest past the table,
     /// lays it with what is laid, as does a crawl the leaders came to rest
     /// past while it waited ([`Crawl::rests_past`]). A crawl behind one
-    /// still waiting waits too: valleys are laid in path order. Leaders
-    /// that do not crawl need no valley at any ratio, so they wait for none.
+    /// still waiting waits too, and so does one behind a rest valley whose
+    /// after side waits ([`Self::rest_close_waits`]): valleys are laid in
+    /// path order. Leaders that do not crawl need no valley at any ratio,
+    /// so they wait for none.
     fn lay_crawl_valley(
         &mut self,
         tables: (&[RatioSpan], &[RatioSpan]),
@@ -2349,7 +2366,7 @@ impl RatioSmoothing {
         if !crossing.crawls() {
             return;
         }
-        if !self.waiting_crawls.is_empty() {
+        if !self.waiting_crawls.is_empty() || self.rest_close_waits() {
             self.waiting_crawls.push(crawl);
             return;
         }
@@ -2387,6 +2404,12 @@ impl RatioSmoothing {
                 });
             }
         }
+    }
+
+    /// Whether a rest valley's after side waits for the path past the rest
+    /// to be probed ([`Self::rest_after_side`]).
+    fn rest_close_waits(&self) -> bool {
+        self.open_rest.is_some_and(|open| open.closing.is_some())
     }
 
     /// Where the leaders last rested before `turn`: the floor, or the end
@@ -2799,7 +2822,10 @@ impl RatioSmoothing {
     }
 
     /// The queued segments no node, seam or valley still to come can reach
-    /// into, in order.
+    /// into, in order. The path they take is read on the span table, where
+    /// floors and valleys lie: a segment's own arc, summed from its aligned
+    /// start, ends within the span alignment envelope of the table's end
+    /// it was laid with, and an ulp past it is the same point.
     pub(super) fn take_final(&mut self, spans: &[RatioSpan]) -> Vec<PendingSegment> {
         self.refresh_clusters();
         let table_end = spans.last().map_or(self.floor, |last| last.s1);
@@ -2817,10 +2843,15 @@ impl RatioSmoothing {
             .count();
         let drained: Vec<PendingSegment> = self.backlog.drain(..ready).collect();
         if let Some(last) = drained.last() {
-            self.taken_through = self
-                .taken_through
-                .max(last.table_end)
-                .max(last.s_start + last.s_length);
+            let arc_end = last.s_start + last.s_length;
+            assert!(
+                arc_end - last.table_end <= span_alignment_envelope(last.table_end),
+                "follower projection: the segment over [{}, {arc_end}] runs past the end of the \
+                 span table it was laid on, {}",
+                last.s_start,
+                last.table_end
+            );
+            self.taken_through = self.taken_through.max(last.table_end);
         }
         self.trail.forget_before(self.floor.max(self.taken_through));
         drained
@@ -2871,7 +2902,11 @@ impl RatioSmoothing {
                     .held_from
                     .map_or(lead_from, |held| held.min(lead_from))
         });
-        let unlaid = opening.max(lead).max(waiting);
+        let behind_a_rest = self
+            .open_rest
+            .filter(|open| open.closing.is_some())
+            .map_or(0.0, |open| table_end - open.end);
+        let unlaid = opening.max(lead).max(waiting).max(behind_a_rest);
         let widened_from = self
             .valleys
             .iter()
@@ -3016,7 +3051,7 @@ impl RatioSmoothing {
     /// The path the moving windows over `[lo, hi]` average, `s ± h(s)`
     /// growing along the path.
     fn moving_reach(&self, lo: f64, hi: f64) -> (f64, f64) {
-        (lo - self.reach_back(lo), hi + self.reach_back(hi))
+        (lo - self.reach_back(lo), hi + self.reach_ahead(hi))
     }
 
     /// Which spans the smoothed table reads anywhere on `[lo, hi]`: those
@@ -3294,6 +3329,17 @@ impl RatioSmoothing {
         })
     }
 
+    /// How far ahead of `s` its window averages the table: as far as back
+    /// ([`Self::reach_back`]), but no further than `|h'| ≤ λ` lets the width
+    /// fall to a rest still to become a node: no window reads across a
+    /// rest.
+    fn reach_ahead(&self, s: f64) -> f64 {
+        let reach = self.reach_back(s);
+        self.width
+            .pending_rest_after(s)
+            .map_or(reach, |rest| reach.min(WIDTH_SLOPE_BOUND * (rest - s)))
+    }
+
     /// Drops what no window from `s` on reaches: the seams behind the
     /// farthest a cluster's own window can reach `s` from, `h(s)/(1 − λ)`
     /// back, but for the clusters holding a seam past that, kept whole,
@@ -3352,15 +3398,24 @@ impl RatioSmoothing {
             let Some(open) = self.open_rest else {
                 return false;
             };
-            let side = RestSide {
+            let side = open.closing.unwrap_or(RestSide {
                 rest: open.end,
                 seam,
                 outward: 1.0,
                 crossing,
                 spill: open.departure,
                 beyond: Crossing::over(leaders, (t_start, (t_start + CLUSTER_REACH_S).min(t_end))),
+            });
+            self.refresh_clusters();
+            let Some(after) = self.rest_after_side(side, (spans, advance_spans), rule, table_end)
+            else {
+                self.open_rest = Some(OpenRest {
+                    closing: Some(side),
+                    ..open
+                });
+                return false;
             };
-            self.close_rest(open.end, side.width(spans, rule, table_end));
+            self.close_rest(open.end, after);
             return true;
         }
         let Some(resting) = resting_stretch(leaders, leg, REST_SPEED_MM_S, table_end) else {
@@ -3410,8 +3465,62 @@ impl RatioSmoothing {
         self.open_rest = Some(OpenRest {
             end: rest_end,
             departure: Spill::over(leaders, (resting.last_t, t_end)),
+            closing: None,
         });
         false
+    }
+
+    /// How wide the after `side` of the rest valley open to `side.rest`
+    /// reaches: [`RestSide::width`], widened as a crawl side is until the
+    /// leaders' own demand and the side's rebuild of the lead fit the
+    /// follower's limit together ([`crawl_side`]); a rest valley owns no
+    /// ratio step, and the ramps of those past the rest are the leaders'
+    /// speed's to fit ([`StepRampBudget::LeftToSpeed`]). The rest side's width
+    /// alone holds only the rebuild to the limit: right after a prime the
+    /// leaders' own turning asked 17.5 kmm/s² of a 20 kmm/s² extruder and a
+    /// 0.15 mm side's rebuild 4.1 kmm/s² more. `None` while the path past
+    /// the rest is not probed far enough to decide.
+    fn rest_after_side(
+        &self,
+        side: RestSide,
+        (spans, advance_spans): (&[RatioSpan], &[RatioSpan]),
+        rule: &RatioRampRule,
+        table_end: f64,
+    ) -> Option<f64> {
+        let reach = side.width(spans, rule, table_end);
+        if reach == 0.0 {
+            return Some(reach);
+        }
+        let edge = Edge {
+            s: side.rest,
+            crossing: side.crossing,
+            floor: 0.0,
+        };
+        let reads = SideReads {
+            table: table_end,
+            trail: &self.trail,
+            unfinal_steps: &[],
+            step_ramps: StepRampBudget::LeftToSpeed,
+        };
+        let guarded = guarded_by_the_turning_guard(rule);
+        match crawl_side(
+            Side::After,
+            edge,
+            reach,
+            (self, (spans, advance_spans), reads),
+            &StepWindows::around(side.rest, side.crossing, reach, guarded),
+            rule,
+            f64::INFINITY,
+        ) {
+            Err(Unlaid::Waits | Unlaid::WaitsOnSteps) => None,
+            Ok(width) => Some(width.unwrap_or_else(|| {
+                panic!(
+                    "follower projection: no width of the after side of the rest valley at \
+                     s={} ({:?}) fits its rebuild within the follower's limit",
+                    side.rest, side.crossing
+                )
+            })),
+        }
     }
 
     /// The weight `W` the advance reads the ratio with at `s`, with its
@@ -3496,11 +3605,14 @@ impl RatioSmoothing {
 }
 
 /// A rest valley laid up to the last rest leg so far: where the leaders
-/// last rest, and the spill they leave it over.
+/// last rest, the spill they leave it over, and, once a leg that moves
+/// again reached it, the after side waiting for the path past the rest to
+/// be probed ([`RatioSmoothing::rest_after_side`]).
 #[derive(Debug, Clone, Copy)]
 struct OpenRest {
     end: f64,
     departure: Spill,
+    closing: Option<RestSide>,
 }
 
 /// The shaped spill between a raw seam and where the leaders rest beside

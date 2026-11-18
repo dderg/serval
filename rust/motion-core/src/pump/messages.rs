@@ -376,7 +376,13 @@ impl BuzzRoute {
                 sign_mask,
             } => endpoint
                 .lock_ok()
-                .arm_buzz(*axis_mask, *sign_mask, profile, start.clock)
+                .arm_buzz(
+                    *axis_mask,
+                    *sign_mask,
+                    profile,
+                    start.clock,
+                    start.clock_freq_hz,
+                )
                 .map_err(|error| {
                     format!("resonance buzz: mcu {mcu_id} pulse endpoint refused it: {error}")
                 }),

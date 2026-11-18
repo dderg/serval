@@ -116,12 +116,24 @@ impl Pacer {
     }
 
     /// The runway fell from `before_s` to as little as `lowest_s` while the
-    /// ingress planned, unable to pace. Runway the dispatcher kept extending
-    /// while planning waited on it costs nothing. True when it widened the
-    /// reserve.
-    pub(in crate::worker) fn note_step(&mut self, before_s: f64, lowest_s: f64) -> bool {
-        let dropped_s = before_s - lowest_s;
-        self.widens(|pacer| pacer.worst_blind_drop_s = pacer.worst_blind_drop_s.max(dropped_s))
+    /// ingress planned for `took`, unable to pace. Runway the dispatcher kept
+    /// extending while planning waited on it costs nothing. A step that began
+    /// with no runway planned a stream yet to set off: set off, it would have
+    /// lost the whole step, so the reserve its set-off holds covers it. The
+    /// runway the step cost when it widened the reserve.
+    pub(in crate::worker) fn note_step(
+        &mut self,
+        before_s: f64,
+        lowest_s: f64,
+        took: Duration,
+    ) -> Option<f64> {
+        let cost_s = if before_s > 0.0 {
+            before_s - lowest_s
+        } else {
+            took.as_secs_f64()
+        };
+        self.widens(|pacer| pacer.worst_blind_drop_s = pacer.worst_blind_drop_s.max(cost_s))
+            .then_some(cost_s)
     }
 
     fn widens(&mut self, measure: impl FnOnce(&mut Self)) -> bool {

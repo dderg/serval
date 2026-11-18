@@ -317,6 +317,12 @@ impl FollowerKernels {
             })
     }
 
+    /// The planned time the shaped motion across the cells `cells` reads
+    /// ([`cells_read`]).
+    pub fn cells_read(&self, cells: (i64, i64)) -> (f64, f64) {
+        cells_read(self.sample_span(), self.h, cells)
+    }
+
     /// Bounds on the leaders' kernel masses per axis, `(∫w⁺, ∫w⁻)`, each
     /// `(least, most)`.
     pub fn masses(&self, axis: usize) -> ((f64, f64), (f64, f64)) {
@@ -326,6 +332,16 @@ impl FollowerKernels {
             Leader::Unfollowed => ((0.0, 0.0), (0.0, 0.0)),
         }
     }
+}
+
+/// The planned time the shaped motion across the cells `from..=to` of a
+/// grid `h` apart reads, its samples reading the grid samples `back`
+/// before and `ahead` after them ([`FollowerKernels::sample_span`]): cell
+/// `to` ends at sample `to + 1`, and each grid sample carries the planned
+/// acceleration over the cell after it ([`GridSample::cell_accel`]).
+pub(super) fn cells_read((back, ahead): (i64, i64), h: f64, (from, to): (i64, i64)) -> (f64, f64) {
+    let last_sample = to + 1 + ahead;
+    ((from - back) as f64 * h, (last_sample + 1) as f64 * h)
 }
 
 /// The shaped motion at a grid instant: velocity, acceleration and jerk
