@@ -166,16 +166,16 @@ Run-wide checks (`SOAK_CHECKS`, evidence over the whole run window): `pacer_brak
 
 | row | slow section | before it | expected |
 |---|---|---|---|
-| crawl_s1 | 1 mm/s (`M220 S1`, F6000) | lead-in | fails until #983 |
-| crawl_s5 | 2.5 mm/s (`M220 S5`, F3000) | lead-in | fails until #983 |
-| crawl_s10 | 10 mm/s (`M220 S10`, F6000) | lead-in | fails until #983 |
-| crawl_s20 | 20 mm/s (`M220 S20`, F6000, 12 sides) | lead-in | fails until #983 |
+| crawl_s1 | 1 mm/s (`M220 S1`, F6000) | lead-in | passes (#983) |
+| crawl_s5 | 2.5 mm/s (`M220 S5`, F3000) | lead-in | passes (#983) |
+| crawl_s10 | 10 mm/s (`M220 S10`, F6000) | lead-in | passes (#983) |
+| crawl_s20 | 20 mm/s (`M220 S20`, F6000, 12 sides) | lead-in | passes (#1003) |
 | crawl_s5_rest | 2.5 mm/s | lead-in, `G4 P500` | passes |
+| mid_crawl_s5_300s | 2.5 mm/s for 300 s | 20 s of strokes | fails until #1007 |
 
-On b122baafe (suites `20261117-170051`, `-182929`):
-- crawl_s1, crawl_s5 and crawl_s10 aborted klippy within 3 s of the print start. The first anchor committed an 8.4 ms segment, and the next one came 0.56–0.83 s later (`anchor_underrun`).
-- crawl_s20 completed, but with a `RunwayExhausted` pacer brake at +81 s.
-- crawl_s5_rest completed with no brake.
+On 81a5da543 (suites `20261118-025234`, `-031629`; crawl_s5_rest from `-042528`, rerun after a capture fault, #1009): every crawl row completes with the analyzer ok and no pacer brake, except mid_crawl_s5_300s (one `BusyRunwayFalling` brake, #1007).
+- On b122baafe crawl_s1, crawl_s5 and crawl_s10 aborted klippy within 3 s of the print start (`anchor_underrun`, #983).
+- On 5ea04ef2c crawl_s20 braked at +0.36 s, before the set-off (#1003).
 
 A row's `fails_until` (suite.py) makes its failure expected, naming the issue. A marked row that passes is `XPASS` and fails the suite, so the fix PR removes the mark. The group is not part of the full suite, so it does not gate qualification.
 
