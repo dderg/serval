@@ -20,6 +20,8 @@ mod step_capacity_log;
 pub mod timing;
 mod turning_guard;
 pub mod types;
+#[cfg(feature = "valley-audit")]
+pub mod valley_audit;
 mod worker_pool;
 
 use fit_stage::{FitDriver, FitStage};

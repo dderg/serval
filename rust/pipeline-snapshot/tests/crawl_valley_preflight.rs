@@ -356,78 +356,31 @@ fn a_waiting_crawl_keeps_its_path_untaken() {
     );
 }
 
-/// #897: a corexy with a kernel-free advance limited to 6359 mm/s² and
-/// `square_corner_velocity: 0`, drawn by the print-like planner fuzz.
-const FAR_STEPS_PRINTER: &str = "[printer]
-max_velocity: 386.46480970262087
-max_accel: 51666.60727129722
-square_corner_velocity: 0
-max_z_velocity: 25
-max_z_accel: 100
-[kinematics]
-type: corexy
-axis_x: x
-axis_y: y
-axis_z: z
-a_motors: a
-b_motors: b
-z_motors: z
-[axis x]
-post_processors: shaper_x
-[axis y]
-post_processors: shaper_y
-[axis z]
-[axis e]
-follows: x, y, z
-motors: extruder
-post_processors: pa
-max_accel: 6358.545634714979
-[post_processor pa]
-type: linear_pressure_advance
-k: 0.025743938421182125
-[post_processor shaper_x]
-type: smooth_mzv
-frequency_hz: 105.76857975056504
-[post_processor shaper_y]
-type: smooth_zv
-frequency_hz: 80.640952705959
-[motor a]
-drive: stepper
-[motor b]
-drive: stepper
-[motor z]
-drive: stepper
-[motor extruder]
-drive: stepper
-[extruder]
-axis: e
-max_extrude_only_velocity: 50
-max_extrude_only_accel: 5000
-";
-
-/// #897: a reversal's crawl valley owns the ratio steps 0.9 and 2.5 mm
-/// after it, where the leaders may cross at ~206 mm/s; capped to the
-/// crawl's 0.24 mm step window their flow asked 6734 mm/s².
-const STEPS_FAR_PAST_A_REVERSAL: &str = "G90
-M83
-G1 X148.223 Y158.619 F10632
-G1 X150.159 Y151.491 E0.41688 F13620
-G1 X150.794 Y146.569 E0.23578 F11562
-G1 X155.997 Y145.112 E0.14745 F7538
-G1 X155.077 Y145.258 E0.02331 F4309
-G1 X153.500 Y145.541 E0.06676 F6878
-G1 X145.159 Y142.668 F14889
-";
+fn plans_its_draw(draw: &corpus::crawl_cascade::Draw) {
+    plans_within_the_extruder_limits(draw.name, draw.gcode, &draw.config());
+}
 
 #[test]
-fn a_crawl_valley_widens_far_owned_steps_to_fit_their_flow() {
-    let config = std::env::temp_dir().join(format!("far_steps_printer_{}.cfg", std::process::id()));
-    std::fs::write(&config, FAR_STEPS_PRINTER).expect("temp config");
-    plans_within_the_extruder_limits(
-        "steps_far_past_a_reversal",
-        STEPS_FAR_PAST_A_REVERSAL,
-        &config,
-    );
+fn steps_far_past_a_reversal_keep_the_extruder_within_its_limit() {
+    plans_its_draw(&corpus::crawl_cascade::STEPS_FAR_PAST_A_REVERSAL);
+}
+
+#[test]
+fn a_crawl_among_a_streams_steps_keeps_the_extruder_within_its_limit() {
+    plans_its_draw(&corpus::crawl_cascade::CRAWL_OWNING_THE_STREAM);
+}
+
+#[test]
+fn a_crawl_among_close_steps_plans() {
+    let draw = &corpus::crawl_cascade::CRAWL_AMONG_CLOSE_STEPS;
+    corpus::plan(draw.name, draw.gcode, &draw.config()).expect("the draw plans motion");
+}
+
+#[test]
+#[ignore = "#945: before the stream-end rest the width field narrows a step's window below \
+            the planner's rest-room cap, 2.09x the extruder's acceleration limit"]
+fn a_crawl_among_close_steps_keeps_the_extruder_within_its_limit() {
+    plans_its_draw(&corpus::crawl_cascade::CRAWL_AMONG_CLOSE_STEPS);
 }
 
 /// #895: a corexy with a kernel-free advance limited to 12492 mm/s², drawn
@@ -770,6 +723,73 @@ G1 X124.427 Y102.682 E.03391
 fn a_follower_without_an_advance_widens_crawl_valleys_over_taken_path() {
     let config = corpus::repo().join("snapshots/cases/straight_line/printer.cfg");
     corpus::plan("prime_after_a_hop", PRIME_AFTER_A_HOP, &config).expect("the print plans");
+}
+
+/// #964 case 2: lines 10955-10998 of a stock Benchy, entered by a travel
+/// from rest. On the bowden profile the crawl at s=24.13 widened its valley
+/// back over path the projection had taken.
+const BENCHY_WALLS_AFTER_A_RETRACT: &str = "G90
+G21
+M83
+SET_VELOCITY_LIMIT VELOCITY=1000
+SET_VELOCITY_LIMIT ACCEL=100000
+SET_VELOCITY_LIMIT CORNER_DEVIATION=0.02
+SET_VELOCITY_LIMIT ACCEL=15000
+G1 X153.9270 Y135.5090 Z6.4500 F30000
+G1 X153.927 Y154.496 E.8544
+G1 X155.235 Y153.884 E.06497
+G1 X155.944 Y153.506 E.03614
+G1 X156.826 Y152.99 E.04602
+G1 X157.51 Y152.549 E.03659
+G1 X158.39 Y151.923 E.04864
+G1 X158.39 Y138.077 E.6231
+G1 X158.974 Y138.519 E.03295
+G1 X159.439 Y138.898 E.02697
+G1 X160.362 Y139.716 E.05554
+G1 X161.364 Y140.718 E.06374
+G1 X162.174 Y141.632 E.05495
+G1 X162.854 Y142.497 E.04954
+G1 X162.854 Y147.84 E.24041
+G1 E-.5 F3600
+G1 X127.57 Y140.447 Z6.7 F42000
+G1 E.5 F3600
+SET_VELOCITY_LIMIT ACCEL=20000
+G1 F24000
+G1 X127.472 Y140.566 E.00601
+G1 X127.404 Y140.839 E.01096
+G1 X127.412 Y149.254 E.3278
+G1 X127.533 Y149.526 E.01158
+G1 X127.725 Y149.68 E.00957
+G1 X127.983 Y149.741 E.01036
+G1 X135.348 Y149.741 E.28687
+G1 X135.639 Y149.639 E.012
+G1 X135.827 Y149.425 E.01108
+G1 X135.89 Y149.161 E.01055
+G1 X135.887 Y140.781 E.32643
+G1 X135.781 Y140.501 E.01167
+G1 X135.542 Y140.308 E.01198
+G1 X135.31 Y140.259 E.00921
+G1 X127.983 Y140.259 E.2854
+G1 X127.725 Y140.32 E.01035
+G1 X127.618 Y140.389 E.00497
+G1 X127.57 Y140.447 E.0029
+G1 X127.878 Y140.71 F42000
+G1 F24000
+G1 X127.817 Y140.839 E.00556
+G1 X127.817 Y149.161 E.32417
+G1 X127.854 Y149.266 E.00432
+G1 X127.983 Y149.328 E.00558
+G1 X135.31 Y149.328 E.2854
+";
+
+#[test]
+fn benchy_walls_after_a_retract_keep_the_crawl_valley_off_taken_path() {
+    let config = corpus::repo().join("rust/motion-core/tests/configs/p1_bowden_ramp.cfg");
+    plans_within_the_extruder_limits(
+        "benchy_walls_after_a_retract",
+        BENCHY_WALLS_AFTER_A_RETRACT,
+        &config,
+    );
 }
 
 /// #903 (guard-limits' sweep, `syn_tiny_zigzag_0.01`): a thousand 10 µm
