@@ -20,6 +20,9 @@ head is reviewed against physics rather than against its old numbers:
 - fit tolerance: the exact-signal fit audit (`fit_tolerance` with the
   `fit-audit` feature) where the commit has it, worst position and
   acceleration over max_path_deviation / max_accel_deviation;
+- released advance: the path where an advance valley weighs the advance
+  below 1, any valley's and crawl valleys' (`released_path` with the
+  `valley-audit` feature), where the commit has it;
 - material: final E against the base and against the G-code's own total;
 - pieces: spline piece count and degree per axis;
 - non-finite values anywhere in the head output.
@@ -71,6 +74,7 @@ import slots
 
 ROOT = pending.ROOT
 AUDIT_DIR = pending.CACHE / "audit"
+RELEASED_DIR = pending.CACHE / "released"
 SEAM_WINDOW_S = 2e-3
 LIMIT_SLACK = 1e-9
 SHAPED_LIMIT_SLACK = 1e-6
@@ -82,6 +86,9 @@ REST_SPEED_MM_S = 1e-6
 AUDIT_LINE = re.compile(
     r"^(?P<case>\S+): (?P<context>\S+) axis (?P<axis>\d+): (?P<count>\d+) pieces, "
     r"worst accel (?P<accel>[\d.eE+-]+)x, worst position (?P<position>[\d.eE+-]+)x$"
+)
+RELEASED_LINE = re.compile(
+    r"^RELEASED (?P<case>\S+) any=(?P<any>[\d.eE+-]+) crawl=(?P<crawl>[\d.eE+-]+)$"
 )
 
 
@@ -425,15 +432,7 @@ def fit_audit_locked(sha: str) -> dict | None:
     )
     if probe.returncode != 0:
         return None
-    tree = pending.CACHE / "wt-audit" / pending.SCRATCH_TREE
-    tree.parent.mkdir(parents=True, exist_ok=True)
-    pending.run(["git", "worktree", "prune"])
-    if not (tree / ".git").exists():
-        shutil.rmtree(tree, ignore_errors=True)
-        pending.run(
-            ["git", "worktree", "add", "--detach", "--force", str(tree), sha]
-        )
-    pending.run(["git", "checkout", "-q", "--detach", "--force", sha], tree)
+    tree = audit_tree(sha)
     print(
         f"fit audit at {pending.short(sha)} ...",
         file=sys.stderr,
@@ -480,6 +479,94 @@ def fit_audit_locked(sha: str) -> dict | None:
             f"{result.stdout[-1500:]}{result.stderr[-1500:]}"
         )
     AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+    cached.write_text(json.dumps(rows, indent=1))
+    return rows
+
+
+def audit_tree(sha: str) -> Path:
+    tree = pending.CACHE / "wt-audit" / pending.SCRATCH_TREE
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    pending.run(["git", "worktree", "prune"])
+    if not (tree / ".git").exists():
+        shutil.rmtree(tree, ignore_errors=True)
+        pending.run(
+            ["git", "worktree", "add", "--detach", "--force", str(tree), sha]
+        )
+    pending.run(["git", "checkout", "-q", "--detach", "--force", sha], tree)
+    return tree
+
+
+def released_path(sha: str) -> dict | None:
+    cached = RELEASED_DIR / f"{sha}.json"
+    if cached.exists():
+        return json.loads(cached.read_text())
+    with (
+        slots.slot(slots.Kind.BUILD, label="released path"),
+        pending.commit_lock("audit-scratch"),
+    ):
+        return released_path_locked(sha)
+
+
+def released_path_locked(sha: str) -> dict | None:
+    cached = RELEASED_DIR / f"{sha}.json"
+    if cached.exists():
+        return json.loads(cached.read_text())
+    probe = subprocess.run(
+        [
+            "git",
+            "cat-file",
+            "-e",
+            f"{sha}:rust/pipeline-snapshot/tests/released_path.rs",
+        ],
+        cwd=ROOT,
+    )
+    if probe.returncode != 0:
+        return None
+    tree = audit_tree(sha)
+    print(
+        f"released path at {pending.short(sha)} ...",
+        file=sys.stderr,
+        flush=True,
+    )
+    result = subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--release",
+            "-p",
+            "pipeline-snapshot",
+            "--features",
+            "valley-audit",
+            "--test",
+            "released_path",
+            "--",
+            "--include-ignored",
+            "--exact",
+            "every_snapshot_case_reports_the_path_it_releases_the_advance_over",
+            "--nocapture",
+        ],
+        cwd=tree / "rust",
+        env={
+            **os.environ,
+            "CARGO_TARGET_DIR": str(pending.target_dir_for(tree, "audit")),
+        },
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ReviewError(
+            f"released path at {pending.short(sha)} failed:\n"
+            f"{result.stdout[-1500:]}{result.stderr[-1500:]}"
+        )
+    rows = {
+        match["case"]: {
+            "any": float(match["any"]),
+            "crawl": float(match["crawl"]),
+        }
+        for match in map(RELEASED_LINE.match, result.stdout.splitlines())
+        if match
+    }
+    RELEASED_DIR.mkdir(parents=True, exist_ok=True)
     cached.write_text(json.dumps(rows, indent=1))
     return rows
 
@@ -707,6 +794,11 @@ def compare(
     audits = (
         (fit_audit(base_sha), fit_audit(head_sha)) if audit else (None, None)
     )
+    released = (
+        (released_path(base_sha), released_path(head_sha))
+        if audit
+        else (None, None)
+    )
     harness = pending.snapshot_harness()
     reviews, summary = [], {"unchanged": 0, "new": [], "removed": []}
     for name in sorted(set(base_meta) | set(head_meta)):
@@ -738,16 +830,22 @@ def compare(
         ):
             summary["unchanged"] += 1
             continue
-        reviews.append(
-            review_case(
-                name,
-                base_dir,
-                head_dir,
-                (base_sha, head_sha),
-                expectation_for(name, expectations),
-                audits,
-            )
+        review = review_case(
+            name,
+            base_dir,
+            head_dir,
+            (base_sha, head_sha),
+            expectation_for(name, expectations),
+            audits,
         )
+        change = released_change(name, released)
+        if change is not None:
+            review.metrics["released_path"] = change
+            review.notes.append(
+                f"released advance {released_text(change['base'])} -> "
+                f"{released_text(change['head'])}"
+            )
+        reviews.append(review)
     if audits[1] is not None:
         snapshot_names = set(head_meta)
         extra = {}
@@ -774,7 +872,28 @@ def compare(
             if review.regressions or review.suspicions:
                 reviews.append(review)
         summary["audited_outside_snapshots"] = extra
+    names = set().union(*(rows or {} for rows in released))
+    summary["released_path"] = {
+        name: change
+        for name in sorted(names)
+        if (change := released_change(name, released))["base"] != change["head"]
+    }
     return reviews, summary
+
+
+def released_change(
+    name: str, released: tuple[dict | None, dict | None]
+) -> dict | None:
+    base, head = (None if rows is None else rows.get(name) for rows in released)
+    if base is None and head is None:
+        return None
+    return {"base": base, "head": head}
+
+
+def released_text(row: dict | None) -> str:
+    if row is None:
+        return "n/a"
+    return f"{row['any']:.4f} mm ({row['crawl']:.4f} mm by crawl valleys)"
 
 
 def headline(review: Review) -> str:
@@ -814,6 +933,13 @@ def print_table(reviews: list[Review], summary: dict) -> None:
         f"{summary['unchanged']} unchanged, {len(summary['new'])} new, "
         f"{len(summary['removed'])} removed"
     )
+    if summary.get("released_path"):
+        print("\nreleased advance, base -> head:")
+        for name, change in summary["released_path"].items():
+            print(
+                f"  {name[:51]:<52}{released_text(change['base'])} -> "
+                f"{released_text(change['head'])}"
+            )
 
 
 def main() -> int:
