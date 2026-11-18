@@ -1961,14 +1961,17 @@ cat<span class="w"> </span>.ci-logs/py.log<span class="w">                      
 to <code>.ci-logs/&lt;job&gt;.log</code> (gitignored, overwritten per job per run). Prefer
 reading that file over re-running a gate verbosely: the failure dump is capped
 at 100 lines, the file is not.</p>
-<p><code>--keep-logs</code> is a <code>tools/sim/run.sh test</code> flag (reachable through <code>ci.sh
-sim-e2e</code>). The sim's <code>--rm</code> container normally takes every world's logs with
-it; the flag puts pytest's basetemp on a host mount, leaving the whole tree in
-<code>.sim-logs/run/&lt;test-name&gt;0/world0/</code>:</p>
+<p>The sim's <code>--rm</code> container takes every world's logs with it, except a failed
+test's: <code>tools/sim/run.sh test</code> copies those to
+<code>.sim-logs/failed/&lt;run&gt;/&lt;test-nodeid&gt;/world0/</code> on every run (CI uploads them as
+the <code>sim-failed-logs-&lt;shard&gt;</code> artifact). <code>--keep-logs</code> (reachable through
+<code>ci.sh sim-e2e</code>) puts pytest's basetemp on a host mount, leaving every world,
+passing ones too, in <code>.sim-logs/run/&lt;test-name&gt;0/world0/</code>. Either tree holds:</p>
 <div class="highlight"><pre><span></span><code>logs/klippy.log            klippy&#39;s own log
 logs/klippy.stdout         tracebacks that never reached the log
 logs/h7.log, f4.log        MCU process stdout/stderr
 logs/events/host-py.jsonl  structured event store (also host-rust, &lt;mcu&gt;.jsonl)
+logs/vtime.csv             virtual vs real time
 printer.cfg                the exact config the world booted
 </code></pre></div>
 
