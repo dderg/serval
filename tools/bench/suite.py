@@ -171,16 +171,15 @@ SOAK_MATRIX = [
         analyze_timeout_s=SOAK_ANALYZE_TIMEOUT_S,
     ),
 ]
-CRAWL_ISSUE = "#983"
-CRAWL_REST_PASSES = "crawl_s5_rest"
+CRAWL_FAILS_UNTIL = {"crawl_s20": "#1003", "mid_crawl_s5_300s": "#1007"}
 CRAWL_MATRIX = [
     Row(
         spec.name,
         spec.path,
         run_wide_checks=True,
-        fails_until="" if spec.name == CRAWL_REST_PASSES else CRAWL_ISSUE,
+        fails_until=CRAWL_FAILS_UNTIL.get(spec.name, ""),
     )
-    for spec in crawl_gcode.CRAWL_PRINTS
+    for spec in (*crawl_gcode.CRAWL_PRINTS, *crawl_gcode.MID_PRINTS)
 ]
 
 
