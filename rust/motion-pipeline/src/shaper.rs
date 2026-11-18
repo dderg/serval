@@ -2288,6 +2288,7 @@ fn fit_axis_targets(
                 velocity_sign: VelocitySign::Unconstrained,
                 seam_continuity,
                 requires_hull: true,
+                segment: (plan.seeds[0], plan.seeds[plan.seeds.len() - 1]),
             },
             SpanSeeds {
                 lower: t_start,
@@ -4142,6 +4143,7 @@ fn fit_pieces_over_plan<S: TrackSignal>(
         velocity_sign: VelocitySign::Unconstrained,
         seam_continuity: fit.seam_continuity,
         requires_hull,
+        segment: (fit.t_start, fit.t_end),
     };
     let mut refinement_splits = 0;
     let mut pieces = Vec::with_capacity(plan.seeds.len());
@@ -4252,6 +4254,8 @@ struct SpanFitPolicy {
     velocity_sign: VelocitySign,
     seam_continuity: SeamContinuity,
     requires_hull: bool,
+    /// The fitted segment's ends: seams its neighbours meet it at.
+    segment: (f64, f64),
 }
 
 /// The finest jerk a rung over `[t0, t1]` resolves: the rounding a piece
@@ -5174,10 +5178,15 @@ fn floor_piece<S: TrackSignal>(
     sig: &S,
     rung: Vec<f64>,
     (t0, t1): (f64, f64),
-    fit_tol: FitTol,
+    policy: &SpanFitPolicy,
 ) -> Vec<f64> {
     let h = t1 - t0;
-    let sliver = floor_sliver(&rung, h, sig.eval_pva(0.5 * t0 + 0.5 * t1).2);
+    let carries_velocity = policy.seam_continuity != SeamContinuity::Position;
+    let seams = SegmentSeams {
+        start: carries_velocity && t0 == policy.segment.0,
+        end: carries_velocity && t1 == policy.segment.1,
+    };
+    let sliver = floor_sliver(&rung, h, sig.eval_pva(0.5 * t0 + 0.5 * t1).2, seams);
     let miss = |piece: &[f64]| {
         (0..FLOOR_ACCELERATION_PROBES)
             .map(|k| -1.0 + 2.0 * k as f64 / (FLOOR_ACCELERATION_PROBES - 1) as f64)
@@ -5188,11 +5197,21 @@ fn floor_piece<S: TrackSignal>(
             .fold(0.0, f64::max)
     };
     let rung_miss = miss(&rung);
-    if rung_miss > fit_tol.accel_mm_s2 && miss(&sliver) < rung_miss {
+    if rung_miss > policy.fit_tol.accel_mm_s2 && miss(&sliver) < rung_miss {
         sliver
     } else {
         rung
     }
+}
+
+/// Which ends of a floor span are seams of the fitted segment whose
+/// velocity the fit's continuity carries to the neighbouring segment: a
+/// floor piece keeps the signal's velocity there, or the next segment,
+/// however short, must weld the difference.
+#[derive(Clone, Copy)]
+struct SegmentSeams {
+    start: bool,
+    end: bool,
 }
 
 /// The acceleration of the monomial-in-`u` piece `mono_u` of span `h` at `u`.
@@ -5212,22 +5231,34 @@ fn acceleration_in_u(mono_u: &[f64], u: f64, h: f64) -> f64 {
 
 /// A steady-acceleration piece through `rung`'s end positions at
 /// `acceleration`: its velocity takes the signal's position rounding over
-/// the span instead of its acceleration over the span squared.
-fn floor_sliver(rung: &[f64], h: f64, acceleration: f64) -> Vec<f64> {
-    let start: f64 = rung
-        .iter()
-        .enumerate()
-        .map(|(power, coefficient)| {
-            if power % 2 == 0 {
-                *coefficient
-            } else {
-                -*coefficient
-            }
-        })
-        .sum();
-    let end: f64 = rung.iter().sum();
-    let bend = acceleration * h * h / 8.0;
-    vec![0.5 * (start + end) - bend, 0.5 * (end - start), bend]
+/// the span instead of its acceleration over the span squared. At a
+/// segment seam it keeps the rung's velocity, which is the signal's: a
+/// quadratic through both end positions and that velocity, or the cubic
+/// through both end velocities where both ends are seams.
+fn floor_sliver(rung: &[f64], h: f64, acceleration: f64, seams: SegmentSeams) -> Vec<f64> {
+    let at = |u: f64| rung.iter().rev().fold(0.0, |sum, c| sum * u + c);
+    let slope_at = |u: f64| {
+        rung.iter()
+            .enumerate()
+            .skip(1)
+            .rev()
+            .fold(0.0, |sum, (power, c)| sum * u + power as f64 * c)
+    };
+    let (start, end) = (at(-1.0), at(1.0));
+    let half_travel = 0.5 * (end - start);
+    let midpoint = 0.5 * (start + end);
+    let bend = match (seams.start, seams.end) {
+        (false, false) => acceleration * h * h / 8.0,
+        (false, true) => 0.5 * (slope_at(1.0) - half_travel),
+        (true, false) => 0.5 * (half_travel - slope_at(-1.0)),
+        (true, true) => {
+            let (d0, d1) = (slope_at(-1.0), slope_at(1.0));
+            let bend = 0.25 * (d1 - d0);
+            let jerk = 0.25 * (d0 + d1 - 2.0 * half_travel);
+            return vec![midpoint - bend, half_travel - jerk, bend, jerk];
+        }
+    };
+    vec![midpoint - bend, half_travel, bend]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5260,7 +5291,7 @@ fn refine_span_against<S: TrackSignal>(
             let mono_u = if splittable {
                 mono_u
             } else {
-                floor_piece(sig, mono_u, (t0, t1), fit_tol)
+                floor_piece(sig, mono_u, (t0, t1), policy)
             };
             #[cfg(feature = "fit-audit")]
             crate::fit_audit::check(
@@ -5322,7 +5353,7 @@ fn refine_span_against<S: TrackSignal>(
                     acceleration_budget: fit_tol.for_piece(t1 - t0).accel_mm_s2,
                 });
             }
-            let mono_u = floor_piece(sig, mono_u, (t0, t1), fit_tol);
+            let mono_u = floor_piece(sig, mono_u, (t0, t1), policy);
             #[cfg(feature = "fit-audit")]
             crate::fit_audit::check(
                 sig,
