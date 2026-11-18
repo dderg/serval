@@ -448,12 +448,19 @@ recorded on 24.04 (`-lpython3.12` link failures, fixed in ci.sh by the interpret
 moves on GitHub's schedule, not ours; move to a newer image in a PR that fixes what it breaks.
 
 
-A PR waits for the slowest check. Measured over the last ~200 PR runs
-(median job minutes): rust-fuzz 8.3 (three partitions now), sim-e2e `rest`
-8.0 (`rest-slow` split off), rust-test 5.9, sim-e2e shards 4–5 (of which
-~3.5 was each shard rebuilding the same docker image, now built once by the `sim-image` job and loaded by the shards: shard jobs 61-212 s instead of 240-480 s, total job time -47%, workflow wall ~7.7 min because the image build (240 s) is now serial before the slowest shard (`rest`, 212 s)), snapshot 3.8. Sim shards are balanced by per-file test time (probe 33 s of tests, print 37, rest-slow 52,
-rest-pinned 70, beacon 85, rest ~80 after moving `test_beacon_stream_stall` and
-`test_homing_min_dist_corexy` out) plus ~25 s to load the image. Building the engine in
+A PR waits for the slowest check. Measured over the last ~30 PR runs per workflow (11-17/18,
+median / p90 job minutes): sim-e2e `rest` 16.8 / 23.3 (max 26.4 of its 30-minute timeout),
+`fuzz-smoke` 13.0 / 13.1, rust-test 7.5 / 8.9, build 7.7 / 8.4, rust-fuzz partitions 5.2-5.9 /
+6.3-7.4, live-parity 5.2 / 6.4, throughput shards 4.3-5.4 / 4.6-6.0; every other job under 5.
+The Sim e2e workflow was ~20 min (sim-image 3.2 + `rest`). Shards are balanced by per-file
+pytest seconds from one CI run, each shard running its files sequentially, plus ~25 s per job
+to load the image: probe 70 + `test_slow_host_start` 98, print 122 + `test_bench_mesh_print`
+102, beacon 63, rest-pinned 56 + `test_session_runway` 187 + `test_crawl_start` 71, rest-slow
+79 + `test_print_interruptions` 178, fuzz-regressions 258, rest ~240 (was 876), and
+`test_fuzz_smoke` (754, one file) in three by seed: `fuzz-smoke-a` [27] 267, `fuzz-smoke-b`
+[41] + [12029] 265, `fuzz-smoke` the rest 221 (it deselects only the pinned seeds, so a new
+seed lands there). Moved files stay in shards that are required checks (`sim-e2e (probe|print|
+beacon|rest-pinned|rest-slow|rest)`). Building the engine in
 the image is ~125 s of dependency compiles and ~50 s of workspace crates on a 4-core runner
 (CI log of `Compiling` lines), but a cargo cache mount or deps-only layer would have to be
 restored or exported through the gha cache on every run, which costs about what it saves;
