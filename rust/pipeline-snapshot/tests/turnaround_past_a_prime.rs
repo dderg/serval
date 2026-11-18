@@ -20,8 +20,12 @@ G1 X155.468 Y151.692 F42000
 #[test]
 fn a_turnaround_closing_a_primes_rest_keeps_the_extruder_within_its_limits() {
     let config = corpus::repo().join("tools/bench/configs/profiles/p4_high_accel_ramp.cfg");
-    let snapshot = corpus::plan("turnaround past a prime", TURNAROUND_CLOSING_A_PRIME, &config)
-        .expect("the gcode moves");
+    let snapshot = corpus::plan(
+        "turnaround past a prime",
+        TURNAROUND_CLOSING_A_PRIME,
+        &config,
+    )
+    .expect("the gcode moves");
     let audit = corpus::extruder::extruder_audit(&snapshot, TURNAROUND_CLOSING_A_PRIME, &config)
         .expect("the config limits the extruder");
     let excesses: Vec<String> = audit.excesses.iter().map(ToString::to_string).collect();
