@@ -65,7 +65,9 @@ impl VirtualClock {
 
     pub(super) fn sleep(&self, duration: Duration) {
         let (id, woken) = self.wait_until(self.now() + duration);
-        woken.recv().expect("the driver wakes every wait it removes");
+        woken
+            .recv()
+            .expect("the driver wakes every wait it removes");
         self.forget(id);
     }
 

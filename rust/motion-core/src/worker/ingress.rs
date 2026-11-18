@@ -327,14 +327,14 @@ impl Ingress {
         let Some(lowest_s) = self.timeline.frontier.lowest_lead_secs() else {
             return;
         };
-        if let Some(cost_s) = self
-            .pacer
-            .note_step(
-                step.runway_s,
-                lowest_s,
-                self.timeline.frontier.now().saturating_duration_since(step.began),
-            )
-        {
+        if let Some(cost_s) = self.pacer.note_step(
+            step.runway_s,
+            lowest_s,
+            self.timeline
+                .frontier
+                .now()
+                .saturating_duration_since(step.began),
+        ) {
             self.report_reserve_raised(ReserveCost::PlanningStep, cost_s);
         }
     }
