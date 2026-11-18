@@ -162,3 +162,37 @@ fn a_ratio_step_a_kilometre_into_the_print_reads_no_advance_step() {
     )
     .unwrap_or_else(|error| panic!("the projection failed: {error:?}"));
 }
+
+/// The two probes of the seed the Benchy on `printer.cfg` without
+/// `shaper_y` was refused at (#1021, t = 582.10261963530729 on the
+/// minimized file, commit 81a5da543): an ulp of odometer apart past
+/// 2^14 mm, on a crawl valley side whose weight climbs 5.8e5 per mm. The
+/// read moves 1.5e-9 mm/s between them; the in-segment check allowed only
+/// the ratio times the leaders' speed residual (3.8e-12) and 1e-9 of
+/// rounding, the join check also the misalignment.
+#[test]
+fn the_benchy_seed_probes_explain_their_read_change() {
+    let before = super::ReadProbe {
+        s: 16_384.195_945_522_118_563_53,
+        read_slope: 0.766_702_981_280_104_7 * 0.252_672_397_177_862_94
+            + 0.038_814_097_549_786_424 * 579_971.277_588_857_2,
+        leader_speed: 1.839_700_841_300_515e-2,
+        ratio: 0.038_814_097_549_786_424,
+    };
+    let after = super::ReadProbe {
+        s: 16_384.195_945_522_122_201_51,
+        read_slope: 0.038_814_097_550_570_574 * 579_970.185_970_952_6,
+        leader_speed: 1.839_700_851_062_980_2e-2,
+        ratio: 0.038_814_097_550_570_574,
+    };
+    let step = super::AdvanceStep {
+        t: 582.102_619_635_307_3,
+        velocity_before: 1.804_240_804_837_163e-4,
+        velocity_after: 1.804_255_880_620_719e-4,
+        step_mm: 4.522_735_066_724_714_5e-11,
+    };
+    assert!(
+        before.explains_read_step(&after, &step),
+        "a read moving along its own slope over the ulp between the probes is no step"
+    );
+}

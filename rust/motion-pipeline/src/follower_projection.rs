@@ -1365,23 +1365,22 @@ impl SeamInput {
             * self.leader_speed.abs().max(right.leader_speed.abs())
     }
 
+    fn read_probe(&self) -> ReadProbe {
+        ReadProbe {
+            s: self.s,
+            read_slope: self.ramped.map_or(0.0, |ramped| ramped.read_slope),
+            leader_speed: self.leader_speed,
+            ratio: self.ratio,
+        }
+    }
+
     /// Whether a ratio-ramped advance's read velocity steps across the join
-    /// to `right` by no more than the odometer alignment and the leaders'
-    /// speed residual there explain: a position step the stitch carries as
-    /// it carries a kernel chain's, far under any the guard exists for.
+    /// to `right` by no more than [`ReadProbe::explains_read_step`] allows:
+    /// a position step the stitch carries as it carries a kernel chain's,
+    /// far under any the guard exists for.
     fn explains_ramped_read_step(&self, right: &Self, step: &AdvanceStep) -> bool {
-        let read_slope = |side: &Self| side.ramped.map_or(0.0, |ramped| ramped.read_slope);
-        let explained = self.misalignment(right, read_slope)
-            + self.ratio.abs().max(right.ratio.abs())
-                * (right.leader_speed - self.leader_speed).abs();
-        (step.velocity_after - step.velocity_before).abs()
-            <= explained
-                + ADVANCE_STEP_VELOCITY_ROUNDING
-                    * step
-                        .velocity_before
-                        .abs()
-                        .max(step.velocity_after.abs())
-                        .max(1.0)
+        self.read_probe()
+            .explains_read_step(&right.read_probe(), step)
     }
 
     fn hold_onset_offset(&mut self, t: f64, fitted_velocity: f64, exempt: &ExemptAccelerations) {
@@ -1423,6 +1422,43 @@ impl SeamInput {
             }
             _ => self.signal_velocity_step(right),
         }
+    }
+}
+
+/// What a ratio-ramped advance's read rests on at one side of a step: the
+/// odometer reading, the read's path slope there, the leaders' speed and
+/// the laid ratio.
+#[derive(Clone, Copy)]
+struct ReadProbe {
+    s: f64,
+    read_slope: f64,
+    leader_speed: f64,
+    ratio: f64,
+}
+
+impl ReadProbe {
+    /// Whether the read steps from `self` to `after` by no more than the two
+    /// sides explain: the read moving along its path slope over the
+    /// distance their odometer readings sit apart (a ratio crossing holds
+    /// each side to its own, an ulp apart; a join's two segments by the
+    /// span alignment), and the ratio times the leaders' speed residual
+    /// where their pieces meet, plus rounding. A join and a seed inside a
+    /// segment are held to this one definition.
+    fn explains_read_step(&self, after: &Self, step: &AdvanceStep) -> bool {
+        let misalignment = (after.s - self.s).abs()
+            * self.read_slope.abs().max(after.read_slope.abs())
+            * self.leader_speed.abs().max(after.leader_speed.abs());
+        let speed_residual = self.ratio.abs().max(after.ratio.abs())
+            * (after.leader_speed - self.leader_speed).abs();
+        (step.velocity_after - step.velocity_before).abs()
+            <= misalignment
+                + speed_residual
+                + ADVANCE_STEP_VELOCITY_ROUNDING
+                    * step
+                        .velocity_before
+                        .abs()
+                        .max(step.velocity_after.abs())
+                        .max(1.0)
     }
 }
 
@@ -3582,35 +3618,21 @@ impl<'a> FollowerSignal<'a> {
         slope * weight + ratio * weight_slope
     }
 
-    /// Whether an advance step inside the segment is no more than the
-    /// leaders' own pieces explain where they meet with a speed residual,
-    /// which the ratio scales: rounding a weld at the next join absorbs.
-    /// The probes either side of the step read the odometer up to an ulp
-    /// apart (a ratio crossing holds each to its own side), and the read
-    /// moves along its path slope over that distance as it does at a join
-    /// ([`SeamInput::misalignment`]).
+    /// Whether an advance step inside the segment is no more than its two
+    /// probes explain ([`ReadProbe::explains_read_step`]), as at a join:
+    /// rounding a weld at the next join absorbs.
     fn leader_residual_explains(&self, step: &AdvanceStep, (t_start, t_end): (f64, f64)) -> bool {
-        let (before, after) = (
-            trajectory::next_toward(step.t, t_start),
-            trajectory::next_toward(step.t, t_end),
-        );
-        let (rate_before, rate_after) = (self.shaped_speed(before), self.shaped_speed(after));
-        let (s_before, s_after) = (self.s_owned(before), self.s_owned(after));
-        let misalignment = (s_after - s_before).abs()
-            * self
-                .ramped_read_slope(s_before)
-                .abs()
-                .max(self.ramped_read_slope(s_after).abs())
-            * rate_before.abs().max(rate_after.abs());
-        (step.velocity_after - step.velocity_before).abs()
-            <= self.ratio_bounds.ratio * (rate_after - rate_before).abs()
-                + misalignment
-                + ADVANCE_STEP_VELOCITY_ROUNDING
-                    * step
-                        .velocity_before
-                        .abs()
-                        .max(step.velocity_after.abs())
-                        .max(1.0)
+        let probe = |t: f64| {
+            let s = self.s_owned(t);
+            ReadProbe {
+                s,
+                read_slope: self.ramped_read_slope(s),
+                leader_speed: self.shaped_speed(t),
+                ratio: self.ratio_and_slope(s).0,
+            }
+        };
+        probe(trajectory::next_toward(step.t, t_start))
+            .explains_read_step(&probe(trajectory::next_toward(step.t, t_end)), step)
     }
 
     /// What a ratio-ramped advance reads at `t`: the velocity `R(s)·ṡ` the
