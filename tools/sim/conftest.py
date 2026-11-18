@@ -64,7 +64,9 @@ def pytest_runtest_makereport(item, call):
 
 
 def _test_failed(item) -> bool:
-    reports = (getattr(item, f"rep_{phase}", None) for phase in ("setup", "call"))
+    reports = (
+        getattr(item, f"rep_{phase}", None) for phase in ("setup", "call")
+    )
     return any(rep is not None and rep.failed for rep in reports)
 
 
