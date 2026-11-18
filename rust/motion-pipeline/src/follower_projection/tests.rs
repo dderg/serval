@@ -1727,16 +1727,15 @@ const ALIGNED_END_SPEED_MM_S: f64 = 0.713_343_3;
 const ALIGNED_END_TAIL_MM: f64 = 1.5e-9;
 const ALIGNED_END_RATIO: f64 = 0.016_973_067_8;
 
-/// The leaders cross the boundary 2.1e-9 s before the segment ends. The
-/// segment owns the path only up to the boundary, yet the leaders still
-/// move: its signal must keep its position and velocity one motion there,
-/// so the fit closes on the velocity the next segment opens with.
-#[test]
-fn a_segment_ending_just_past_a_span_boundary_closes_on_its_signal_velocity() {
+/// The aligned-end crawl's source fit over a span table whose one
+/// boundary lies `boundary_past_start` along the segment's arc.
+fn fit_crawl_across_a_boundary(
+    boundary_past_start: impl Fn(f64) -> f64,
+) -> super::SourceProjection {
     let (t0, t1) = ALIGNED_END_SEGMENT;
     let shaped = cusp_segment(vec![100.0], vec![0.0, ALIGNED_END_SPEED_MM_S], t0, t1);
     let length = super::leader_arc_length(&shaped, &[0, 1]);
-    let boundary = ALIGNED_END_ODOMETER_START + length - ALIGNED_END_TAIL_MM;
+    let boundary = ALIGNED_END_ODOMETER_START + boundary_past_start(length);
     let mut state = FollowerState::default();
     state.push_span(boundary, ALIGNED_END_RATIO, ALIGNED_END_RATIO);
     state.push_span(1.0, ALIGNED_END_RATIO, ALIGNED_END_RATIO);
@@ -1751,20 +1750,40 @@ fn a_segment_ending_just_past_a_span_boundary_closes_on_its_signal_velocity() {
         s_length: length,
     };
     let fit_tol = crate::lowering::FitTol::absolute(1e-4, 50.0);
-    let fitted =
-        super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)))
-            .expect("a steady extrusion at a crawl fits");
-    let signal_velocity = fitted
-        .input_end
+    super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)))
+        .expect("a steady extrusion at a crawl fits")
+}
+
+fn assert_fit_meets_signal_velocity(fitted_velocity: f64, input: super::SeamInput) {
+    let signal_velocity = input
         .ramped
         .expect("a ratio-ramped seam records its advance")
         .advanced_velocity;
-    let fitted_velocity =
-        super::piece_run_end_pv(&nurbs::bezier::extract_bezier_pieces(&fitted.track)).1;
     assert!(
         (fitted_velocity - signal_velocity).abs() <= 1e-9 * signal_velocity.abs().max(1.0),
-        "the fit closes on {fitted_velocity} mm/s, its signal on {signal_velocity} mm/s"
+        "the fit meets the seam at {fitted_velocity} mm/s, its signal at {signal_velocity} mm/s"
     );
+}
+
+/// The leaders cross the boundary 2.1e-9 s before the segment ends. The
+/// segment owns the path only up to the boundary, yet the leaders still
+/// move: its signal must keep its position and velocity one motion there,
+/// so the fit closes on the velocity the next segment opens with.
+#[test]
+fn a_segment_ending_just_past_a_span_boundary_closes_on_its_signal_velocity() {
+    let fitted = fit_crawl_across_a_boundary(|length| length - ALIGNED_END_TAIL_MM);
+    let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
+    assert_fit_meets_signal_velocity(super::piece_run_end_pv(&pieces).1, fitted.input_end);
+}
+
+/// The mirror case: the path begins 1.5e-9 mm before a boundary, which
+/// the leaders cross 2.1e-9 s into the segment. The segment owns the path
+/// from its start, so nothing holds and the fit opens on its signal.
+#[test]
+fn a_segment_starting_just_before_a_span_boundary_opens_on_its_signal_velocity() {
+    let fitted = fit_crawl_across_a_boundary(|_| ALIGNED_END_TAIL_MM);
+    let pieces = nurbs::bezier::extract_bezier_pieces(&fitted.track);
+    assert_fit_meets_signal_velocity(super::piece_run_start_pv(&pieces).1, fitted.input_start);
 }
 
 const SEAM_SPLIT_S: f64 = 1e-8;
