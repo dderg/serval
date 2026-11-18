@@ -492,7 +492,7 @@ pub(super) fn crawl_side(
             let speed = crossing_speed(interval);
             let interval_accel = from.path_accel.abs().max(to.path_accel.abs());
             let (near, far) = {
-                let distances = [from, to].map(|probe| distance_of(probe));
+                let distances = [from, to].map(&distance_of);
                 (
                     distances[0].min(distances[1]),
                     distances[0].max(distances[1]),
