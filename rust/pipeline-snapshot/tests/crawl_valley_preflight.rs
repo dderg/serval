@@ -377,8 +377,6 @@ fn a_crawl_among_close_steps_plans() {
 }
 
 #[test]
-#[ignore = "#945: before the stream-end rest the width field narrows a step's window below \
-            the planner's rest-room cap, 2.09x the extruder's acceleration limit"]
 fn a_crawl_among_close_steps_keeps_the_extruder_within_its_limit() {
     plans_its_draw(&corpus::crawl_cascade::CRAWL_AMONG_CLOSE_STEPS);
 }
