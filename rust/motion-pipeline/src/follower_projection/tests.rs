@@ -1718,6 +1718,55 @@ fn a_ratio_step_within_a_floor_of_the_segment_end_moves_onto_it() {
     );
 }
 
+/// Where the soak print on `trident_ramp` died (#1000): a segment of the
+/// leaders crawling at 0.71 mm/s whose arc ends 1.5e-9 mm past a span
+/// boundary 98 m into the print, inside the span alignment envelope.
+const ALIGNED_END_ODOMETER_START: f64 = 98_282.758_550_6;
+const ALIGNED_END_SEGMENT: (f64, f64) = (1_237.608_608_738_163_4, 1_237.609_148_364_628_5);
+const ALIGNED_END_SPEED_MM_S: f64 = 0.713_343_3;
+const ALIGNED_END_TAIL_MM: f64 = 1.5e-9;
+const ALIGNED_END_RATIO: f64 = 0.016_973_067_8;
+
+/// The leaders cross the boundary 2.1e-9 s before the segment ends. The
+/// segment owns the path only up to the boundary, yet the leaders still
+/// move: its signal must keep its position and velocity one motion there,
+/// so the fit closes on the velocity the next segment opens with.
+#[test]
+fn a_segment_ending_just_past_a_span_boundary_closes_on_its_signal_velocity() {
+    let (t0, t1) = ALIGNED_END_SEGMENT;
+    let shaped = cusp_segment(vec![100.0], vec![0.0, ALIGNED_END_SPEED_MM_S], t0, t1);
+    let length = super::leader_arc_length(&shaped, &[0, 1]);
+    let boundary = ALIGNED_END_ODOMETER_START + length - ALIGNED_END_TAIL_MM;
+    let mut state = FollowerState::default();
+    state.push_span(boundary, ALIGNED_END_RATIO, ALIGNED_END_RATIO);
+    state.push_span(1.0, ALIGNED_END_RATIO, ALIGNED_END_RATIO);
+    let source = super::FollowerSource {
+        shaped: &shaped,
+        raw: &shaped,
+        axis: 3,
+        leaders: &[0, 1],
+        reads: &leader_reads(&shaped, &[0, 1]),
+        state: &state,
+        s_start: ALIGNED_END_ODOMETER_START,
+        s_length: length,
+    };
+    let fit_tol = crate::lowering::FitTol::absolute(1e-4, 50.0);
+    let fitted =
+        super::fit_source_projection(source, fit_tol, Some(ramped_advance(&RAMPED_ADVANCE_STAGE)))
+            .expect("a steady extrusion at a crawl fits");
+    let signal_velocity = fitted
+        .input_end
+        .ramped
+        .expect("a ratio-ramped seam records its advance")
+        .advanced_velocity;
+    let fitted_velocity =
+        super::piece_run_end_pv(&nurbs::bezier::extract_bezier_pieces(&fitted.track)).1;
+    assert!(
+        (fitted_velocity - signal_velocity).abs() <= 1e-9 * signal_velocity.abs().max(1.0),
+        "the fit closes on {fitted_velocity} mm/s, its signal on {signal_velocity} mm/s"
+    );
+}
+
 const SEAM_SPLIT_S: f64 = 1e-8;
 
 fn leader_with_an_acceleration_step(
