@@ -303,6 +303,7 @@ impl Motion {
                         v_a[axis] != 0.0 || v_b[axis] != 0.0 || accel[axis] != 0.0
                     }),
                     ratio: None,
+                    extrusion_ramp_mm: None,
                 }
             })
             .collect()
