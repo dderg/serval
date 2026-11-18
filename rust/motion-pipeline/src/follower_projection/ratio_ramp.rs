@@ -2304,6 +2304,7 @@ impl RatioSmoothing {
         for crawl in std::mem::take(&mut self.waiting_crawls) {
             self.lay_crawl_valley((spans, advance_spans), rule, crawl, table_end);
         }
+        let close_waited = self.rest_close_waits();
         let closes_a_rest =
             self.lay_rest_valley((spans, advance_spans), leg, rule, crossing, table_end);
         if closes_a_rest {
@@ -2312,7 +2313,8 @@ impl RatioSmoothing {
             }
         }
         let moving_past_a_rest = self.open_rest.is_none() || self.rest_close_waits();
-        if reach > SPAN_MIN_LEN_MM && moving_past_a_rest && !closes_a_rest {
+        let seam_departs_the_rest = closes_a_rest && !close_waited;
+        if reach > SPAN_MIN_LEN_MM && moving_past_a_rest && !seam_departs_the_rest {
             self.lay_crawl_valley(
                 (spans, advance_spans),
                 rule,
