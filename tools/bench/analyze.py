@@ -21,7 +21,9 @@ dispatch_record_*.bin: what the live host dispatched, segment by segment,
 with its anchoring and every drain to rest. When the pacer braked the
 stream to rest, the plan no longer describes the motion, so the record is
 the reference (reference_source "dispatch_record", reference time = host
-seconds since its first segment) and the brakes fail no_pacer_brakes. Any
+seconds since its first segment) and the brakes fail no_pacer_brakes, except
+the stop behind a wait klippy declared (M109), counted as
+declared_wait_brakes. Any
 record is also compared with the plan segment for segment: outside the
 windows a pacer brake replanned, every dispatched segment must be the
 planned one (dispatch_matches_plan_outside_brakes). The extruder is held
@@ -1090,7 +1092,8 @@ def compare_dispatch_with_plan(
         "segments": len(live),
         "planned_segments": len(plan),
         "matched_segments": matched,
-        "pacer_brakes": len(brakes),
+        "pacer_brakes": len(live.starved_brakes()),
+        "declared_wait_brakes": len(brakes) - len(live.starved_brakes()),
         "requested_drains": len(live.drains) - len(brakes),
         "brake_windows": windows,
         "max_brake_window_motion_s": max(

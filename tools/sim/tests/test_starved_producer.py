@@ -42,6 +42,15 @@ SEND_MARGIN_WARN_FLOOR_S = 0.050
 MIN_SHORT_REST_RESUMES = 5
 RECORD_SETTLE_S = 10.0
 DEFAULT_LEAD_SECS = 0.25
+DECLARED_WAIT = "DeclaredWait"
+DECLARED_WAIT_AT_LINE = 600
+DECLARED_WAIT_S = 4.0
+DECLARED_WAIT_MACRO = "HOLD_MID_PRINT"
+DECLARED_WAIT_SECTION = f"""
+[gcode_macro {DECLARED_WAIT_MACRO}]
+gcode:
+  !sleep({DECLARED_WAIT_S})
+"""
 FATAL_EVENTS = (
     "anchor_underrun",
     "anchor_low_margin",
@@ -173,6 +182,8 @@ def test_a_producer_behind_its_playhead_brakes_and_resumes_instead_of_aborting(
         f"a producer at {PRODUCER_REALTIME_FACTOR}x realtime braked only "
         f"{brakes} times"
     )
+    causes = _brake_causes(events)
+    assert DECLARED_WAIT not in causes, causes
     reserve_led_resumes = [
         event
         for event in events
@@ -185,7 +196,7 @@ def test_a_producer_behind_its_playhead_brakes_and_resumes_instead_of_aborting(
     )
 
     record = _record_holding(record_dir, brakes)
-    assert len(record.pacer_brakes()) == brakes
+    assert len(record.starved_brakes()) == brakes
     fresh = (record.flags & dispatch_record.FLAG_FRESH_EPOCH) != 0
     seams = record.host_start()[1:] - record.host_end()[:-1]
     continuous = [
@@ -197,3 +208,48 @@ def test_a_producer_behind_its_playhead_brakes_and_resumes_instead_of_aborting(
         "a segment that kept its anchor left a gap: a resume either re-anchors "
         "or continues a stream its playhead has not caught up with"
     )
+
+
+def _brake_causes(events: list[dict]) -> list[str]:
+    return [e.get("cause") for e in events if e.get("event") == "pipe_drain"]
+
+
+def test_a_wait_mid_print_brakes_as_a_declared_wait(
+    sim_world, monkeypatch, tmp_path
+):
+    """#989: klippy declares a gcode wait to the engine, so the stop on the
+    motion queued before it is logged as that wait, not as starvation."""
+    monkeypatch.setenv("RUST_LOG", "info,motion_core::worker::ingress=debug")
+    record_dir = tmp_path / "dispatch_record"
+    record_dir.mkdir()
+    monkeypatch.setenv("SERVAL_DISPATCH_RECORD_DIR", str(record_dir))
+    lines = GCODE.read_text().splitlines()
+    gcode = tmp_path / "waits_mid_print.gcode"
+    gcode.write_text(
+        "\n".join(
+            lines[:DECLARED_WAIT_AT_LINE]
+            + [DECLARED_WAIT_MACRO]
+            + lines[DECLARED_WAIT_AT_LINE:SHORT_REST_PRINT_LINES]
+            + ["M400"]
+        )
+        + "\n"
+    )
+    world = sim_world(
+        lambda w: (
+            configs.neptune_print_config(w.h7_pty, str(w.gcode_dir))
+            + DECLARED_WAIT_SECTION
+        ),
+        dual_mcu=False,
+    )
+    world.gcode_ok("SET_KINEMATIC_POSITION X=0 Y=0 Z=0", timeout=10)
+    assert world.print_file(gcode, timeout=6000) > 0
+    world.gcode_ok("M400", timeout=60)
+
+    events = _events(world)
+    names = [event.get("event") for event in events]
+    for fatal in FATAL_EVENTS:
+        assert fatal not in names, world.log_tail()[-3000:]
+    assert world.shutdown_line() is None, world.log_tail()[-3000:]
+    assert _brake_causes(events) == [DECLARED_WAIT]
+    record = _record_holding(record_dir, 1)
+    assert record.starved_brakes() == []

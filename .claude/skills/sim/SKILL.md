@@ -93,7 +93,7 @@ Checks (the failing check names the `FAIL` line):
 | `uncommanded_shutdown` | a shutdown no timeline action asked for |
 | `rest_steps` | at a rest probe (M400, mark pin, G4) a motor stands still off its commanded step lattice |
 | `pin_order` | motors moved within 0.3 s of the mark pin, inside the dwell after it: the pin was not ordered after the M400 (#893) |
-| `pacer_brake` | `pipe_drain` outside a commanded stop; one idle brake (`RunwayExhausted`) per heat wait of a print is allowed, since M109 sends no moves |
+| `pacer_brake` | `pipe_drain` outside a commanded stop; a brake with cause `DeclaredWait` (the stop behind an M109/TEMPERATURE_WAIT, which klippy declares to the engine) is allowed, `RunwayExhausted`/`BusyRunwayFalling` never |
 | `print_outcome`, `stop_state`, `recovery`, `command_result`, `estop_latency`, `idle_timeout` | the print or a user action did not end as commanded |
 | `session_repeat` | the same program printed twice in a session moved differently |
 | `reactor_stall`, `wedge`, `memory`, `stuck` | klippy's reactor late; virtual clock frozen; klippy RSS > 2 GB; worker over budget |
