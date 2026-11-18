@@ -45,10 +45,12 @@ nextest prints failures and slow tests only. Never re-run a gate verbosely to
 When you do need the detail, the complete log of every job is already on disk
 at `.ci-logs/<job>.log` — read or grep that instead of re-running. `ci.sh -v
 <job>` streams live if you really want it in the transcript. For a simulator
-post-mortem, `tools/sim/run.sh test --keep-logs` (also via `ci.sh sim-e2e
---keep-logs`) leaves each world's `klippy.log`, MCU logs, `printer.cfg` and
-`events/*.jsonl` under `.sim-logs/run/<test>/world0/`; without it the `--rm`
-container deletes them.
+post-mortem, every `tools/sim/run.sh test` (so `ci.sh sim-e2e` and CI's shards,
+which upload them as the `sim-failed-logs-<shard>` artifact) keeps each failed
+test's worlds — `klippy.log`, `klippy.stdout`, MCU logs, `events/*.jsonl`,
+`vtime.csv`, `printer.cfg` — under `.sim-logs/failed/<run>/<test>/world0/`; a
+passing test leaves nothing. `--keep-logs` keeps every world, passing ones too,
+under `.sim-logs/run/`.
 
 # Before opening or updating a PR
 

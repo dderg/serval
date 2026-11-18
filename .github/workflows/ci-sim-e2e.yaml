@@ -111,3 +111,10 @@ jobs:
         run: ./scripts/ci.sh sim-e2e
         env:
           SIM_TEST_TARGETS: ${{ matrix.targets }}
+      - name: upload failed tests' world logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-failed-logs-${{ matrix.shard }}
+          path: .sim-logs/failed/
+          if-no-files-found: ignore

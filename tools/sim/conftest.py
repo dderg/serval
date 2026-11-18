@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import itertools
+import os
 import pathlib
+import re
 import sys
+from typing import Optional
 
 import pytest
 
@@ -13,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from tools.sim.world import UNBOUNDED_VTIME_SPEED, SimWorld  # noqa: E402
 
 LONG_TEST_S = 10.0
+FAILED_LOGS_ENV = "SIM_FAILED_LOGS_DIR"
 
 
 def _expected_seconds(item) -> float:
@@ -59,6 +63,24 @@ def pytest_runtest_makereport(item, call):
     setattr(item, "rep_" + rep.when, rep)
 
 
+def _test_failed(item) -> bool:
+    reports = (getattr(item, f"rep_{phase}", None) for phase in ("setup", "call"))
+    return any(rep is not None and rep.failed for rep in reports)
+
+
+def _failed_logs_dir(nodeid: str) -> Optional[pathlib.Path]:
+    root = os.environ.get(FAILED_LOGS_ENV)
+    if not root:
+        return None
+    return pathlib.Path(root) / re.sub(r"[^\w.-]+", "_", nodeid)
+
+
+@pytest.fixture
+def fuzz_keep_dir(request, tmp_path) -> pathlib.Path:
+    """Where execute.run_scenario copies a failing scenario's world."""
+    return _failed_logs_dir(request.node.nodeid) or tmp_path / "failure"
+
+
 @pytest.fixture
 def sim_world(request, tmp_path):
     """Factory: boot a simulated printer from generated config text.
@@ -69,7 +91,8 @@ def sim_world(request, tmp_path):
 
     The config callback receives the (not yet booted) SimWorld so it can
     reference the PTY paths and gcode dir. On test failure the fixture
-    dumps klippy/MCU/event logs before shutting everything down.
+    dumps klippy/MCU/event logs before shutting everything down, then copies
+    each world's logs/ and printer.cfg under $SIM_FAILED_LOGS_DIR.
     """
     worlds: list[SimWorld] = []
 
@@ -108,8 +131,12 @@ def sim_world(request, tmp_path):
 
     yield factory
 
-    rep = getattr(request.node, "rep_call", None)
+    failed = _test_failed(request.node)
+    kept = _failed_logs_dir(request.node.nodeid) if failed else None
     for world in worlds:
-        if rep is not None and rep.failed:
+        if failed:
             world.dump_diagnostics()
         world.shutdown()
+        if kept:
+            world.save_logs(kept / world.workdir.name)
+            print(f"failed world logs kept at {kept / world.workdir.name}")
