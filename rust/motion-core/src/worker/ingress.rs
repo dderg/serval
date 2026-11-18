@@ -73,6 +73,26 @@ enum BrakeCause {
     BusyRunwayFalling,
     /// The inbox was found empty with the runway at the reserve.
     RunwayExhausted,
+    /// The inbox was found empty with the runway at the reserve after the
+    /// producer declared a wait (M109, TEMPERATURE_WAIT).
+    DeclaredWait,
+}
+
+impl BrakeCause {
+    fn drain_cause(self) -> DrainCause {
+        match self {
+            Self::BusyRunwayFalling | Self::RunwayExhausted => DrainCause::PacerBrake,
+            Self::DeclaredWait => DrainCause::DeclaredWait,
+        }
+    }
+}
+
+/// What the producer last told the ingress about its feed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Producer {
+    Feeding,
+    /// Declared a wait; no motion follows until its next move.
+    Waiting,
 }
 
 /// What a brake to rest is measured to cost, the reserve's two terms.
@@ -116,15 +136,17 @@ pub(super) struct Ingress {
     pub(super) last_line: u32,
     /// `StreamInput::Move`s fed into the pipeline since it started.
     pub(super) moves_sent: u64,
+    pub(super) producer: Producer,
     pub(super) dispatch_record: Option<Arc<DispatchRecorder>>,
     pub(super) pump: crossbeam_channel::Sender<crate::pump::PumpMsg>,
     pub(super) intake: Arc<IntakeGate>,
 }
 
 impl Ingress {
-    /// A brake the pacer orders because the producer fell behind. While
-    /// committed motion still runs ahead of the playhead, the motion that
-    /// resumes after the brake must start the whole reserve ahead of it: the
+    /// A brake the pacer orders on a stream the producer did not keep fed:
+    /// it fell behind, or declared a wait. While committed motion still runs
+    /// ahead of the playhead, the motion that resumes after the brake must
+    /// start the whole reserve ahead of it: the
     /// producer is still behind, and a resume nearer than one brake to rest
     /// could not be braked again before the playhead overran its committed
     /// end. That includes a brake that found the stream parked on a stop it
@@ -137,7 +159,7 @@ impl Ingress {
         let peak_ahead_s = self.intake.take_peak_ahead();
         let planned_from_s = self.pipeline.planned_through_s();
         let ordered = Instant::now();
-        self.drain_and_fence_as(DrainCause::PacerBrake);
+        self.drain_and_fence_as(cause.drain_cause());
         tracing::info!(
             subsystem = "motion",
             event = "pipe_drain",
@@ -214,6 +236,7 @@ impl Ingress {
             }
             match msg {
                 StreamMsg::Move(m) => {
+                    self.producer = Producer::Feeding;
                     let step = self.watch_step();
                     self.handle_move(m);
                     self.note_planning_step(step);
@@ -518,7 +541,10 @@ impl Ingress {
         }
         #[cfg(test)]
         self.links.pacer_drains.idle.fetch_add(1, Ordering::SeqCst);
-        self.pacer_brake(BrakeCause::RunwayExhausted);
+        self.pacer_brake(match self.producer {
+            Producer::Feeding => BrakeCause::RunwayExhausted,
+            Producer::Waiting => BrakeCause::DeclaredWait,
+        });
         None
     }
 
@@ -603,6 +629,9 @@ impl Ingress {
             StreamMsg::Buzz { params, notify } => {
                 let result = self.run_buzz(params);
                 let _ = notify.send(result);
+            }
+            StreamMsg::DeclaredWait => {
+                self.producer = Producer::Waiting;
             }
             StreamMsg::Shutdown => {
                 self.drain_and_fence();

@@ -37,7 +37,9 @@ FLAG_FRESH_EPOCH = 1
 FLAG_REST_AT_END = 2
 CAUSE_REQUESTED = 0
 CAUSE_PACER_BRAKE = 1
-CAUSES = (CAUSE_REQUESTED, CAUSE_PACER_BRAKE)
+CAUSE_DECLARED_WAIT = 2
+CAUSES = (CAUSE_REQUESTED, CAUSE_PACER_BRAKE, CAUSE_DECLARED_WAIT)
+PACER_CAUSES = (CAUSE_PACER_BRAKE, CAUSE_DECLARED_WAIT)
 
 
 class RecordError(RuntimeError):
@@ -52,7 +54,11 @@ class Drain:
 
     @property
     def pacer_brake(self) -> bool:
-        return self.cause == CAUSE_PACER_BRAKE
+        return self.cause in PACER_CAUSES
+
+    @property
+    def declared_wait(self) -> bool:
+        return self.cause == CAUSE_DECLARED_WAIT
 
 
 @dataclass
@@ -91,6 +97,9 @@ class DispatchRecord:
 
     def pacer_brakes(self) -> list[Drain]:
         return [d for d in self.drains if d.pacer_brake]
+
+    def starved_brakes(self) -> list[Drain]:
+        return [d for d in self.pacer_brakes() if not d.declared_wait]
 
 
 def parse(data: bytes, name: str = "dispatch record") -> DispatchRecord:

@@ -163,6 +163,7 @@ class Motion:
         printer.register_event_handler(
             "klippy:disconnect", self._handle_disconnect
         )
+        printer.register_event_handler("printer:wait_begin", self._declare_wait)
 
         def _sigterm_handler(signum, frame):
             self.printer.request_exit("exit")
@@ -175,6 +176,11 @@ class Motion:
         logging.info("Motion: _handle_disconnect called")
         self.engine.shutdown()
         logging.info("Motion: engine.shutdown() returned")
+
+    def _declare_wait(self):
+        if not self._planner_ready:
+            return
+        self._submit_paced(self.engine.declare_wait)
 
     def get_position(self):
         return list(self.commanded_pos)
