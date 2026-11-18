@@ -5425,3 +5425,6 @@ mod projection_fuzz;
 
 #[cfg(test)]
 mod valley_step_tests;
+
+#[cfg(test)]
+mod far_odometer_tests;
