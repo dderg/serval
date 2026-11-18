@@ -559,13 +559,17 @@ class Printer:
         gcode = self.lookup_object("gcode")
         counter = gcode.get_interrupt_counter()
         eventtime = self.reactor.monotonic()
-        while condition_cb(eventtime):
+        waiting = condition_cb(eventtime)
+        if waiting:
+            self.send_event("printer:wait_begin")
+        while waiting:
             if self.is_shutdown() or counter != gcode.get_interrupt_counter():
                 if error_on_cancel:
                     raise WaitInterruption("Command interrupted")
                 else:
                     return
             eventtime = self.reactor.pause(eventtime + interval)
+            waiting = condition_cb(eventtime)
 
 
 ######################################################################

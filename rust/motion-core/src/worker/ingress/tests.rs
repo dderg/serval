@@ -24,6 +24,7 @@ fn ingress(output_tx: crossbeam_channel::Sender<motion_pipeline::TrajectoryItem>
         throttle: None,
         last_line: 0,
         moves_sent: 0,
+        producer: Producer::Feeding,
         dispatch_record: None,
         pump,
         intake,
