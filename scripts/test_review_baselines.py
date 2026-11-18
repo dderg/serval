@@ -17,6 +17,22 @@ def test_an_expectation_reads_every_key():
     assert expectation.pieces == math.inf
 
 
+def test_the_released_path_reads_either_commit_and_marks_one_without_the_audit():
+    row = {"any": 2.5, "crawl": 1.25}
+    assert rb.released_change("a", (None, {"a": row})) == {
+        "base": None,
+        "head": row,
+    }
+    assert rb.released_change("b", ({"a": row}, {"a": row})) is None
+    assert rb.released_change("a", (None, None)) is None
+    assert rb.released_text(None) == "n/a"
+    assert rb.released_text(row) == "2.5000 mm (1.2500 mm by crawl valleys)"
+    assert (
+        rb.RELEASED_LINE.match("RELEASED g/c/x any=0.1 crawl=0")["case"]
+        == "g/c/x"
+    )
+
+
 def test_an_empty_expectation_allows_motion_but_no_timing_material_or_piece_blowup():
     expectation = rb.Expectation.parse("")
     assert expectation.axes == ("x", "y", "z", "e")

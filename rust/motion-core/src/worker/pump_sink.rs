@@ -3,7 +3,7 @@ use host_rt::passthrough_queue::McuHandle;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use trajectory::{
     ContinuousAxis, ContinuousSegment, MotorGroup, MotorSpan, MotorTerm, NudgeProfile,
@@ -334,7 +334,7 @@ impl Projection {
         let runway_s = t0 + t_end - host_now;
         if runway == Runway::Publish && runway_s > 0.0 {
             self.frontier
-                .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
+                .advance_to(self.frontier.now() + Duration::from_secs_f64(runway_s));
         }
         AnchorPoint {
             t0,

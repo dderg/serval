@@ -49,13 +49,15 @@ fn accel_limited(max_accel_mm_s2: f64) -> AxisChainSet {
     )
 }
 
+const LEADERS_MAX_ACCEL_MM_S2: f64 = 20_000.0;
+
 fn config() -> StreamConfig {
     let mut config = default_stream_config();
     config.fit_tol_mm = 0.005;
     config.integration_tol = 1e-7;
     config.limits = geometry::VelocityLimits::try_new(
         1000.0,
-        20_000.0,
+        LEADERS_MAX_ACCEL_MM_S2,
         geometry::CornerBudget::Shaped(0.04),
         f64::INFINITY,
     )
@@ -258,6 +260,12 @@ fn a_ratio_ramp_spans_the_path_the_leaders_cover_in_its_derived_time() {
     }
 }
 
+const SHORT_RAMPS_FOLLOWER_ACCEL_MM_S2: f64 = 700.0;
+const _: () = assert!(
+    RATIO * LEADERS_MAX_ACCEL_MM_S2 < SHORT_RAMPS_FOLLOWER_ACCEL_MM_S2,
+    "the leaders accelerating out of the start ask more of the follower than its limit"
+);
+
 #[test]
 fn ramps_on_segments_shorter_than_their_reach_stay_within_the_commanded_ratios() {
     let gcode = colinear(
@@ -271,7 +279,10 @@ fn ramps_on_segments_shorter_than_their_reach_stay_within_the_commanded_ratios()
             (20.0, 1.0),
         ],
     );
-    let track = sample(&shaped(&gcode, accel_limited(600.0)));
+    let track = sample(&shaped(
+        &gcode,
+        accel_limited(SHORT_RAMPS_FOLLOWER_ACCEL_MM_S2),
+    ));
     for index in 0..track.ve.len() {
         assert!(
             track.ve[index] >= -1e-6,
