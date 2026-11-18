@@ -259,14 +259,15 @@ impl Ingress {
         rx: &Receiver<StreamMsg>,
         limit: Option<Duration>,
     ) -> Result<StreamMsg, crossbeam_channel::RecvTimeoutError> {
-        let deadline = limit.map(|limit| Instant::now() + limit);
+        let clock = self.timeline.frontier.clock();
+        let deadline = limit.map(|limit| clock.now() + limit);
         loop {
             let reopens_in = self.intake.reopens_in();
             if reopens_in.is_none() {
                 self.links.wakeup.notify_space_freed();
             }
             let until_deadline =
-                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                deadline.map(|deadline| deadline.saturating_duration_since(clock.now()));
             let wait = match (until_deadline, reopens_in) {
                 (Some(until_deadline), Some(reopens_in)) => Some(until_deadline.min(reopens_in)),
                 (until_deadline, reopens_in) => until_deadline.or(reopens_in),
@@ -276,9 +277,9 @@ impl Ingress {
                     .recv()
                     .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected);
             };
-            match rx.recv_timeout(wait) {
+            match clock.recv_until(rx, clock.now() + wait) {
                 Err(crossbeam_channel::RecvTimeoutError::Timeout)
-                    if deadline.is_none_or(|deadline| Instant::now() < deadline) => {}
+                    if deadline.is_none_or(|deadline| clock.now() < deadline) => {}
                 received => return received,
             }
         }
@@ -290,7 +291,7 @@ impl Ingress {
         };
         let Some(stall) = stalled_set_off(
             hold,
-            Instant::now(),
+            self.timeline.frontier.now(),
             self.pipeline.planned_through_s(),
             self.last_line,
         ) else {
@@ -318,7 +319,7 @@ impl Ingress {
     fn watch_step(&self) -> PlanningStep {
         PlanningStep {
             runway_s: self.watch_runway(),
-            began: Instant::now(),
+            began: self.timeline.frontier.now(),
         }
     }
 
@@ -326,10 +327,14 @@ impl Ingress {
         let Some(lowest_s) = self.timeline.frontier.lowest_lead_secs() else {
             return;
         };
-        if let Some(cost_s) = self
-            .pacer
-            .note_step(step.runway_s, lowest_s, step.began.elapsed())
-        {
+        if let Some(cost_s) = self.pacer.note_step(
+            step.runway_s,
+            lowest_s,
+            self.timeline
+                .frontier
+                .now()
+                .saturating_duration_since(step.began),
+        ) {
             self.report_reserve_raised(ReserveCost::PlanningStep, cost_s);
         }
     }
@@ -487,7 +492,7 @@ impl Ingress {
             self.prime_start();
         }
         self.send(m.into());
-        self.pacer.note_move(Instant::now());
+        self.pacer.note_move(self.timeline.frontier.now());
     }
 
     /// The first move of a stream setting off from rest: it starts playing
@@ -530,7 +535,7 @@ impl Ingress {
     /// materialize the brake-to-rest and the drained trajectory beats the
     /// playhead to the pump.
     fn drain_or_runway(&mut self, _: InboxFoundEmpty) -> Option<Duration> {
-        let now = Instant::now();
+        let now = self.timeline.frontier.now();
         let (runway_s, at_rest) = {
             let anchor = self.timeline.anchor.lock_ok();
             (self.timeline.frontier.runway_secs(), anchor.is_parked())
@@ -683,7 +688,7 @@ impl Ingress {
             .finite_homing_admission
             .store(true, Ordering::Release);
         self.send(m.into());
-        self.pacer.note_move(Instant::now());
+        self.pacer.note_move(self.timeline.frontier.now());
         let ack = self.drain_and_fence();
         self.links
             .finite_homing_admission

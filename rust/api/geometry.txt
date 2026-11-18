@@ -517,6 +517,13 @@ pub geometry::ratio_ramp::StepCrossing::edge_speed_mm_s: f64
 pub geometry::ratio_ramp::StepCrossing::own_flow_mm_s: f64
 pub geometry::ratio_ramp::StepCrossing::rest_room_mm: f64
 pub geometry::ratio_ramp::StepCrossing::step: geometry::ratio_ramp::RatioStep
+pub struct geometry::ratio_ramp::StepRamps
+pub geometry::ratio_ramp::StepRamps::curvature: f64
+pub geometry::ratio_ramp::StepRamps::flow: f64
+pub geometry::ratio_ramp::StepRamps::slope: f64
+impl geometry::StepRamps
+pub fn geometry::StepRamps::accel(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::StepRamps::rebuild_accel(&self, f64, f64) -> f64
 pub const geometry::ratio_ramp::ADVANCE_VALLEY_SPEED_MM_S: f64
 pub const geometry::ratio_ramp::CRAWL_SIDE_WIDEST_MM: f64
 pub const geometry::ratio_ramp::RATIO_RAMP_ENVELOPE_SLOPE: f64
@@ -1489,6 +1496,13 @@ pub geometry::StepCapacity::mcus: alloc::vec::Vec<geometry::step_capacity::McuSt
 pub struct geometry::StepCapacityOverload
 pub geometry::StepCapacityOverload::demand_over_capacity: f64
 pub geometry::StepCapacityOverload::mcu_index: usize
+pub struct geometry::StepRamps
+pub geometry::StepRamps::curvature: f64
+pub geometry::StepRamps::flow: f64
+pub geometry::StepRamps::slope: f64
+impl geometry::StepRamps
+pub fn geometry::StepRamps::accel(&self, f64, f64, f64, f64) -> f64
+pub fn geometry::StepRamps::rebuild_accel(&self, f64, f64) -> f64
 pub struct geometry::SurfaceBounds
 pub geometry::SurfaceBounds::max_curvature: f64
 pub geometry::SurfaceBounds::max_gradient: f64
