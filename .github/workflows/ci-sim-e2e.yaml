@@ -38,14 +38,16 @@ jobs:
     strategy:
       fail-fast: false
       # Shards run on separate runners, balanced by measured test-file
-      # duration. The fallback "rest" shard ignores every pinned file, so
-      # new test files run there without touching this matrix.
+      # duration. The fallback "rest" shard ignores every pinned file, and
+      # "fuzz-smoke" deselects only the pinned seeds, so new test files and
+      # seeds run there without touching this matrix.
       matrix:
         include:
           - shard: probe
             targets: >-
               tools/sim/tests/test_probe.py
               tools/sim/tests/test_homing_min_dist_corexy.py
+              tools/sim/tests/test_slow_host_start.py
           - shard: print
             targets: >-
               tools/sim/tests/test_neptune_print.py
@@ -53,6 +55,7 @@ jobs:
               tools/sim/tests/test_first_extrude.py
               tools/sim/tests/test_print_pressure.py
               tools/sim/tests/test_beacon_stream_stall.py
+              tools/sim/tests/test_bench_mesh_print.py
           - shard: beacon
             targets: >-
               tools/sim/tests/test_beacon.py
@@ -63,6 +66,8 @@ jobs:
               tools/sim/tests/test_heaters_fans.py
               tools/sim/tests/test_phase_stepping.py
               tools/sim/tests/test_probe_calibrate.py
+              tools/sim/tests/test_session_runway.py
+              tools/sim/tests/test_crawl_start.py
           - shard: rest-slow
             targets: >-
               tools/sim/tests/test_clock_estimate.py
@@ -70,9 +75,20 @@ jobs:
               tools/sim/tests/test_stepper_enable_print_end.py
               tools/sim/tests/test_homing_pressed_endstop.py
               tools/sim/tests/test_homing_multi_endstop.py
+              tools/sim/tests/test_print_interruptions.py
+          - shard: fuzz-smoke-a
+            targets: >-
+              tools/sim/tests/test_fuzz_smoke.py::test_fuzz_seed[27]
+          - shard: fuzz-smoke-b
+            targets: >-
+              tools/sim/tests/test_fuzz_smoke.py::test_fuzz_seed[41]
+              tools/sim/tests/test_fuzz_smoke.py::test_fuzz_seed[12029]
           - shard: fuzz-smoke
             targets: >-
               tools/sim/tests/test_fuzz_smoke.py
+              --deselect=tools/sim/tests/test_fuzz_smoke.py::test_fuzz_seed[27]
+              --deselect=tools/sim/tests/test_fuzz_smoke.py::test_fuzz_seed[41]
+              --deselect=tools/sim/tests/test_fuzz_smoke.py::test_fuzz_seed[12029]
           - shard: fuzz-regressions
             targets: >-
               tools/sim/tests/test_fuzz_regressions.py
@@ -85,7 +101,9 @@ jobs:
               --ignore=tools/sim/tests/test_homing_pressed_endstop.py
               --ignore=tools/sim/tests/test_homing_multi_endstop.py
               --ignore=tools/sim/tests/test_homing_min_dist_corexy.py
+              --ignore=tools/sim/tests/test_slow_host_start.py
               --ignore=tools/sim/tests/test_beacon_stream_stall.py
+              --ignore=tools/sim/tests/test_bench_mesh_print.py
               --ignore=tools/sim/tests/test_probe.py
               --ignore=tools/sim/tests/test_neptune_print.py
               --ignore=tools/sim/tests/test_print.py
@@ -97,6 +115,9 @@ jobs:
               --ignore=tools/sim/tests/test_heaters_fans.py
               --ignore=tools/sim/tests/test_phase_stepping.py
               --ignore=tools/sim/tests/test_probe_calibrate.py
+              --ignore=tools/sim/tests/test_session_runway.py
+              --ignore=tools/sim/tests/test_crawl_start.py
+              --ignore=tools/sim/tests/test_print_interruptions.py
               --ignore=tools/sim/tests/test_fuzz_smoke.py
               --ignore=tools/sim/tests/test_fuzz_regressions.py
     name: sim-e2e (${{ matrix.shard }})

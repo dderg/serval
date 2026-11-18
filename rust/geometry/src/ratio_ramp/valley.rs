@@ -798,6 +798,41 @@ pub fn widest_crawl_side_within(reach: f64, limit: f64) -> Option<f64> {
     (widest > reach).then_some(widest)
 }
 
+/// The most the ramps of ratio steps a crawl valley does not own slope and
+/// bend the smoothed ratio over a stretch of its side: `|r̃′|` of the laid
+/// table, whose flow reaches the follower, and `|r̃′|`, `|r̃″|` of the table
+/// an advance reads. Inside the side the advance reads `R = W·r̃`; what the
+/// ramps add there is the one demand both the projection, sizing the side,
+/// and the turning guard, slowing the leaders through it, hold to the
+/// follower's limits.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct StepRamps {
+    pub flow: f64,
+    pub slope: f64,
+    pub curvature: f64,
+}
+
+impl StepRamps {
+    /// The follower acceleration the ramps add at weight `W` with the
+    /// leaders crossing at `ṡ` under `|s̈|`, advance slope `k`: the flow's
+    /// `r̃′·ṡ²` and the advance's `k·W·(r̃″·ṡ³ + 3r̃′·ṡ·s̈)`.
+    #[must_use]
+    pub fn accel(&self, advance_slope: f64, weight: f64, speed: f64, path_accel: f64) -> f64 {
+        self.flow * speed * speed
+            + advance_slope
+                * weight
+                * speed
+                * (self.curvature * speed * speed + 3.0 * self.slope * path_accel)
+    }
+
+    /// The path acceleration the rebuild's `3W′·ṡ·s̈` reads more where a
+    /// ramp meets it at ratio `r`: `2k·W′·r̃′·ṡ³` is `(2/3)·r̃′·ṡ²/r` more `s̈`.
+    #[must_use]
+    pub fn rebuild_accel(&self, ratio: f64, speed: f64) -> f64 {
+        2.0 / 3.0 * self.slope / ratio * speed * speed
+    }
+}
+
 /// How fast leaders fitted to within `position` of a path, their
 /// acceleration within `accel` of its, may stray from its speed:
 /// `2·√(position·accel)`, the fastest an error held within `position`
