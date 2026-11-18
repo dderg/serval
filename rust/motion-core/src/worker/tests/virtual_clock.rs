@@ -19,6 +19,12 @@ use crate::lock_ext::LockExt;
 /// How often the driver looks again while a thread runs or none waits.
 const DRIVER_POLL: Duration = Duration::from_micros(100);
 
+/// Threads whose work never feeds back into the pipeline, woken on the
+/// wall clock: on a loaded machine the dispatch record's writer, flushing
+/// every 100 ms, is always waiting for a CPU, and the clock would never
+/// move.
+const UNTIMED_THREADS: [&str; 1] = ["dispatch-record"];
+
 pub(super) struct VirtualClock {
     state: Mutex<Waits>,
 }
@@ -182,9 +188,17 @@ fn blocked_threads(driver: &str) -> Option<Vec<(String, u64)>> {
         let Ok(stat) = std::fs::read_to_string(format!("{task}/stat")) else {
             continue;
         };
-        let state = stat
-            .rsplit_once(')')
-            .and_then(|(_, fields)| fields.trim_start().chars().next())
+        let (name, fields) = stat
+            .split_once('(')
+            .and_then(|(_, rest)| rest.rsplit_once(')'))
+            .expect("a thread's stat holds its name in parentheses");
+        if UNTIMED_THREADS.contains(&name) {
+            continue;
+        }
+        let state = fields
+            .trim_start()
+            .chars()
+            .next()
             .expect("a thread's stat holds its state after the name");
         if matches!(state, 'R' | 'D') {
             return None;

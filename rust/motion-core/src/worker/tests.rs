@@ -253,15 +253,21 @@ fn virtual_timeline(clock: &Arc<VirtualClock>) -> ExecutionTimeline {
     }
 }
 
-/// How long a producer the intake refused waits before it offers the move
-/// again.
-const PARKED_RETRY: Duration = Duration::from_millis(1);
+/// How long a producer refused by a full inbox, rather than the intake's
+/// runway cap, waits before it offers the move again. Each wait is a step
+/// of the virtual clock.
+const PARKED_RETRY: Duration = Duration::from_millis(5);
 
+/// Submits `m`, waiting while the worker refuses it: until the playhead
+/// frees room under the intake's cap, or a retry later when the inbox
+/// itself is full.
 fn submit_on(clock: &VirtualClock, h: &StreamWorkerHandle, m: &geometry::Move) {
     loop {
         match h.submit_move(m.clone()) {
             Ok(()) => return,
-            Err(StreamWorkerError::ChannelFull) => clock.sleep(PARKED_RETRY),
+            Err(StreamWorkerError::ChannelFull) => {
+                clock.sleep(h.intake.reopens_in().unwrap_or(PARKED_RETRY));
+            }
             Err(e) => panic!("submit_move: {e}"),
         }
     }

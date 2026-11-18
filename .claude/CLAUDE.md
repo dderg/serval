@@ -37,6 +37,14 @@ Use `cargo nextest run -p <crate>` or `-E 'test(<name>)'` to scope down.
 Doc-tests are the one gap — `nextest` skips them, so run `cargo test --doc`
 when you touch doc examples.
 
+A test that judges pacing against the playhead (brakes, underruns, set-off)
+never runs on the wall clock: on this box, at load 50-170, its threads miss
+any real-time margin and the anchor aborts the test (#1006). The real-pipeline
+worker tests run on `worker::tests::VirtualClock`, which stands still while any
+test thread runs or waits for a CPU and jumps to the next timed wait once all
+are blocked, so a pinned core under 48 busy loops slows them down but cannot
+fail them. Costs (a slow producer, a slow dispatcher) are `clock.sleep`s.
+
 Test output is quiet by design: `ci.sh <job>` prints one `PASS <tally>` line
 off a terminal, and dumps the last 100 lines of the log when the job fails;
 nextest prints failures and slow tests only. Never re-run a gate verbosely to
