@@ -939,6 +939,45 @@ fn slow_corner_rail_ramp_survives_nurbs_round_trip() {
     );
 }
 
+/// `target_budgets_hold` seed 2503932918619177132, shrunk (#1000): every
+/// move at 1 mm/s, extrusion at the end. A follower segment's last piece
+/// sat at the fit's floor, where its end positions read the odometer's
+/// rounding: the steady-acceleration piece taken there ended 1.06e-6 mm/s
+/// off the signal's velocity, and the next segment, 63 ns long, could weld
+/// that only at 53.5 mm/s² against the 50 mm/s² budget.
+#[test]
+fn crawling_extrusion_keeps_its_follower_seams_within_the_weld_budget() {
+    let limits = FuzzLimits {
+        max_velocity: 20.0,
+        max_accel: 48_340.580_581_093_454,
+        square_corner_velocity: 0.001_907_975_220_342_983_1,
+    };
+    let crawl = |length_mm: f64, extrude_ratio: f64, z_step_mm: f64| MoveSpec {
+        turn: Turn::Continue,
+        length_mm,
+        feed_mm_s: 1.0,
+        extrude_ratio,
+        z_step_mm,
+    };
+    let moves = [
+        crawl(36.330_364_497_282_71, 0.0, 0.0),
+        crawl(30.548_505_401_299_924, 0.0, 0.0),
+        crawl(2.048_258_795_078_707, 0.0, 0.0),
+        crawl(26.034_575_485_355_44, 0.0, 0.0),
+        crawl(32.479_515_844_194_914, 0.0, 0.0),
+        crawl(1.0, 0.096_420_223_613_477_27, 0.0),
+        crawl(1.0, 0.064_724_483_096_111_06, 0.0),
+        crawl(
+            6.563_449_777_294_494,
+            0.065_437_535_411_972_38,
+            -0.082_097_234_278_603_6,
+        ),
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+    assert!(report.target_ok(), "{report}");
+}
+
 fn planar(turn: Turn, length_mm: f64, feed_mm_s: f64, extrude_ratio: f64) -> MoveSpec {
     MoveSpec {
         turn,
