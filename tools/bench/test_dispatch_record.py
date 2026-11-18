@@ -67,6 +67,18 @@ def test_segments_drains_and_nudges_parse_in_dispatch_order():
     assert record.nudges == 1
 
 
+def test_a_declared_wait_brake_is_a_pacer_brake_but_not_a_starved_one():
+    record = dispatch_record.parse(
+        header()
+        + segment(10.0, 0.0, 1e-3, samples=3)
+        + drain(dispatch_record.CAUSE_DECLARED_WAIT, 12)
+        + segment(11.5, 1e-3, 1.4e-3)
+        + drain(dispatch_record.CAUSE_PACER_BRAKE, 20)
+    )
+    assert record.pacer_brakes() == record.drains
+    assert record.starved_brakes() == record.drains[1:]
+
+
 @pytest.mark.parametrize(
     "data, problem",
     [
