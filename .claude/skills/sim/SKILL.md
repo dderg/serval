@@ -14,7 +14,7 @@ tools/sim/run.sh                    # build image (incremental) + self-test prin
 tools/sim/run.sh --gcode f.gcode    # print a slicer file on neptune_print_config (extruder, starts at X0 Y0 Z0), free-running; fails on shutdown/print error
 tools/sim/run.sh test               # full e2e pytest suite on 8 workers, 73-84 s (homing, probe, beacon, phase stepping, motor adjust)
 tools/sim/run.sh test -k probe      # subset by pytest -k expression
-tools/sim/run.sh test --keep-logs   # leave every world's logs in .sim-logs/
+tools/sim/run.sh test --keep-logs   # leave every world's logs in .sim-logs/run/ (failed tests' worlds are always kept)
 tools/sim/run.sh test --verbose     # stream the image build (hidden by default)
 tools/sim/run.sh serve              # long-lived printer for Moonraker/Mainsail
 tools/sim/run.sh shell              # bash inside the image
@@ -35,15 +35,23 @@ Planner-only check of a print without Docker: `uv run python scripts/preflight.p
 
 The container is `--rm`, so each world's `tmp_path` — `klippy.log`,
 `klippy.stdout`, the MCU `h7.log`/`f4.log`, the structured `events/*.jsonl`
-store and the generated `printer.cfg` — dies with the run. On failure the
-`sim_world` finalizer prints tails of all of them (`world.dump_diagnostics`),
-which is usually enough.
+store, `vtime.csv` and the generated `printer.cfg` — dies with the run, except
+for failed tests. On failure the `sim_world` finalizer prints tails of all of
+them (`world.dump_diagnostics`), then copies each of the test's worlds (`logs/`,
+`printer.cfg`, gcodes; `world.save_logs`) to
+`.sim-logs/failed/<run>/<test-nodeid>/world0/` (a fuzz smoke/regression seed's
+to `.sim-logs/failed/<run>/<test-nodeid>/world/`); run.sh prints the run's
+path. Every `run.sh test` does this, so an intermittent failure is
+never lost: `ci.sh sim-e2e` included, and CI's shards upload the tree as the
+`sim-failed-logs-<shard>` artifact (`python3 scripts/gh_util.py run download
+<id> -n sim-failed-logs-<shard>`). A passing run leaves nothing behind.
 
-When it is not, re-run with `--keep-logs`: pytest's basetemp moves onto a host
-mount and the whole tree survives at
-`.sim-logs/run/<test-name>0/world0/logs/`. Read the files directly — the
-`events/*.jsonl` records are the same ones `scripts/logq.py` serves from
-VictoriaLogs on a real host, so `jq` over them answers the same questions.
+`--keep-logs` keeps every world, passing ones too: pytest's basetemp moves onto
+a host mount and the whole tree survives at
+`.sim-logs/run/<test-name>0/world0/logs/`. Use it to compare a passing run with
+a failing one. Read the files directly — the `events/*.jsonl` records are the
+same ones `scripts/logq.py` serves from VictoriaLogs on a real host, so `jq`
+over them answers the same questions.
 
 Through the CI wrapper the flag forwards: `./scripts/ci.sh sim-e2e
 --keep-logs -k probe`. That gate also keeps its own full pytest output in

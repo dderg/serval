@@ -6,7 +6,8 @@
 #   ./run.sh --gcode benchy.gcode     # print a G-code file
 #   ./run.sh test                     # run the e2e pytest suite
 #   ./run.sh test -k probe            # subset of the e2e suite
-#   ./run.sh test --keep-logs         # keep every world's logs in .sim-logs/
+#   ./run.sh test --keep-logs         # keep every world's logs in .sim-logs/run/
+#                                     # (failed tests' worlds are always kept in .sim-logs/failed/)
 #   ./run.sh test --verbose           # stream the image build instead of hiding it
 #   SIM_IMAGE_ARCHIVE=f.tar.zst ./run.sh save-image   # build once, save the image
 #   SIM_IMAGE_ARCHIVE=f.tar.zst ./run.sh test         # load it instead of building
@@ -299,10 +300,15 @@ case "$MODE" in
         [[ ${#XDIST_ARGS[@]} -gt 0 ]] && XDIST_ARGS+=(--maxschedchunk=1)
         # Every SimWorld lives in a pytest tmp dir that dies with the
         # container, taking klippy.log, the MCU logs and the structured
-        # events/*.jsonl store with it. --keep-logs puts pytest's basetemp on
-        # a host mount instead, so world0/, world1/ … survive the run. pytest
+        # events/*.jsonl store with it. A failed test's worlds are copied to
+        # FAILED_LOGS (conftest.py) on every run; a passing run leaves the
+        # directory empty and it is removed. --keep-logs puts pytest's whole
+        # basetemp on a host mount instead, so every world survives. pytest
         # wipes and recreates its basetemp, which a mount point cannot be —
         # hence the subdirectory.
+        FAILED_LOGS="$REPO_ROOT/.sim-logs/failed/$(date -u +%Y%m%dT%H%M%S)-$$"
+        mkdir -p "$FAILED_LOGS"
+        DOCKER_ARGS+=(-v "$FAILED_LOGS:/sim-failed-logs" -e SIM_FAILED_LOGS_DIR=/sim-failed-logs)
         if [[ -n "$KEEP_LOGS" ]]; then
             mkdir -p "$KEEP_LOGS"
             DOCKER_ARGS+=(-v "$KEEP_LOGS:/sim-logs")
@@ -314,12 +320,21 @@ case "$MODE" in
             -m needs_elf -v -p no:cacheprovider \
             ${XDIST_ARGS[@]+"${XDIST_ARGS[@]}"} \
             ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || rc=$?
-        # The container writes as root; hand the tree back so the host user
-        # can read, grep and delete it without sudo.
-        if [[ -n "$KEEP_LOGS" && "$(id -u)" != 0 ]]; then
-            docker run --rm -v "$KEEP_LOGS:/sim-logs" --entrypoint chown \
-                "$IMAGE_TAG" -R "$(id -u):$(id -g)" /sim-logs >/dev/null 2>&1 || true
+        KEPT=(${KEEP_LOGS:+"$KEEP_LOGS"})
+        if rmdir "$FAILED_LOGS" 2>/dev/null; then
+            rmdir "$(dirname "$FAILED_LOGS")" 2>/dev/null || true
+        else
+            KEPT+=("$FAILED_LOGS")
         fi
+        # The container writes as root; hand the trees back so the host user
+        # can read, grep and delete them without sudo.
+        if [[ "$(id -u)" != 0 ]]; then
+            for kept in ${KEPT[@]+"${KEPT[@]}"}; do
+                docker run --rm -v "$kept:/kept" --entrypoint chown \
+                    "$IMAGE_TAG" -R "$(id -u):$(id -g)" /kept >/dev/null 2>&1 || true
+            done
+        fi
+        [[ -d "$FAILED_LOGS" ]] && echo "Failed tests' world logs: $FAILED_LOGS"
         report_sim_tools
         exit "$rc"
         ;;
