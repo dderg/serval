@@ -3043,7 +3043,7 @@ fn host_buzz_returns_to_base_without_advancing_retirement() {
     let mut h = harness(1024);
     let profile = buzz_profile(50_000, 50_000, 100_000, 20, 2);
     h.endpoint
-        .arm_buzz(0b001, 0, &profile, buzz_start(&h))
+        .arm_buzz(0b001, 0, &profile, buzz_start(&h), CYCLES_PER_SECOND)
         .expect("idle pulse lane accepts a buzz");
     for tick in 1..=20 {
         h.now
@@ -3073,7 +3073,7 @@ fn host_buzz_anchors_to_the_sampled_position_not_quantized_steps() {
     assert_eq!(h.endpoint.shim.queued_spans(), 0);
     let profile = buzz_profile(70_000, 230_000, 23_500, 6, 1);
     h.endpoint
-        .arm_buzz(0b001, 0, &profile, buzz_start(&h))
+        .arm_buzz(0b001, 0, &profile, buzz_start(&h), CYCLES_PER_SECOND)
         .expect("idle lane accepts the chirp");
     let signal = h.endpoint.buzz.as_ref().expect("armed buzz").signals[0]
         .as_ref()
@@ -3098,7 +3098,7 @@ fn host_buzz_rejects_a_lane_with_queued_trajectory() {
     let profile = buzz_profile(50_000, 50_000, 100_000, 20, 2);
     let error = h
         .endpoint
-        .arm_buzz(0b001, 0, &profile, buzz_start(&h))
+        .arm_buzz(0b001, 0, &profile, buzz_start(&h), CYCLES_PER_SECOND)
         .expect_err("queued trajectory must reject a buzz");
     assert!(error.to_string().contains("trajectory remains queued"));
 }
@@ -3157,6 +3157,7 @@ fn a_host_buzz_grazing_the_lattice_closes_on_its_base_at_every_clock_phase() {
                     sign_mask,
                     &profile,
                     buzz_start(&h) + u64::from(phase),
+                    CYCLES_PER_SECOND,
                 )
                 .expect("idle pulse lane accepts a buzz");
             for tick in 1..=60 {
@@ -3263,7 +3264,7 @@ fn a_buzz_after_a_move_resting_on_a_lattice_level_closes_on_that_level() {
             "{context}: the move rests a step short of its level"
         );
         h.endpoint
-            .arm_buzz(0b001, 0, &profile, buzz_start(&h))
+            .arm_buzz(0b001, 0, &profile, buzz_start(&h), CYCLES_PER_SECOND)
             .expect("idle pulse lane accepts a buzz");
         for tick in 1..=60 {
             h.now.store(
@@ -3871,5 +3872,67 @@ fn the_wire_probe_leaves_ahead_of_the_burst_stamped_at_its_own_send() {
         stamped.map(|c| c as u32),
         Some(*clock_at_send as u32),
         "the probe carries the mcu clock read as it was sent"
+    );
+}
+
+/// An internal RC oscillator runs up to 1 % off the CLOCK_FREQ the endpoint
+/// is built on.
+const RC_OSCILLATOR_OFFSET: f64 = 0.01;
+const BUZZ_TICKS_CAP: u64 = 100;
+
+#[test]
+fn no_span_is_clocked_on_the_build_rate_without_its_epoch_cut() {
+    let epoch_freq = CYCLES_PER_SECOND * (1.0 + RC_OSCILLATOR_OFFSET);
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    let err = h
+        .endpoint
+        .send_frames(MCU_ID, &[axis_frame(epoch_ramp(2_000, 4, epoch_freq))])
+        .and_then(|()| h.endpoint.tick())
+        .expect_err("views on the converged epoch slope need the cut that adopts it");
+    assert!(
+        format!("{err:?}").contains("SpanFrequencyMismatch"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn the_first_epoch_cut_moves_the_build_rate_onto_the_epoch_slope() {
+    let epoch_freq = CYCLES_PER_SECOND * (1.0 + RC_OSCILLATOR_OFFSET);
+    let mut h = harness(1024);
+    h.now.store(1_000, Ordering::Relaxed);
+    h.endpoint.mark_reanchor(0, 2_000, Some(epoch_freq));
+    h.endpoint
+        .send_frames(MCU_ID, &[axis_frame(epoch_ramp(2_000, 4, epoch_freq))])
+        .and_then(|()| h.endpoint.tick())
+        .unwrap();
+    assert_eq!(h.endpoint.shim.motor_cycles_per_second(0), epoch_freq);
+}
+
+#[test]
+fn a_buzz_is_clocked_on_its_anchor_rate_and_leaves_the_epoch_slope() {
+    let live_freq = CYCLES_PER_SECOND * (1.0 + RC_OSCILLATOR_OFFSET);
+    let mut h = harness(1024);
+    let profile = buzz_profile(50_000, 50_000, 100_000, 20, 2);
+    h.endpoint
+        .arm_buzz(0b001, 0, &profile, buzz_start(&h), live_freq)
+        .expect("idle pulse lane accepts a buzz");
+    assert_eq!(
+        h.endpoint.buzz.as_ref().map(|buzz| buzz.cycles_per_second),
+        Some(live_freq),
+        "a buzz before any motion must not be spaced on the build rate"
+    );
+    for tick in 1..=BUZZ_TICKS_CAP {
+        if h.endpoint.buzz.is_none() {
+            break;
+        }
+        h.now
+            .store(tick * (CYCLES_PER_SECOND as u64 / 100), Ordering::Relaxed);
+        h.endpoint.tick().expect("buzz tick");
+    }
+    assert!(h.endpoint.buzz.is_none());
+    assert_eq!(
+        h.endpoint.shim.motor_cycles_per_second(0),
+        CYCLES_PER_SECOND
     );
 }
