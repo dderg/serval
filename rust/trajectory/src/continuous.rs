@@ -420,11 +420,14 @@ impl AnalyticMoveSpan {
         Some(self.surface_switches(surface, spatial, &estimates))
     }
 
-    /// Each estimate moved onto the first instant the evaluator reads another
-    /// surface piece than at the midpoint before it, searched up to the
-    /// midpoint after it — midpoints to the neighbouring estimates or to the
-    /// span's ends, where a path starting or ending on a mesh line switches
-    /// patch without crossing it; kept where the piece does not change there.
+    /// Each estimate moved onto every instant the evaluator reads another
+    /// surface piece than just before it, searched from the midpoint before
+    /// it up to the midpoint after it — midpoints to the neighbouring
+    /// estimates or to the span's ends, where a path starting or ending on a
+    /// mesh line switches patch without crossing it; kept where the piece
+    /// does not change there. A path through a mesh corner crosses both of
+    /// its lines at one estimate, and the evaluator, locating each axis on
+    /// its own, reads a third piece between the two crossings.
     fn surface_switches(
         &self,
         surface: &SurfaceTransform,
@@ -444,8 +447,13 @@ impl AnalyticMoveSpan {
         estimates
             .iter()
             .zip(brackets.windows(2))
-            .map(|(&estimate, bracket)| {
-                first_switch(&piece_at, bracket[0], bracket[1]).unwrap_or(estimate)
+            .flat_map(|(&estimate, bracket)| {
+                let switches = switches_within(&piece_at, bracket[0], bracket[1]);
+                if switches.is_empty() {
+                    vec![estimate]
+                } else {
+                    switches
+                }
             })
             .collect()
     }
@@ -1456,6 +1464,18 @@ impl SurfacePiece {
             past_fade_end: z >= fade_end,
         }
     }
+}
+
+/// Every time in `(before, after]` the piece differs from the one just
+/// before it, up to the first that reads the piece at `after`.
+fn switches_within<P: PartialEq>(piece_at: impl Fn(f64) -> P, before: f64, after: f64) -> Vec<f64> {
+    let mut switches = Vec::new();
+    let mut from = before;
+    while let Some(switch) = first_switch(&piece_at, from, after) {
+        switches.push(switch);
+        from = switch;
+    }
+    switches
 }
 
 /// The first time in `(before, after]` whose piece differs from the one at
