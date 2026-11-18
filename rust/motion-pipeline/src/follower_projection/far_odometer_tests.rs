@@ -131,8 +131,7 @@ fn step_after_a_long_travel() -> Vec<ContinuousSegment> {
         .collect()
 }
 
-#[test]
-fn a_ratio_step_a_kilometre_into_the_print_reads_no_advance_step() {
+fn project(track: &[ContinuousSegment]) -> Vec<ContinuousSegment> {
     let follower = CompiledChain::compile(&[trajectory::PostProcessorInstance::new(
         "pa",
         &trajectory::algos::LinearPressureAdvance,
@@ -148,13 +147,12 @@ fn a_ratio_step_a_kilometre_into_the_print_reads_no_advance_step() {
         ],
         followers: vec![(E_AXIS, vec![0, 1, 2])],
     };
-    let track = step_after_a_long_travel();
     let pool = WorkerPool::new();
-    let mut committed = track.clone();
+    let mut committed = track.to_vec();
     project_followers(
         ProjectionWindow {
-            base: &track,
-            frontier: &track,
+            base: track,
+            frontier: track,
             chains: &chains,
             fit_tol: FIT_TOL,
             lookahead: Lookahead::Forced,
@@ -165,6 +163,92 @@ fn a_ratio_step_a_kilometre_into_the_print_reads_no_advance_step() {
         &mut ProjectionTiming::default(),
     )
     .unwrap_or_else(|error| panic!("the projection failed: {error:?}"));
+    committed
+}
+
+#[test]
+fn a_ratio_step_a_kilometre_into_the_print_reads_no_advance_step() {
+    project(&step_after_a_long_travel());
+}
+
+const OUT_AND_BACK_S: f64 = 1.0;
+const PRINT_PATH_OFFSET_MM: f64 = 1e5;
+const PRINT_SPEED_MM_S: f64 = 20.0;
+
+/// A travel out along `y` and back to where it left, `path_mm` long in
+/// all and always as long in time, then an extrusion that speeds up,
+/// steps its ratio, crawls and stops. Only the odometer reading at the
+/// extrusion depends on `path_mm`.
+fn extrusion_after_an_out_and_back(path_mm: f64) -> Vec<ContinuousSegment> {
+    let half = 0.5 * path_mm;
+    let (rise, cruise, crawl, stop) = (0.05, 0.1, 0.05, 0.15);
+    let legs = [
+        (quintic([0.0, 0.0, 0.0], [half, 0.0, 0.0], OUT_AND_BACK_S), OUT_AND_BACK_S, 0.0),
+        (quintic([0.0, 0.0, 0.0], [-half, 0.0, 0.0], OUT_AND_BACK_S), OUT_AND_BACK_S, 0.0),
+        (
+            quintic([0.0, 0.0, 0.0], [0.5 * PRINT_SPEED_MM_S * rise, PRINT_SPEED_MM_S, 0.0], rise),
+            rise,
+            0.04,
+        ),
+        (vec![0.0, PRINT_SPEED_MM_S], cruise, 0.06),
+        (
+            quintic(
+                [0.0, PRINT_SPEED_MM_S, 0.0],
+                [0.5 * (PRINT_SPEED_MM_S + CRAWL_MM_S) * crawl, CRAWL_MM_S, 0.0],
+                crawl,
+            ),
+            crawl,
+            0.06,
+        ),
+        (
+            quintic([0.0, CRAWL_MM_S, 0.0], [0.5 * CRAWL_MM_S * stop, 0.0, 0.0], stop),
+            stop,
+            0.06,
+        ),
+    ];
+    let (mut t, mut y, mut e) = (0.0, 100.0, 0.0);
+    legs.into_iter()
+        .map(|(moved, duration, ratio)| {
+            let segment = leg(&moved, (t, t + duration), ratio, (y, e));
+            let travel = end_of(&moved, duration) - moved[0];
+            (t, y, e) = (t + duration, y + travel, e + ratio * travel);
+            segment
+        })
+        .collect()
+}
+
+/// How far a print has run must not change what it extrudes next: the
+/// same extrusion after a 2 mm and after a 100 m out-and-back travel lays
+/// the same extruder track, sample for sample.
+#[test]
+fn the_extruder_track_does_not_depend_on_how_far_the_print_has_run() {
+    let near = project(&extrusion_after_an_out_and_back(2.0));
+    let far = project(&extrusion_after_an_out_and_back(PRINT_PATH_OFFSET_MM));
+    let samples = 64;
+    let mut worst = (0.0_f64, 0.0_f64, 0.0);
+    for (near, far) in near.iter().zip(&far).skip(2) {
+        for k in 0..=samples {
+            let t = near.t_start + (near.t_end - near.t_start) * f64::from(k) / f64::from(samples);
+            let pva = |segment: &ContinuousSegment| {
+                segment.axes[E_AXIS]
+                    .eval_pva(t)
+                    .unwrap_or_else(|error| panic!("extruder at t={t}: {error:?}"))
+            };
+            let (a, b) = (pva(near), pva(far));
+            worst.0 = worst.0.max((a.position - b.position).abs());
+            worst.1 = worst.1.max((a.velocity - b.velocity).abs());
+            if (a.velocity - b.velocity).abs() == worst.1 {
+                worst.2 = t;
+            }
+        }
+    }
+    assert!(
+        worst.0 == 0.0 && worst.1 == 0.0,
+        "100 m into the print the extruder track moves by up to {} mm and {} mm/s (t={})",
+        worst.0,
+        worst.1,
+        worst.2
+    );
 }
 
 /// The two probes of the seed the Benchy on `printer.cfg` without
