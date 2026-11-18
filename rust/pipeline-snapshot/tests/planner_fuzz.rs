@@ -1301,7 +1301,7 @@ fn a_crawl_waiting_on_a_step_keeps_its_before_side_on_untaken_path() {
             ratio_jitter: Some(0.0),
         },
         PrintMove::Line {
-            turn: 3.141592653589793,
+            turn: std::f64::consts::PI,
             length_mm: 1.0,
             feed_mm_s: 20.0,
             ratio_jitter: Some(0.0),
@@ -1420,7 +1420,7 @@ fn step_ramps_inside_a_lead_held_crawl_side_fit_the_extruder() {
             ratio_jitter: Some(0.0),
         },
         PrintMove::Line {
-            turn: 3.141592653589793,
+            turn: std::f64::consts::PI,
             length_mm: 1.0,
             feed_mm_s: 20.0,
             ratio_jitter: Some(0.0),
