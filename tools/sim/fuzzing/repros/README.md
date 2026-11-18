@@ -15,5 +15,3 @@ tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-* --repeat 3
 | issue | replay | expected failure |
 |---|---|---|
 | #897 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-897` | panic `crawl_sides.rs:568` assert_flow_fits "the ratio steps ... ask N mm/s² of the follower's flow" |
-
-| #997 | `tools/sim/run.sh fuzz --replay tools/sim/fuzzing/repros/issue-997` | panic `shaper.rs:1103` "axis 2 (materialize_source): the signal's velocity changes by ..." on a travel through the mesh corner (280, 280) |

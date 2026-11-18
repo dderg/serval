@@ -2883,3 +2883,46 @@ fn a_surface_seam_in_the_rounding_gap_between_two_phases_is_located() {
 
     assert_one_seam_where_the_warped_z_steps(&span);
 }
+
+#[test]
+fn every_warped_z_step_through_a_mesh_corner_lies_on_a_seam() {
+    let corner = 290.0;
+    let (from, to) = ([corner - 1.0, corner + 1.0], [corner + 1.0, corner - 1.0]);
+    let line = Segment::Line(Line::try_new([from[0], from[1], 1.3], [to[0], to[1], 1.3]).unwrap());
+    let speed = 768.0;
+    let dt = line.s_len() / speed;
+    let span = AnalyticMoveSpan::try_new(
+        move_with(line, vec![]),
+        Arc::from([LawSegment::new(
+            0.0,
+            dt,
+            0.0,
+            speed,
+            ScalarLaw::ConstAccel { a0: 0.0 },
+        )]),
+        0.0,
+        0.0,
+        dt,
+        Arc::from([from[0], from[1], 1.3, 0.0]),
+        SurfaceMode::Variable(steep_mesh()),
+    )
+    .unwrap();
+    let z_velocity = |t: f64| span.eval_axis(2, t).unwrap().velocity;
+
+    let seams = span
+        .surface_seam_times()
+        .expect("the corner crossing is located");
+    let (Some(&first), Some(&last)) = (seams.first(), seams.last()) else {
+        panic!("the path crosses the mesh corner but got no seam");
+    };
+    let across: f64 = seams
+        .iter()
+        .map(|&seam| z_velocity(seam) - z_velocity(next_toward(seam, f64::NEG_INFINITY)))
+        .sum();
+    let around = z_velocity(last + 1e-6) - z_velocity(first - 1e-6);
+    assert!(
+        around.abs() > 0.5 && (across - around).abs() < 1e-3,
+        "the warped Z steps {around} mm/s through the corner but {across} mm/s across the seams \
+         {seams:?}"
+    );
+}
