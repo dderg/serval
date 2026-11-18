@@ -12,6 +12,7 @@ use motion_pipeline::{Pipeline, StreamConfig, TrajectoryItem};
 mod dispatch;
 mod ingress;
 mod intake_gate;
+mod playhead_clock;
 mod producer_throttle;
 mod pump_sink;
 
@@ -20,14 +21,31 @@ pub use producer_throttle::PRODUCER_THROTTLE_ENV;
 use crate::dispatch_record::DispatchRecorder;
 pub use dispatch::DispatchError;
 use dispatch::{Dispatcher, WorkerLinks};
+use playhead_clock::{PlayheadClock, WallClock};
 use pump_sink::{Projection, PumpSink};
 
 /// The execution owner's committed host-monotonic frontier, observed by the planning pacer.
-#[derive(Debug, Default)]
 pub struct CommittedFrontier {
     deadline: Mutex<Option<Instant>>,
     watch: Mutex<LeadWatch>,
     unexecuted: bool,
+    clock: Arc<dyn PlayheadClock>,
+}
+
+impl Default for CommittedFrontier {
+    fn default() -> Self {
+        Self::on_clock(Arc::new(WallClock))
+    }
+}
+
+impl std::fmt::Debug for CommittedFrontier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommittedFrontier")
+            .field("deadline", &self.deadline)
+            .field("watch", &self.watch)
+            .field("unexecuted", &self.unexecuted)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the frontier went through since the pacer last marked it.
@@ -47,18 +65,34 @@ enum LeadWatch {
 const UNEXECUTED_RUNWAY_S: f64 = 1.0e9;
 
 impl CommittedFrontier {
-    fn unexecuted() -> Self {
+    pub(crate) fn on_clock(clock: Arc<dyn PlayheadClock>) -> Self {
         Self {
             deadline: Mutex::default(),
             watch: Mutex::default(),
-            unexecuted: true,
+            unexecuted: false,
+            clock,
         }
+    }
+
+    fn unexecuted() -> Self {
+        Self {
+            unexecuted: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn now(&self) -> Instant {
+        self.clock.now()
+    }
+
+    pub(crate) fn clock(&self) -> &dyn PlayheadClock {
+        &*self.clock
     }
 
     pub fn advance_to(&self, deadline: Instant) {
         let mut guard = self.deadline.lock_ok();
         let lead_s = guard.map_or(0.0, |d| {
-            d.saturating_duration_since(Instant::now()).as_secs_f64()
+            d.saturating_duration_since(self.now()).as_secs_f64()
         });
         let mut watch = self.watch.lock_ok();
         *watch = match *watch {
@@ -97,7 +131,7 @@ impl CommittedFrontier {
             return UNEXECUTED_RUNWAY_S;
         }
         self.deadline.lock_ok().map_or(0.0, |d| {
-            d.saturating_duration_since(Instant::now()).as_secs_f64()
+            d.saturating_duration_since(self.now()).as_secs_f64()
         })
     }
 }

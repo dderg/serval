@@ -10,6 +10,9 @@ use motion_pipeline::{Control, DispatchCommand, StreamConfig};
 use trajectory::{ContinuousSegment, NudgeProfile};
 
 mod slow_host;
+mod virtual_clock;
+
+use virtual_clock::VirtualClock;
 
 #[derive(Clone, Default)]
 struct Capture {
@@ -121,7 +124,7 @@ enum Production {
     /// stream's first segment: #983's Pi, planning a slow section after the
     /// lowerer's rest hold was out.
     GapAfterFirstSegments {
-        clock: Arc<host_rt::clock::MockClock>,
+        clock: Arc<VirtualClock>,
         gap: Duration,
     },
 }
@@ -143,7 +146,7 @@ impl Production {
                     motion_pipeline::TrajectoryItem::Seg(_) => {
                         segments_since_rest += 1;
                         if segments_since_rest == 2 {
-                            clock.advance(gap);
+                            clock.sleep(gap);
                         }
                     }
                     motion_pipeline::TrajectoryItem::Parked => segments_since_rest = 0,
@@ -239,10 +242,29 @@ fn mock_router() -> host_rt::passthrough_queue::PassthroughRouter {
     )
 }
 
-fn real_router() -> host_rt::passthrough_queue::PassthroughRouter {
-    host_rt::passthrough_queue::PassthroughRouter::with_clock(
-        Arc::new(host_rt::clock::RealClock) as Arc<dyn host_rt::clock::Clock + Send + Sync>
-    )
+/// A timeline whose playhead, anchor and pacer all run on `clock`.
+fn virtual_timeline(clock: &Arc<VirtualClock>) -> ExecutionTimeline {
+    ExecutionTimeline {
+        frontier: Arc::new(CommittedFrontier::on_clock(Arc::clone(clock) as _)),
+        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
+        router: Arc::new(Mutex::new(
+            host_rt::passthrough_queue::PassthroughRouter::with_clock(Arc::clone(clock) as _),
+        )),
+    }
+}
+
+/// How long a producer the intake refused waits before it offers the move
+/// again.
+const PARKED_RETRY: Duration = Duration::from_millis(1);
+
+fn submit_on(clock: &VirtualClock, h: &StreamWorkerHandle, m: &geometry::Move) {
+    loop {
+        match h.submit_move(m.clone()) {
+            Ok(()) => return,
+            Err(StreamWorkerError::ChannelFull) => clock.sleep(PARKED_RETRY),
+            Err(e) => panic!("submit_move: {e}"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -285,7 +307,7 @@ impl AnchoredSink {
         let runway_s = t0 + t_end - host_now;
         if runway_s > 0.0 {
             self.frontier
-                .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
+                .advance_to(self.frontier.now() + Duration::from_secs_f64(runway_s));
         }
         (t0, epoch)
     }
@@ -399,10 +421,28 @@ fn limited_line(
 #[derive(Clone)]
 struct PacedSink {
     inner: AnchoredSink,
+    clock: Arc<VirtualClock>,
     realtime_factor_bits: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PacedSink {
+    fn on(timeline: &ExecutionTimeline, clock: &Arc<VirtualClock>, realtime_factor: f64) -> Self {
+        Self {
+            inner: AnchoredSink::on(timeline),
+            clock: Arc::clone(clock),
+            realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(
+                realtime_factor.to_bits(),
+            )),
+        }
+    }
+
+    fn recording(self, record: &Arc<DispatchRecorder>) -> Self {
+        Self {
+            inner: self.inner.recording(record),
+            ..self
+        }
+    }
+
     fn set_realtime_factor(&self, realtime_factor: f64) {
         self.realtime_factor_bits
             .store(realtime_factor.to_bits(), Ordering::SeqCst);
@@ -412,7 +452,7 @@ impl PacedSink {
 impl SegmentSink for PacedSink {
     fn dispatch(&mut self, seg: &ContinuousSegment) -> Result<(), DispatchError> {
         let realtime_factor = f64::from_bits(self.realtime_factor_bits.load(Ordering::SeqCst));
-        std::thread::sleep(Duration::from_secs_f64(
+        self.clock.sleep(Duration::from_secs_f64(
             (seg.t_end - seg.t_start) / realtime_factor,
         ));
         self.inner.dispatch(seg)
@@ -437,6 +477,14 @@ impl SegmentSink for PacedSink {
     }
 }
 
+/// How the producer hands on a phase's strokes.
+#[derive(Clone, Copy)]
+enum Feed {
+    AsAdmitted,
+    /// One stroke every so often, however soon the intake admits it.
+    Every(Duration),
+}
+
 /// Back-and-forth strokes — every reversal a rest seam the planner commits
 /// at — streamed for a while with the dispatcher producing at a multiple of
 /// realtime, optionally flushed to rest at the end.
@@ -445,10 +493,15 @@ struct StrokePhase {
     realtime_factor: f64,
     stroke_mm: f64,
     accel: f64,
+    feed: Feed,
     streaming: Duration,
     max_strokes: usize,
     then_flush: bool,
 }
+
+/// A 1 mm stroke at 150 mm/s and 5000 mm/s² plays out in 28 ms: handed
+/// on every 60 ms, the producer runs at under half of realtime.
+const STARVED_FEED: Duration = Duration::from_millis(60);
 
 impl StrokePhase {
     fn healthy(realtime_factor: f64, stroke_mm: f64, streaming: Duration) -> Self {
@@ -456,6 +509,7 @@ impl StrokePhase {
             realtime_factor,
             stroke_mm,
             accel: 5000.0,
+            feed: Feed::AsAdmitted,
             streaming,
             max_strokes: usize::MAX,
             then_flush: false,
@@ -470,20 +524,21 @@ impl StrokePhase {
             realtime_factor: 0.25,
             stroke_mm: 40.0,
             accel: 5000.0,
+            feed: Feed::AsAdmitted,
             streaming: Duration::MAX,
             max_strokes: 1,
             then_flush: true,
         }
     }
 
-    /// Strokes this short and this violent play out in microseconds,
-    /// faster than the pipeline can plan them, so a stream of them falls
-    /// behind its playhead however fast the dispatcher is.
-    fn unplannable(streaming: Duration) -> Self {
+    /// Strokes the producer hands on slower than they play out, so the
+    /// stream falls behind its playhead however fast the dispatcher is.
+    fn starved(streaming: Duration) -> Self {
         Self {
             realtime_factor: f64::INFINITY,
-            stroke_mm: 0.0002,
-            accel: 1.0e9,
+            stroke_mm: 1.0,
+            accel: 5000.0,
+            feed: Feed::Every(STARVED_FEED),
             streaming,
             max_strokes: usize::MAX,
             then_flush: false,
@@ -493,6 +548,14 @@ impl StrokePhase {
     fn next_move(&self, line_no: u32, at: [f64; 3]) -> (geometry::Move, [f64; 3]) {
         let end = [if at[0] > 0.0 { 0.0 } else { self.stroke_mm }, 0.0, 0.0];
         (limited_line(line_no, at, end, 150.0, self.accel), end)
+    }
+
+    /// Hands `m` on as this phase's producer does.
+    fn feed(&self, clock: &VirtualClock, h: &StreamWorkerHandle, m: &geometry::Move) {
+        submit_on(clock, h, m);
+        if let Feed::Every(gap) = self.feed {
+            clock.sleep(gap);
+        }
     }
 }
 
@@ -517,15 +580,9 @@ struct PhaseDrains {
 /// [`super::ingress::InboxFoundEmpty`] makes it prove, so its brakes are
 /// counted but are no failure of the busy path.
 fn drains_after_each_phase(phases: &[StrokePhase]) -> Vec<PhaseDrains> {
-    let timeline = ExecutionTimeline {
-        frontier: Arc::default(),
-        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
-        router: Arc::new(Mutex::new(real_router())),
-    };
-    let sink = PacedSink {
-        inner: AnchoredSink::on(&timeline),
-        realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(1.0_f64.to_bits())),
-    };
+    let clock = VirtualClock::start();
+    let timeline = virtual_timeline(&clock);
+    let sink = PacedSink::on(&timeline, &clock, 1.0);
     let mut h = spawn_on_timeline(
         cfg_cap(1024),
         AxisChainSet::default(),
@@ -542,29 +599,23 @@ fn drains_after_each_phase(phases: &[StrokePhase]) -> Vec<PhaseDrains> {
         sink.set_realtime_factor(phase.realtime_factor);
         let busy_before = busy_drained();
         let idle_before = idle_drained();
-        let started = Instant::now();
+        let started = clock.now();
         let mut strokes = 0;
         while strokes < phase.max_strokes
-            && started.elapsed() < phase.streaming
+            && clock.elapsed_since(started) < phase.streaming
             && busy_drained() == busy_before
             && idle_drained() == idle_before
         {
             let (m, end) = phase.next_move(line_no, at);
-            loop {
-                match h.submit_move(m.clone()) {
-                    Ok(()) => break,
-                    Err(StreamWorkerError::ChannelFull) => std::thread::yield_now(),
-                    Err(e) => panic!("{e}"),
-                }
-            }
+            phase.feed(&clock, &h, &m);
             at = end;
             line_no += 1;
             strokes += 1;
         }
         let flush_s = phase.then_flush.then(|| {
-            let flush_started = Instant::now();
+            let flush_started = clock.now();
             h.flush().unwrap();
-            flush_started.elapsed().as_secs_f64()
+            clock.elapsed_since(flush_started).as_secs_f64()
         });
         drains.push(PhaseDrains {
             parks: sink.inner.parks.load(Ordering::SeqCst),
@@ -604,7 +655,7 @@ fn a_saturated_stream_produced_faster_than_realtime_never_brakes_to_rest() {
 fn a_busy_stream_falling_behind_its_playhead_brakes_before_running_dry() {
     let drains = drains_after_each_phase(&[
         StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500)),
-        StrokePhase::unplannable(Duration::from_secs(10)),
+        StrokePhase::starved(Duration::from_secs(10)),
     ]);
     assert_eq!(
         drains[0].parks, 0,
@@ -2416,17 +2467,11 @@ fn worst_pace_lag_s(stream: &[f64], host: &[f64]) -> (f64, f64) {
 
 #[test]
 fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_playhead() {
-    let timeline = ExecutionTimeline {
-        frontier: Arc::default(),
-        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
-        router: Arc::new(Mutex::new(real_router())),
-    };
+    let clock = VirtualClock::start();
+    let timeline = virtual_timeline(&clock);
     let dir = crate::dispatch_record::tests::scratch_dir("pacer-brakes");
     let record = DispatchRecorder::open(&dir).unwrap();
-    let sink = PacedSink {
-        inner: AnchoredSink::on(&timeline).recording(&record),
-        realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(2.0_f64.to_bits())),
-    };
+    let sink = PacedSink::on(&timeline, &clock, 2.0).recording(&record);
     let mut h = spawn_recorded(
         cfg_cap(1024),
         AxisChainSet::default(),
@@ -2444,21 +2489,16 @@ fn a_producer_slower_than_realtime_brakes_and_resumes_without_overrunning_the_pl
     };
     for phase in [
         StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500)),
-        StrokePhase::unplannable(STARVED_DEADLINE),
+        StrokePhase::starved(STARVED_DEADLINE),
     ] {
         sink.set_realtime_factor(phase.realtime_factor);
-        let started = Instant::now();
-        let starved = phase.realtime_factor.is_infinite();
-        while started.elapsed() < phase.streaming && !(starved && brakes(&h) >= MIN_STARVED_BRAKES)
+        let started = clock.now();
+        let starved = matches!(phase.feed, Feed::Every(_));
+        while clock.elapsed_since(started) < phase.streaming
+            && !(starved && brakes(&h) >= MIN_STARVED_BRAKES)
         {
             let (m, end) = phase.next_move(line_no, at);
-            loop {
-                match h.submit_move(m.clone()) {
-                    Ok(()) => break,
-                    Err(StreamWorkerError::ChannelFull) => std::thread::yield_now(),
-                    Err(e) => panic!("{e}"),
-                }
-            }
+            phase.feed(&clock, &h, &m);
             at = end;
             line_no += 1;
         }
@@ -2566,17 +2606,11 @@ enum ProducerSilence {
 /// brakes the stream to rest on its empty inbox, and returns the causes of
 /// the drains the dispatch record holds.
 fn drain_causes_after_falling_silent(silence: ProducerSilence) -> Vec<u8> {
-    let timeline = ExecutionTimeline {
-        frontier: Arc::default(),
-        anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
-        router: Arc::new(Mutex::new(real_router())),
-    };
+    let clock = VirtualClock::start();
+    let timeline = virtual_timeline(&clock);
     let dir = crate::dispatch_record::tests::scratch_dir(&format!("silent-{silence:?}"));
     let record = DispatchRecorder::open(&dir).unwrap();
-    let sink = PacedSink {
-        inner: AnchoredSink::on(&timeline).recording(&record),
-        realtime_factor_bits: Arc::new(std::sync::atomic::AtomicU64::new(2.0_f64.to_bits())),
-    };
+    let sink = PacedSink::on(&timeline, &clock, 2.0).recording(&record);
     let mut h = spawn_recorded(
         cfg_cap(1024),
         AxisChainSet::default(),
@@ -2588,16 +2622,13 @@ fn drain_causes_after_falling_silent(silence: ProducerSilence) -> Vec<u8> {
     );
     let phase = StrokePhase::healthy(2.0, 1.0, Duration::from_millis(1500));
     let mut at = [0.0_f64, 0.0, 0.0];
-    let started = Instant::now();
+    let started = clock.now();
     for line_no in 1.. {
-        if started.elapsed() >= phase.streaming {
+        if clock.elapsed_since(started) >= phase.streaming {
             break;
         }
         let (m, end) = phase.next_move(line_no, at);
-        while let Err(e) = h.submit_move(m.clone()) {
-            assert!(matches!(e, StreamWorkerError::ChannelFull), "{e}");
-            std::thread::yield_now();
-        }
+        phase.feed(&clock, &h, &m);
         at = end;
     }
     let idle_brakes = || h.links.pacer_drains.idle.load(Ordering::SeqCst);
@@ -2605,16 +2636,16 @@ fn drain_causes_after_falling_silent(silence: ProducerSilence) -> Vec<u8> {
     if silence == ProducerSilence::Declared {
         while let Err(e) = h.declare_wait() {
             assert!(matches!(e, StreamWorkerError::ChannelFull), "{e}");
-            std::thread::yield_now();
+            clock.sleep(PARKED_RETRY);
         }
     }
-    let silent = Instant::now();
+    let silent = clock.now();
     while idle_brakes() == brakes_while_feeding {
         assert!(
-            silent.elapsed() < SILENT_PRODUCER_BRAKE_DEADLINE,
+            clock.elapsed_since(silent) < SILENT_PRODUCER_BRAKE_DEADLINE,
             "the pacer never braked a stream whose producer fell silent"
         );
-        std::thread::sleep(Duration::from_millis(10));
+        clock.sleep(PARKED_RETRY);
     }
     h.flush().unwrap();
     h.shutdown();

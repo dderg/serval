@@ -255,7 +255,7 @@ impl Dispatcher {
     /// Holds `seg` back for the set-off, which starts `starts_in` from now
     /// when `seg` is its first segment.
     fn hold(&mut self, seg: ContinuousSegment, starts_in: Option<Duration>) {
-        let now = Instant::now();
+        let now = self.frontier.now();
         let (since, starts) = match (self.links.set_off_hold(), starts_in) {
             (Some(hold), _) => (hold.since, hold.starts),
             (None, Some(starts_in)) => (now, now + starts_in),
