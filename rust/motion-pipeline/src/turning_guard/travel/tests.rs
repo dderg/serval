@@ -37,11 +37,12 @@ fn extruding_on(cells: impl IntoIterator<Item = i64>) -> ExtrudingCells {
 }
 
 /// How many cells of the cruise the fitted leaders take at least to cover
-/// `path_mm`.
+/// `path_mm`, at most `MAX_CELLS`.
 fn cells_over(path_mm: f64) -> i64 {
-    (1..)
+    const MAX_CELLS: i64 = 1_000_000;
+    (1..=MAX_CELLS)
         .find(|&cells| reading(cells) - reading(0) > path_mm)
-        .unwrap()
+        .expect("the cruise covers the path within MAX_CELLS cells")
 }
 
 fn travel() -> TravelCrawl {
