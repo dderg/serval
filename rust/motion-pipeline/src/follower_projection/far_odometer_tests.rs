@@ -98,7 +98,11 @@ fn step_after_a_long_travel() -> Vec<ContinuousSegment> {
         (
             quintic(
                 [0.0, TRAVEL_MM_S, 0.0],
-                [0.5 * (TRAVEL_MM_S + CRAWL_MM_S) * brake_time, CRAWL_MM_S, 0.0],
+                [
+                    0.5 * (TRAVEL_MM_S + CRAWL_MM_S) * brake_time,
+                    CRAWL_MM_S,
+                    0.0,
+                ],
                 brake_time,
             ),
             brake_time,
