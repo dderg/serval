@@ -23,6 +23,7 @@ MOVES = 40
 SETTLE_S = 10.0
 CLOCK_SYNC_STABLE_PPM = 5.0
 OFFSET_BOUND_S = 50e-6
+ALL_QUEUED_MOVES_PLAY_OUT_S = 120
 
 
 def _records(world):
@@ -41,8 +42,10 @@ def test_live_clock_record_tracks_each_crystal(sim_world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=50 Y=50 Z=50", timeout=10)
     for move in range(MOVES):
         target = 150 if move % 2 == 0 else 50
-        world.gcode_ok(f"G1 X{target} Y{target} F6000", timeout=30)
-    world.gcode_ok("M400", timeout=120)
+        world.gcode_ok(
+            f"G1 X{target} Y{target} F6000", timeout=ALL_QUEUED_MOVES_PLAY_OUT_S
+        )
+    world.gcode_ok("M400", timeout=ALL_QUEUED_MOVES_PLAY_OUT_S)
 
     by_mcu = _records(world)
     assert len(by_mcu) == 2, by_mcu.keys()
