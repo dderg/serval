@@ -59,3 +59,24 @@ def test_heater_setpoints_reset_idle_timeout(sim_world, setpoint):
     status = world.status({"idle_timeout": None, "extruder": None})
     assert status["extruder"]["target"] == TARGETS[-1], status
     assert status["idle_timeout"]["state"] != "Idle", status
+
+
+def test_idle_action_after_print_that_follows_a_long_rest(sim_world):
+    """#993: a print whose start gcode sets a heater after a rest longer than
+    the print must still hand over to idle_timeout's countdown when it ends."""
+    rest_s = 5.0 * IDLE_TIMEOUT_S
+    world = sim_world(_short_idle_timeout, dual_mcu=False)
+    world.gcode_ok("SET_KINEMATIC_POSITION X=100 Y=100 Z=5")
+    world.gcode_ok("G1 X110 F3000")
+    world.gcode_ok("M400", timeout=60)
+    _let_printer_time_pass(world, rest_s)
+
+    world.gcode_ok(f"M104 S{TARGETS[0]}")
+    world.gcode_ok("SET_KINEMATIC_POSITION X=110 Y=100 Z=5")
+    world.gcode_ok("G1 X100 F3000")
+    world.gcode_ok("M400", timeout=60)
+    _let_printer_time_pass(world, IDLE_TIMEOUT_S + 2.0)
+
+    status = world.status({"idle_timeout": None, "extruder": None})
+    assert status["idle_timeout"]["state"] == "Idle", status
+    assert status["extruder"]["target"] == 0.0, status
