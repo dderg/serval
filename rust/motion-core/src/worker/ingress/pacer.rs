@@ -80,6 +80,7 @@ pub(in crate::worker) enum IdleVerdict {
 #[derive(Debug, Default)]
 pub(in crate::worker) struct Pacer {
     undrained_since: Option<Instant>,
+    last_move: Option<Instant>,
     worst_drain_s: f64,
     worst_blind_drop_s: f64,
     busy: BusyRunwayWatch,
@@ -148,6 +149,7 @@ impl Pacer {
 
     pub(in crate::worker) fn note_move(&mut self, now: Instant) {
         self.undrained_since.get_or_insert(now);
+        self.last_move = Some(now);
     }
 
     pub(in crate::worker) fn note_reset(&mut self) {
@@ -177,10 +179,13 @@ impl Pacer {
     }
 
     /// The idle path's decision. With runway beyond the reserve there is
-    /// provably time to wait for more input. Below it a stream just starting
-    /// may wait out its prime: freely while everything committed still ends
-    /// at rest, and once motion is in flight never past the runway one
-    /// slowest brake to rest needs.
+    /// provably time to wait for more input. A stream at rest has no
+    /// playhead to overrun: it brakes only to start moves its producer
+    /// stopped handing on, once none came for the prime (#1003: braking on
+    /// an inbox found empty between two of klippy's moves stopped crawl_s20
+    /// 108 s into its slow section). Motion in flight may wait out the
+    /// prime counted from its first move, never past the runway one slowest
+    /// brake to rest needs.
     pub(in crate::worker) fn idle_verdict(
         &self,
         runway_s: f64,
@@ -191,16 +196,20 @@ impl Pacer {
         if !wait.is_zero() {
             return IdleVerdict::Wait(wait);
         }
-        let Some(since) = self.undrained_since else {
+        let (Some(since), Some(last_move)) = (self.undrained_since, self.last_move) else {
             return IdleVerdict::Brake;
         };
-        let prime_left = Duration::from_secs_f64(STARTUP_PRIME_S)
-            .saturating_sub(now.saturating_duration_since(since));
+        let prime = Duration::from_secs_f64(STARTUP_PRIME_S);
+        if at_rest {
+            let quiet_left = prime.saturating_sub(now.saturating_duration_since(last_move));
+            if quiet_left.is_zero() {
+                return IdleVerdict::Brake;
+            }
+            return IdleVerdict::Wait(quiet_left);
+        }
+        let prime_left = prime.saturating_sub(now.saturating_duration_since(since));
         if prime_left.is_zero() {
             return IdleVerdict::Brake;
-        }
-        if at_rest {
-            return IdleVerdict::Wait(prime_left);
         }
         let spare_runway = whole_nanos(runway_s - self.one_brake_secs());
         if spare_runway.is_zero() {

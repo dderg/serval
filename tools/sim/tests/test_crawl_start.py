@@ -1,8 +1,7 @@
 """A print whose short lead-in runs into a long slow section must start
-without braking the pacer (#1003). #998 fixed the bench abort (#983); here
-the start still shows as a `RunwayExhausted` brake with zero runway before
-the set-off, draining the whole print, the class #1003 records on the bench
-for crawl_s20."""
+without braking the pacer (#983, #1003): a stream at rest brakes only once
+its producer stopped handing moves on, never on an inbox found empty
+between two of them."""
 
 import json
 import pathlib
@@ -14,6 +13,7 @@ from tools.sim import configs
 pytestmark = pytest.mark.needs_elf
 
 GCODE = pathlib.Path(__file__).resolve().parents[1] / "gcode" / "crawl_s5.gcode"
+HOST_COMPUTE_SCALES = ("1.0", "2.0", "3.0")
 
 
 class BrakeAtStart(AssertionError):
@@ -21,10 +21,11 @@ class BrakeAtStart(AssertionError):
 
 
 @pytest.mark.expected_seconds(30)
-@pytest.mark.xfail(strict=True, raises=BrakeAtStart, reason="#1003")
+@pytest.mark.parametrize("compute_scale", HOST_COMPUTE_SCALES)
 def test_a_slow_section_after_a_short_lead_in_starts_without_a_pacer_brake(
-    sim_world, monkeypatch, tmp_path
+    sim_world, monkeypatch, tmp_path, compute_scale
 ):
+    monkeypatch.setenv("SERVAL_HOST_COMPUTE_SCALE", compute_scale)
     monkeypatch.setenv("RUST_LOG", "info,motion_core::worker::ingress=debug")
     gcode = tmp_path / GCODE.name
     gcode.write_text(GCODE.read_text())
