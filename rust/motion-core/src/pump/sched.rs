@@ -94,11 +94,11 @@ fn merged_hold_span(last: &ClockedMotorSpan, next: &ClockedMotorSpan) -> Option<
     }
     let merged_secs =
         (last.stream_t_end - last.stream_t_start) + (next.stream_t_end - next.stream_t_start);
-    if merged_secs > MAX_SPAN_SECS {
-        return None;
-    }
     let t_start = last.stream_t_start;
     let t_end = t_start + merged_secs;
+    if t_end - t_start > MAX_SPAN_SECS {
+        return None;
+    }
     let groups: Arc<[MotorGroup]> = Arc::from(vec![MotorGroup::Independent(MotorTerm {
         source_axis: last.signal.first_source_axis(),
         axis: ContinuousAxis::Hold {

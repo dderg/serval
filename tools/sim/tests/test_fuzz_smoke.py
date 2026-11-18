@@ -34,11 +34,9 @@ SMOKE_SEEDS = (
 
 
 @pytest.mark.parametrize("seed", SMOKE_SEEDS)
-def test_fuzz_seed(seed, tmp_path):
+def test_fuzz_seed(seed, tmp_path, fuzz_keep_dir):
     chosen = scenario.generate(seed)
-    result = execute.run_scenario(
-        chosen, tmp_path / "world", tmp_path / "failure"
-    )
+    result = execute.run_scenario(chosen, tmp_path / "world", fuzz_keep_dir)
     assert result["status"] == execute.PASS, (
         f"{scenario.describe(chosen)}\n{result['signature']}\n"
         f"{result['evidence']}\nreplay: tools/sim/run.sh fuzz --seed {seed}"

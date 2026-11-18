@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import pathlib
-import shutil
 import time
 import traceback
 from typing import Optional
@@ -66,17 +65,6 @@ def _run_session(chosen: Scenario, world, notes: list) -> tuple:
             session.stop_watchers()
 
 
-def _save_world(world, directory: pathlib.Path) -> None:
-    target = directory / WORLD_DIR
-    if world.log_dir.exists():
-        shutil.copytree(world.log_dir, target / "logs", dirs_exist_ok=True)
-    config = world.workdir / "printer.cfg"
-    if config.exists():
-        shutil.copy2(config, target / config.name)
-    for gcode in world.gcode_dir.glob("*.gcode"):
-        shutil.copy2(gcode, target / gcode.name)
-
-
 def run_scenario(
     chosen: Scenario, scratch: pathlib.Path, keep: Optional[pathlib.Path]
 ) -> dict:
@@ -107,7 +95,7 @@ def run_scenario(
         violations = ([memory] if memory else []) + checks.ordered(step, logged)
         notes.append(f"klippy peak RSS {watch.peak_mb:.0f} MB")
         if keep is not None and (violations or tapped):
-            _save_world(world, keep)
+            world.save_logs(keep / WORLD_DIR)
     finally:
         world.shutdown()
     return _result(

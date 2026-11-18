@@ -16,6 +16,7 @@ import json
 import mmap
 import os
 import pathlib
+import shutil
 import signal
 import socket
 import struct
@@ -1541,6 +1542,16 @@ class SimWorld:
             for line in events.splitlines()[-80:]:
                 print(line)
         print("=== end sim diagnostics ===")
+
+    def save_logs(self, target: pathlib.Path) -> None:
+        if self.log_dir.exists():
+            shutil.copytree(self.log_dir, target / "logs", dirs_exist_ok=True)
+        target.mkdir(parents=True, exist_ok=True)
+        config = self.workdir / "printer.cfg"
+        if config.exists():
+            shutil.copy2(config, target / config.name)
+        for gcode in self.gcode_dir.glob("*.gcode"):
+            shutil.copy2(gcode, target / gcode.name)
 
     # ------------------------------------------------------- teardown
 
