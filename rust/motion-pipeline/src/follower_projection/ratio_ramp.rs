@@ -3758,7 +3758,7 @@ impl RestSide {
 
 /// The speed under which the leaders rest: they cover no more than
 /// [`REST_TARGET_MM`], the width field's rest, between two width nodes.
-const REST_SPEED_MM_S: f64 = REST_TARGET_MM / NODE_SPACING_S;
+pub(super) const REST_SPEED_MM_S: f64 = REST_TARGET_MM / NODE_SPACING_S;
 
 /// The path the leaders of a leg cover from its start, by time, read off
 /// the odometer whose arc its table laid.

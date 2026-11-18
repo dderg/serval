@@ -26,7 +26,7 @@ mod enclosure;
 mod extrude_only;
 mod ratio_ramp;
 mod rest;
-use ratio_ramp::{RampLeg, RatioSmoothing};
+use ratio_ramp::{REST_SPEED_MM_S, RampLeg, RatioSmoothing};
 
 const INTEGRAL_TOL_MM: f64 = 1e-10;
 const ODOMETER_RATE_TOL_MM_S: f64 = 1e-6;
@@ -2781,11 +2781,11 @@ impl OdometerLeaves {
 const REST_POINT_PROBES_PER_INTERVAL: usize = 8;
 const REST_POINT_REFINEMENTS: usize = 64;
 
-/// When the shaped leaders of `shaped` first stop closing on where the raw
-/// ones of `raw` rest: the first probe their distance from it grows after,
-/// refined by golden-section search over the probes either side. The fit's
-/// back-and-forth around the rest point after that changes nothing of how
-/// they arrived.
+/// When the shaped leaders of `shaped` arrive at where the raw ones of
+/// `raw` rest: from the first probe their distance from it grows after,
+/// refined by golden-section search over the probes either side, on to
+/// where they rest ([`first_rest_from`]). The fit's back-and-forth around
+/// the rest point after that changes nothing of how they arrived.
 fn arrival_at_rest(raw: &ContinuousSegment, shaped: &ContinuousSegment, leaders: &[usize]) -> f64 {
     let rest_at = leader_support(raw, leaders).0;
     let distance_sq = |t: f64| {
@@ -2827,7 +2827,43 @@ fn arrival_at_rest(raw: &ContinuousSegment, shaped: &ContinuousSegment, leaders:
             lo = left;
         }
     }
-    0.5 * (lo + hi)
+    first_rest_from(shaped, leaders, &probes, 0.5 * (lo + hi))
+}
+
+/// The first time from `from` on that the shaped leaders of `shaped` rest
+/// ([`REST_SPEED_MM_S`]), bisected between the probes around it; `from`
+/// where no probe finds them resting. Axes shaped unlike each other pass
+/// the rest point still moving and wander back to it: a ratio step there,
+/// and the rest valley opening at it, stepped the advanced follower's
+/// velocity by `k·r·W'·ṡ²` (#946).
+fn first_rest_from(shaped: &ContinuousSegment, leaders: &[usize], probes: &[f64], from: f64) -> f64 {
+    let rests = |t: f64| {
+        let speed_sq: f64 = leaders
+            .iter()
+            .map(|&axis| axis_pva(&shaped.axes[axis], t).1.powi(2))
+            .sum();
+        speed_sq <= REST_SPEED_MM_S * REST_SPEED_MM_S
+    };
+    if rests(from) {
+        return from;
+    }
+    let later = probes.iter().copied().filter(|&t| t > from);
+    let Some(resting) = later.clone().find(|&t| rests(t)) else {
+        return from;
+    };
+    let (mut moving, mut rest) = (
+        later.take_while(|&t| t < resting).last().unwrap_or(from),
+        resting,
+    );
+    for _ in 0..REST_POINT_REFINEMENTS {
+        let mid = 0.5 * (moving + rest);
+        if rests(mid) {
+            rest = mid;
+        } else {
+            moving = mid;
+        }
+    }
+    rest
 }
 
 /// What ingest read off one shaped segment's leaders that its source fit
